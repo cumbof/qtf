@@ -63,7 +63,7 @@ QTF uses a classical energy function to guide a VQE Ansatz. The energy landscape
 The total energy $E_{total}$ is minimized by the classical optimizer (COBYLA/SLSQP):
 
 Component | Description
------------------------
+----------|------------
 Solvation | Implicit solvent model based on burial fraction (SASA).
 Electrostatics | Coulomb interactions with force-field specific partial charges.
 H-Bonding | Vectorized orientation-dependent potential ("Super-Glue").
