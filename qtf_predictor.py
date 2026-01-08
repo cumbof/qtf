@@ -20,7 +20,7 @@ def __main__():
 
     parser.add_argument('--reference', default=None, help='reference structure PDB ID for comparison')
     
-    parser.add_argument('--forcefield', default="amber", choices=list("amber", "opls", "charmm"), help='choice of force field for scoring')
+    parser.add_argument('--forcefield', default="amber", choices=list("amber", "opls", "charmm", "all"), help='choice of force field for scoring')
     
     parser.add_argument('--mode', default="predict_and_compare", choices=list("predict_and_compare", "predict_only"), help='which mode to run script in')
 
@@ -37,7 +37,10 @@ def __main__():
         print(f"--- DIAGNOSING BACKBONE: {sequence} ---")
 
         # 2. Initialize Folder & Manager
-        folder = runner.QuantumBiophysicsFolder(sequence, force_field=args.forcefield)
+        if args.forcefield=="all":
+            folder = runner.QuantumBiophysicsFolder(sequence, force_field=[ff for ff in list("amber", "opls", "charmm")])
+        else:
+            folder = runner.QuantumBiophysicsFolder(sequence, force_field=args.forcefield)
         manager = runner.EnsembleFoldingManager(folder)
 
         # 3. Run Ensemble (Using the Smart Initialization) 
@@ -112,7 +115,7 @@ def __main__():
 
         # 3. Run Ensemble (Using the Smart Initialization) 
         # We run 3 replicas with mixed strategies (Helix, Sheet, Random)
-        manager.run_ensemble(n_runs=3, prime_strategy='mixed')
+        manager.run_ensemble(n_runs=args.ensemble_size, prime_strategy=args.prime_strategy)
 
         # 4. Get Best Result
         best_result = manager.evaluate_best()
