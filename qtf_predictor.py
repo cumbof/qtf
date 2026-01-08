@@ -1,11 +1,13 @@
 ### general imports
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import argparse
 import urllib.request
 import os
 import time
+from datetime import datetime
 
 ### qtf imports
 import QTF.evaluator as evaluator
@@ -13,6 +15,7 @@ import QTF.runner as runner
 
 def __main__():
     time_start = time.time()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     parser = argparse.ArgumentParser()
 
@@ -20,32 +23,51 @@ def __main__():
 
     parser.add_argument('--reference', default=None, help='reference structure PDB ID for comparison')
     
-    parser.add_argument('--forcefield', default="amber", choices=list("amber", "opls", "charmm", "all"), help='choice of force field for scoring')
+    parser.add_argument('--forcefield', default="amber", choices=["amber", "opls", "charmm", "all"], help='choice of force field for scoring')
     
-    parser.add_argument('--mode', default="predict_and_compare", choices=list("predict_and_compare", "predict_only"), help='which mode to run script in')
+    parser.add_argument('--mode', default="predict_and_compare", choices=["predict_and_compare", "predict_only"], help='which mode to run script in')
 
     parser.add_argument('--ensemble_size', default=3, type=int, help='ensemble size')
     
-    parser.add_argument('--prime_strategy', default="Random", choices=list("Random", "mixed", "Helix", "Sheet"), help='prime strategy for initialization')
+    parser.add_argument('--prime_strategy', default="Random", choices=["Random", "mixed", "Helix", "Sheet"], help='prime strategy for initialization')
 
     args=parser.parse_args()
 
+    # set the arguments that are passed in, which can then be applied to both modes
+    force_field = args.forcefield
+    reference_structure_pdb_id = args.reference
+    sequence = args.predict
+    ensemble_size = args.ensemble_size
+    prime_strategy = args.prime_strategy
 
+    # set the output directory and change into it
+    os.mkdir("outputs") if not os.path.exists("outputs") else None
+    job_output_dir = os.mkdir("outputs" + f"/{sequence}_{force_field}_{timestamp}")
+    if job_output_dir is not None:
+        # Create the directory if it doesn't exist (including any necessary parent directories)
+        os.makedirs(job_output_dir, exist_ok=True)
+        # Change the current working directory
+        os.chdir(job_output_dir)
+        print(f"Changed directory to: {os.getcwd()}")
+    else:
+        print("Error: job_output_dir variable is None. Cannot change directory.")
+        # Handle the error or exit the script gracefully
+
+    # run the appropriate mode
     if args.mode == "predict_and_compare":
         # 1. Setup Chignolin Sequence
-        sequence = args.predict 
         print(f"--- DIAGNOSING BACKBONE: {sequence} ---")
 
         # 2. Initialize Folder & Manager
-        if args.forcefield=="all":
+        if force_field=="all":
             folder = runner.QuantumBiophysicsFolder(sequence, force_field=[ff for ff in list("amber", "opls", "charmm")])
         else:
-            folder = runner.QuantumBiophysicsFolder(sequence, force_field=args.forcefield)
+            folder = runner.QuantumBiophysicsFolder(sequence, force_field=force_field)
         manager = runner.EnsembleFoldingManager(folder)
 
         # 3. Run Ensemble (Using the Smart Initialization) 
         # We run 3 replicas with mixed strategies (Helix, Sheet, Random)
-        manager.run_ensemble(n_runs=args.ensemble_size, prime_strategy=args.prime_strategy)
+        manager.run_ensemble(n_runs=ensemble_size, prime_strategy=prime_strategy)
 
         # 4. Get Best Result
         best_result = manager.evaluate_best()
@@ -54,7 +76,6 @@ def __main__():
 
         # 5. Extract Backbone (CA) for Validation
         # Filter labels where atom name is 'CA'
-        reference_structure_pdb_id = args.reference
         pred_ca = np.array([final_coords[i] for i, lbl in enumerate(folder.static_labels) if lbl[1] == 'CA'])
         true_ca = evaluator.get_ground_truth_backbone(reference_structure_pdb_id)
 
@@ -74,6 +95,30 @@ def __main__():
         # 7. RMSD & Dual Plots
         rmsd, aligned_pred = evaluator.kabsch_backbone_align(pred_ca, true_ca)
         print(f"\nBackbone RMSD: {rmsd:.3f} Å")
+
+        summary_data = [
+            {
+                "Metric": "End-to-End Dist",
+                "Predicted (Å)": p_e2e,
+                "Target (Å)": t_e2e,
+                "Status": "EXPANDED" if p_e2e > t_e2e + 5 else "GOOD"
+            },
+            {
+                "Metric": "Radius of Gyration",
+                "Predicted (Å)": p_rg,
+                "Target (Å)": t_rg,
+                "Status": "PUFFY" if p_rg > t_rg + 2 else "COMPACT"
+            },
+            {
+                "Metric": "Relative backbone RMSD",
+                "Predicted (Å)": f"{rmsd:.3f}",
+                "Status": "GOOD" if rmsd < 2.0 else "BAD"
+            }
+        ]
+
+        df = pd.DataFrame(summary_data)
+        df.to_csv(f"Backbone_Metrics_Summary.csv", index=False)
+
 
         fig = plt.figure(figsize=(16, 7))
 
@@ -102,20 +147,20 @@ def __main__():
         ax2.grid(True, alpha=0.3)
 
         plt.tight_layout()
-        plt.show()
+        #plt.show()
+        plt.savefig(f"Backbone_Diagnosis_{sequence}_{force_field}_{timestamp}.png", dpi=600)
 
     elif args.mode == "predict_only":
         # 1. Setup Chignolin Sequence
-        sequence = args.predict 
         print(f"--- PREDICTING BACKBONE: {sequence} ---")
 
         # 2. Initialize Folder & Manager
-        folder = runner.QuantumBiophysicsFolder(sequence, force_field=args.forcefield)
+        folder = runner.QuantumBiophysicsFolder(sequence, force_field=force_field)
         manager = runner.EnsembleFoldingManager(folder)
 
         # 3. Run Ensemble (Using the Smart Initialization) 
         # We run 3 replicas with mixed strategies (Helix, Sheet, Random)
-        manager.run_ensemble(n_runs=args.ensemble_size, prime_strategy=args.prime_strategy)
+        manager.run_ensemble(n_runs=ensemble_size, prime_strategy=prime_strategy)
 
         # 4. Get Best Result
         best_result = manager.evaluate_best()
