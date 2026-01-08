@@ -15,29 +15,18 @@ def __main__():
     time_start = time.time()
 
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-                        '--predict', default=None,
-                        help='target sequence to predict')
 
-    parser.add_argument(
-                        '--reference', default=None,
-                        help='reference structure PDB ID for comparison')
-    
-    parser.add_argument(
-                        '--forcefield', default="amber",
-                        help='choice of force field for scoring')
-    
-    parser.add_argument(
-                        '--mode', default="predict_and_compare",
-                        help='which mode to run script in')
+    parser.add_argument('--predict', default=None, help='target sequence to predict')
 
-    parser.add_argument(
-                        '--ensemble_size', default=3, type=int,
-                        help='ensemble size')
+    parser.add_argument('--reference', default=None, help='reference structure PDB ID for comparison')
     
-    parser.add_argument(
-                        '--prime_strategy', default="Random",
-                        help='prime strategy for initialization')
+    parser.add_argument('--forcefield', default="amber", choices=list("amber", "opls", "charmm"), help='choice of force field for scoring')
+    
+    parser.add_argument('--mode', default="predict_and_compare", choices=list("predict_and_compare", "predict_only"), help='which mode to run script in')
+
+    parser.add_argument('--ensemble_size', default=3, type=int, help='ensemble size')
+    
+    parser.add_argument('--prime_strategy', default="Random", choices=list("Random", "mixed", "Helix", "Sheet"), help='prime strategy for initialization')
 
     args=parser.parse_args()
 
