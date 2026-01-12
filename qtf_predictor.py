@@ -3,10 +3,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
-import argparse
 import urllib.request
-import os
-import time
+import os, time, json, argparse
 from datetime import datetime
 
 ### qtf imports
@@ -14,14 +12,23 @@ import QTF.evaluator as evaluator
 import QTF.runner as runner
 
 def __main__():
+    
+    # start tracking time
     time_start = time.time()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    # parse command line arguments
+    # example usage: python qtf_predictor.py --predict "YYDPETGTWY" --reference_structure "5AWL" --average_reference_backbone False --forcefield "amber" --mode "predict_and_compare" --ensemble_size 3 --prime_strategy "Random"
     parser = argparse.ArgumentParser()
 
     parser.add_argument('--predict', default=None, help='target sequence to predict')
 
-    parser.add_argument('--reference', default=None, help='reference structure PDB ID for comparison')
+    parser.add_argument('--reference_structure', default=None, help='reference structure PDB ID for comparison')
+    
+    parser.add_argument('--average_reference_backbone', 
+                        default=False,
+                        type=bool,
+                        help='How to select backbone from reference structure, either first model or average for NMR ensembles. Defaults to first model, which automatically works with Xray structures.')
     
     parser.add_argument('--forcefield', default="amber", choices=["amber", "opls", "charmm", "all"], help='choice of force field for scoring')
     
@@ -35,7 +42,8 @@ def __main__():
 
     # set the arguments that are passed in, which can then be applied to both modes
     force_field = args.forcefield
-    reference_structure_pdb_id = args.reference
+    reference_structure_pdb_id = args.reference_structure
+    average_reference_backbone_mode = args.average_reference_backbone
     sequence = args.predict
     ensemble_size = args.ensemble_size
     prime_strategy = args.prime_strategy
@@ -77,7 +85,7 @@ def __main__():
         # 5. Extract Backbone (CA) for Validation
         # Filter labels where atom name is 'CA'
         pred_ca = np.array([final_coords[i] for i, lbl in enumerate(folder.static_labels) if lbl[1] == 'CA'])
-        true_ca = evaluator.get_ground_truth_backbone(reference_structure_pdb_id)
+        true_ca = evaluator.get_ground_truth_backbone(reference_structure_pdb_id, average_reference_backbone_mode)
 
         # Truncate to match lengths (in case of differing caps)
         n = min(len(pred_ca), len(true_ca))
@@ -87,6 +95,7 @@ def __main__():
         p_e2e, p_rg = evaluator.calculate_physics_metrics(pred_ca)
         t_e2e, t_rg = evaluator.calculate_physics_metrics(true_ca)
 
+        print(f"Ensemble size is {ensemble_size}")
         print(f"\nMetric             | Predicted | Target (5AWL) | Status")
         print(f"-------------------|-----------|---------------|-------")
         print(f"End-to-End Dist    | {p_e2e:6.2f} Å | {t_e2e:6.2f} Å      | {'EXPANDED' if p_e2e > t_e2e + 5 else 'GOOD'}")
@@ -95,30 +104,6 @@ def __main__():
         # 7. RMSD & Dual Plots
         rmsd, aligned_pred = evaluator.kabsch_backbone_align(pred_ca, true_ca)
         print(f"\nBackbone RMSD: {rmsd:.3f} Å")
-
-        summary_data = [
-            {
-                "Metric": "End-to-End Dist",
-                "Predicted (Å)": p_e2e,
-                "Target (Å)": t_e2e,
-                "Status": "EXPANDED" if p_e2e > t_e2e + 5 else "GOOD"
-            },
-            {
-                "Metric": "Radius of Gyration",
-                "Predicted (Å)": p_rg,
-                "Target (Å)": t_rg,
-                "Status": "PUFFY" if p_rg > t_rg + 2 else "COMPACT"
-            },
-            {
-                "Metric": "Relative backbone RMSD",
-                "Predicted (Å)": f"{rmsd:.3f}",
-                "Status": "GOOD" if rmsd < 2.0 else "BAD"
-            }
-        ]
-
-        df = pd.DataFrame(summary_data)
-        df.to_csv(f"Backbone_Metrics_Summary.csv", index=False)
-
 
         fig = plt.figure(figsize=(16, 7))
 
@@ -170,7 +155,54 @@ def __main__():
         print(f"\nPrediction Complete. Best run ID: {best_result['id']}")
 
     time_end = time.time()
-    print(f"Total Execution Time: {time_end - time_start:.2f} seconds")
+    runtime = f"{((time_end - time_start) / 60):.2f}"
+    print(f"Total execution time for generating models: {runtime} minutes")
+    # --- build a single record for THIS run ---
+    summary_data = {
+        # metrics
+        "End-to-End Dist (Å)": p_e2e,
+        "End-to-End Target (Å)": t_e2e,
+        "End-to-End Status": "EXPANDED" if p_e2e > t_e2e + 5 else "GOOD",
+
+        "Rg (Å)": p_rg,
+        "Rg Target (Å)": t_rg,
+        "Rg Status": "PUFFY" if p_rg > t_rg + 2 else "COMPACT",
+
+        "Backbone RMSD (Å)": float(f"{rmsd:.3f}"),
+        "RMSD Status": "GOOD" if rmsd < 2.0 else "BAD",
+
+        # run-level meta/settings
+        "Runtime (minutes)": runtime,
+        "Ensemble Size": ensemble_size,
+        "Sequence": sequence,
+        "mode": args.mode,
+        "Reference Structure": (reference_structure_pdb_id if reference_structure_pdb_id is not None and args.mode!="predict_only" else None),
+        "Force Field": force_field,
+        "Prime Strategy": prime_strategy,
+    }
+    df = pd.DataFrame([summary_data])
+    df.to_csv("summary_results.csv", index=False)
+
+    with open("summary_results.json", "w") as f:
+        json.dump(summary_data, f, indent=4)
+
+
+    ## now we can start appending an onto a master results file in the outputs directory    
+    # first, append the master dataframe
+    master_csv_path = "outputs/master_summary_results.csv"
+    
+    try:
+        df_all = pd.read_csv(master_csv_path)
+        df_all = pd.concat([df_all, df], ignore_index=True)
+    except FileNotFoundError:
+        df_all = df
+
+    df_all.to_csv(master_csv_path, index=False)
+    
+    # next, append the master json file 
+    master_json_path = "outputs/master_summary_results.jsonl"
+    with open(master_json_path, "a") as f:
+        f.write(json.dumps(summary_data) + "\n")
 
 if __name__ == "__main__":
     __main__()  
