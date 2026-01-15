@@ -24,26 +24,21 @@ pip install numpy scipy matplotlib qiskit
 Clone the repository:
 
 ```
-git clone [https://github.com/your-username/logarithmic-off-lattice-folding.git](https://github.com/your-username/logarithmic-off-lattice-folding.git)
-cd logarithmic-off-lattice-folding
+git clone [https://github.com/cumbof/QTF.git](https://github.com/cumbof/QTF.git)
+cd QTF
 ```
 ## Quick Start
 
 Predicting the structure of a small peptide (e.g., Chignolin segment or custom sequence) takes just a few lines of code.
 
 ```python
-from quantum_biophysics_folder import QuantumBiophysicsFolder
-
 # 1. Initialize the folder with a sequence and force field
 # Options for force_field: 'charmm' (default), 'amber', 'opls'
-folder = QuantumBiophysicsFolder(
-    sequence="MAGVLS", 
-    force_field="amber"
-)
+folder = QuantumBiophysicsFolder(equence="MAGVLS", force_field="amber")
 
 # 2. Run the folding simulation
 # The method uses a multi-stage curriculum (Collapse -> Refine -> Relax)
-coords, labels, bonds = folder.fold(max_iter=2000)
+coords, labels, bonds, _, _, _ = folder.fold(max_iter=2000)
 
 # 3. Save the result to PDB
 # Viewable in PyMOL, Chimera, or VMD
