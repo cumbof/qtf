@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 ### general imports
 import numpy as np
 import pandas as pd
@@ -12,6 +14,22 @@ import QTF.evaluator as evaluator
 import QTF.runner as runner
 
 def __main__():
+    '''
+    This function serves as the main entry point for running Quantum Torsion Folder.  This method works by encoding 
+    a protein's dihedral/torsion angles into qubit phases, then optimizing these angles using a quantum-inspired optimization 
+    algorithm. The final output is a predicted 3D structure of the protein based on the optimized angles.
+    
+    The optimization is driven by a Hamiltonian that incorporates various energy terms derived from classical force fields,
+    such as Amber, OPLS, and CHARMM. These force fields provide the necessary parameters to evaluate the energy of a given conformation, 
+    allowing the algorithm to search for low-energy states that correspond to physically plausible protein structures.  
+    
+    Knowledge of Ramachandran plots and secondary structure propensities is also integrated into the optimization process,
+    guiding the search towards conformations that are more likely to be observed in nature. 
+      
+    The script can operate in two modes: "predict_and_compare" and "predict_only". The former is used to predict the 
+    3D structure of a given amino acid sequence and compare it against a reference structure, while the latter focuses 
+    solely on predicting the structure without any comparison.
+    '''
     
     # start tracking time
     time_start = time.time()
@@ -181,9 +199,9 @@ def __main__():
         "Prime Strategy": prime_strategy,
     }
     df = pd.DataFrame([summary_data])
-    df.to_csv("summary_results.csv", index=False)
+    df.to_csv(os.path.join(job_output_dir, "summary_results.csv"), index=False)
 
-    with open("summary_results.json", "w") as f:
+    with open(os.path.join(job_output_dir, "summary_results.json"), "w") as f:
         json.dump(summary_data, f, indent=4)
 
 

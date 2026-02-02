@@ -1016,3 +1016,111 @@ class EnsembleFoldingManager:
             StabilityAnalyzer.analyze_convergence(self.results)
 
         return best
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+import urllib.request
+import os
+
+def get_ground_truth_backbone(pdb_id="5AWL"):
+    url = f"https://files.rcsb.org/download/{pdb_id}.pdb"
+    filename = f"{pdb_id}.pdb"
+    if not os.path.exists(filename): urllib.request.urlretrieve(url, filename)
+    coords_ca = []
+    with open(filename, 'r') as f:
+        for line in f:
+            if line.startswith("ENDMDL"): break
+            if line.startswith("ATOM") and "CA" in line[12:16]:
+                coords_ca.append([float(line[30:38]), float(line[38:46]), float(line[46:54])])
+    return np.array(coords_ca)
+
+def calculate_physics_metrics(coords):
+    end_to_end = np.linalg.norm(coords[0] - coords[-1])
+    centroid = np.mean(coords, axis=0)
+    rg = np.sqrt(np.mean(np.sum((coords - centroid)**2, axis=1)))
+    return end_to_end, rg
+
+def kabsch_backbone_align(P, Q):
+    # Specialized Kabsch for Plotting (Returns Aligned Coords)
+    P_c = P - np.mean(P, axis=0)
+    Q_c = Q - np.mean(Q, axis=0)
+    H = np.dot(P_c.T, Q_c)
+    U, S, Vt = np.linalg.svd(H)
+    R = np.dot(Vt.T, U.T) # R = V U^T
+    if np.linalg.det(R) < 0: 
+        Vt[2,:] *= -1; R = np.dot(Vt.T, U.T)
+    aligned_P = np.dot(P_c, R) + np.mean(Q, axis=0) # Re-center on Q
+    diff = aligned_P - Q
+    rmsd = np.sqrt(np.mean(np.sum(diff**2, axis=1)))
+    return rmsd, aligned_P
+
+if __name__ == "__main__":
+    # 1. Setup Chignolin Sequence
+    sequence = "YYDPETGTWY" 
+    print(f"--- DIAGNOSING BACKBONE: {sequence} ---")
+    
+    # 2. Initialize Folder & Manager
+    folder = QuantumBiophysicsFolder(sequence, force_field="amber")
+    manager = EnsembleFoldingManager(folder)
+    
+    # 3. Run Ensemble (Using the Smart Initialization) 
+    # We run 3 replicas with mixed strategies (Helix, Sheet, Random)
+    manager.run_ensemble(n_runs=3, prime_strategy='mixed')
+    
+    # 4. Get Best Result
+    best_result = manager.evaluate_best()
+    final_coords = best_result['coords']
+    tracker = best_result['tracker']
+    
+    # 5. Extract Backbone (CA) for Validation
+    # Filter labels where atom name is 'CA'
+    pred_ca = np.array([final_coords[i] for i, lbl in enumerate(folder.static_labels) if lbl[1] == 'CA'])
+    true_ca = get_ground_truth_backbone("5AWL")
+    
+    # Truncate to match lengths (in case of differing caps)
+    n = min(len(pred_ca), len(true_ca))
+    pred_ca = pred_ca[:n]; true_ca = true_ca[:n]
+    
+    # 6. Calculate Metrics
+    p_e2e, p_rg = calculate_physics_metrics(pred_ca)
+    t_e2e, t_rg = calculate_physics_metrics(true_ca)
+    
+    print(f"\nMetric             | Predicted | Target (5AWL) | Status")
+    print(f"-------------------|-----------|---------------|-------")
+    print(f"End-to-End Dist    | {p_e2e:6.2f} Å | {t_e2e:6.2f} Å      | {'EXPANDED' if p_e2e > t_e2e + 5 else 'GOOD'}")
+    print(f"Radius of Gyration | {p_rg:6.2f} Å | {t_rg:6.2f} Å      | {'PUFFY' if p_rg > t_rg + 2 else 'COMPACT'}")
+    
+    # 7. RMSD & Dual Plots
+    rmsd, aligned_pred = kabsch_backbone_align(pred_ca, true_ca)
+    print(f"\nBackbone RMSD: {rmsd:.3f} Å")
+    
+    fig = plt.figure(figsize=(16, 7))
+    
+    # PLOT 1: 3D Structure Comparison 
+    ax1 = fig.add_subplot(121, projection='3d')
+    ax1.plot(aligned_pred[:,0], aligned_pred[:,1], aligned_pred[:,2], '-o', c='blue', label='Prediction (Best)', lw=2)
+    ax1.plot(true_ca[:,0], true_ca[:,1], true_ca[:,2], '--o', c='red', label='Target (5AWL)', alpha=0.7)
+    ax1.set_title(f"3D Structure Alignment\nRMSD: {rmsd:.2f} Å", fontsize=12, fontweight='bold')
+    ax1.legend()
+    
+    # PLOT 2: Energy Landscape of the Winner
+    ax2 = fig.add_subplot(122)
+    energies = np.array(tracker.history)
+    energies = np.clip(energies, -1000, 2000) # Clip visuals
+    ax2.plot(energies, color='#2c3e50', lw=1.5, label='Hamiltonian Energy')
+    
+    colors = ['#e74c3c', '#f1c40f', '#0f26f1']
+    for i, (idx, name) in enumerate(tracker.stage_markers):
+        if idx < len(energies):
+            ax2.axvline(x=idx, color=colors[i], linestyle='--', alpha=0.8)
+            ax2.text(idx + 10, max(energies)*0.9, name, color=colors[i], fontweight='bold')
+            
+    ax2.set_title(f"Optimization Landscape (Run #{best_result['id']})", fontsize=12, fontweight='bold')
+    ax2.set_xlabel("Evaluations")
+    ax2.set_ylabel("Energy")
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
