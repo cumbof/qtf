@@ -92,17 +92,3 @@ def calculate_physics_metrics(coords):
     rg = np.sqrt(np.mean(np.sum((coords - centroid)**2, axis=1)))
     return end_to_end, rg
 
-def kabsch_backbone_align(P, Q):
-    # Specialized Kabsch for Plotting (Returns Aligned Coords)
-    P_c = P - np.mean(P, axis=0)
-    Q_c = Q - np.mean(Q, axis=0)
-    H = np.dot(P_c.T, Q_c)
-    U, S, Vt = np.linalg.svd(H)
-    R = np.dot(Vt.T, U.T) # R = V U^T
-    if np.linalg.det(R) < 0: 
-        Vt[2,:] *= -1; R = np.dot(Vt.T, U.T)
-    aligned_P = np.dot(P_c, R) + np.mean(Q, axis=0) # Re-center on Q
-    diff = aligned_P - Q
-    rmsd = np.sqrt(np.mean(np.sum(diff**2, axis=1)))
-    return rmsd, aligned_P
-

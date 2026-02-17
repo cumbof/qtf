@@ -62,7 +62,7 @@ class StabilityAnalyzer:
         diff = P_rotated - Q_centered
         rms = np.sqrt(np.mean(np.sum(diff**2, axis=1)))
         
-        return rms
+        return rms, P_rotated + np.mean(Q, axis=0) # Return RMSD and Aligned Coords
 
     @staticmethod
     def analyze_convergence(results, top_k=5):
@@ -92,7 +92,7 @@ class StabilityAnalyzer:
                     rmsd_matrix[i, j] = 0.0
                 else:
                     # Note: Using all atoms for RMSD. Ideally filter for 'CA' only.
-                    rmsd = StabilityAnalyzer.kabsch_rmsd(best_k[i]['coords'], best_k[j]['coords'])
+                    rmsd, _ = StabilityAnalyzer.kabsch_rmsd(best_k[i]['coords'], best_k[j]['coords'])
                     rmsd_matrix[i, j] = rmsd
                 
                 print(f" {rmsd_matrix[i, j]:.2f} ", end="")
@@ -522,81 +522,82 @@ class QuantumBiophysicsFolder:
         
         self._cache_initialized = True
 
-    def energy_function(self, params):
+    def energy_function(self, params, return_terms: bool = False):
         """
         THE CRITIC (Objective Function)
         Evaluates how "physically good" the protein structure is.
         Lower Energy = Better Fold.
+
+        If return_terms=True, a per-term decomposition is stored in:
+            self.last_energy_terms (dict)
         """
-        if not self._cache_initialized: self._initialize_topology_cache()
-        
+        if not self._cache_initialized: 
+            self._initialize_topology_cache()
+
         # ==========================================
         # STAGE CONTROLLER (Guided Relaxation)
         # ==========================================
-        # Ref: Heuristic Manual Tuning ("Quantum Velcro")
-        # "Gamma" = Surface Tension. High Gamma forces the protein to squeeze into a ball (Hydrophobic collapse).
-        # "Constraint" = End-to-end bias. Forces the ends together to form a hairpin.
-        
-        # Default: "Molding Mode" (Stages 1 & 2)
         gamma = 15.0              
         constraint_strength = 50.0 
-        
+
         # Stage 3: RELAXATION
         if self.current_stage == 3:
-            gamma = 5.0                # Relax surface tension
-            constraint_strength = 5.0  # Relax end-to-end bias
-            
+            gamma = 5.0
+            constraint_strength = 5.0
+
         # 1. GENERATION: Get Geometry from Quantum Parameters
         angle_vec = self._get_angles(params)
         coords, _, _ = self.build_full_structure(angle_vec)
-        
+
+        terms = {
+            "constraint": 0.0,
+            "sasa": 0.0,
+            "hbond": 0.0,
+            "electrostatics": 0.0,
+            "disulfide": 0.0,
+            "vdw_repulsion": 0.0,
+            "rotamer": 0.0,
+            "pi_stacking": 0.0,
+            "rama": 0.0,
+            "geometry": 0.0,
+        }
         total_energy = 0.0
-        
-        # --- VECTORIZED DISTANCE MATRIX (The heart of the physics engine) ---
-        # Calculates distance between every pair of atoms in one massive matrix op.
+
+        def add_term(name: str, value: float):
+            nonlocal total_energy
+            v = float(value)
+            terms[name] += v
+            total_energy += v
+
+        # --- VECTORIZED DISTANCE MATRIX ---
         diffs = coords[:, None, :] - coords[None, :, :]
         D = np.sqrt(np.sum(diffs**2, axis=-1)) + 1e-9
 
-        # ==========================================
-        # 0. END-TO-END BIAS (The Variable Magnet)
-        # ==========================================
-        # Guarantees the U-shape topology, preventing "Elastic Recoil".
+        # 0. END-TO-END BIAS
         ca_indices = [i for i, lbl in enumerate(self.static_labels) if lbl[1] == 'CA']
         if len(ca_indices) >= 2:
             start_ca = coords[ca_indices[0]]
             end_ca = coords[ca_indices[-1]]
             dist_ends = np.linalg.norm(start_ca - end_ca)
-            
-            # Target: 5.5 Angstroms (Ideal for Hairpin)
             e_constraint = constraint_strength * (dist_ends - 5.5)**2
-            total_energy += e_constraint
+            add_term("constraint", e_constraint)
 
-        # ==========================================
-        # 1. IMPLICIT SOLVENT (SASA - Hydrophobic Effect)
-        # ==========================================
-        # Approximates Solvent Accessible Surface Area.
-        # Logic: Hydrophobic atoms want to be surrounded by other atoms (buried), not water.
+        # 1. IMPLICIT SOLVENT (SASA)
         hydro_dists = D[self.mask_hydrophobic, :]
-        weights = 1.0 / (1.0 + np.exp(1.0 * (hydro_dists - 6.0))) # Sigmoid count of neighbors < 6.0A
+        weights = 1.0 / (1.0 + np.exp(1.0 * (hydro_dists - 6.0)))
         neighbor_counts = np.sum(weights, axis=1) - 1.0 
-        burial_fractions = neighbor_counts / 15.0 # Normalize: 15 neighbors = fully buried
+        burial_fractions = neighbor_counts / 15.0
         burial_fractions = np.clip(burial_fractions, 0.0, 1.0)
         exposed_area = 30.0 * (1.0 - burial_fractions)
-        
-        total_energy += np.sum(gamma * exposed_area)
+        add_term("sasa", np.sum(gamma * exposed_area))
 
-        # ==========================================
-        # 2. EXPLICIT H-BONDING (The Widened Zipper)
-        # ==========================================
-        # Checks for N-H ... O=C patterns.
-        # This is critical for secondary structure (Alpha Helices / Beta Sheets).
+        # 2. EXPLICIT H-BONDING
         e_hbond = 0.0
         for i_n in self.idx_N_atoms:
             res_d = self.atom_to_res[i_n]
             idx_ca = i_n + 1
             idx_prev_c = i_n - 2 
-            
-            # Construct Hydrogen position (approximate)
+
             if idx_prev_c < 0 or self.atom_names[idx_prev_c] != 'C':
                 pos_h = coords[i_n] + np.array([0,0,1.0]); pos_n = coords[i_n]
             else:
@@ -606,140 +607,124 @@ class QuantumBiophysicsFolder:
                 v_h = -(v_nc + v_nca); v_h /= np.linalg.norm(v_h)
                 pos_h = p_n + v_h * 1.01; pos_n = p_n
 
-            # Check all Oxygens
             o_coords = coords[self.idx_O_atoms]
             o_res = self.atom_to_res[self.idx_O_atoms]
-            valid_mask = np.abs(o_res - res_d) >= 2 # Don't bond with immediate neighbors
-            
-            if not np.any(valid_mask): continue
-            
+            valid_mask = np.abs(o_res - res_d) >= 2
+            if not np.any(valid_mask): 
+                continue
+
             valid_o_coords = o_coords[valid_mask]
             d_ho = np.linalg.norm(valid_o_coords - pos_h, axis=1)
             close_mask = d_ho < 3.5
-            if not np.any(close_mask): continue
-            
+            if not np.any(close_mask): 
+                continue
+
             final_d_ho = d_ho[close_mask]
             final_o_coords = valid_o_coords[close_mask]
-            
-            # Angle check: H-bond must be roughly linear
+
             v_hn = pos_n - pos_h; v_hn /= np.linalg.norm(v_hn)
             v_ho = final_o_coords - pos_h
             norms = np.linalg.norm(v_ho, axis=1)[:, None]
             v_ho /= norms
             angle_cos = np.dot(v_ho, v_hn) 
-            
             ang_mask = angle_cos < -0.4 
-            
-            # Energy calculation
+
             radial_term = np.exp(-(final_d_ho - 2.0)**2 / 0.5)
             angular_term = (np.abs(angle_cos) - 0.4) * 2.0 
-            
-            # Strength -25.0 is very strong ("Super Glue") to force folding
             term = -25.0 * radial_term * angular_term * ang_mask
             e_hbond += np.sum(term)
 
-        total_energy += e_hbond
+        add_term("hbond", e_hbond)
 
-        # ==========================================
-        # 3. ELECTROSTATICS (Coulomb)
-        # ==========================================
-        # q1*q2 / r^2
+        # 3. ELECTROSTATICS
         Q_mat = np.outer(self.q_vector, self.q_vector)
         elec_mask = np.triu(self.mask_non_bonded, k=1) & (np.abs(Q_mat) > 0.0001)
         if np.any(elec_mask):
             r_elec = D[elec_mask]
-            r_elec = np.maximum(r_elec, 1.0) # Cap distance to prevent infinity
+            r_elec = np.maximum(r_elec, 1.0)
             q_prod = Q_mat[elec_mask]
-            total_energy += np.sum(83.0 * q_prod / (r_elec**2)) # 83.0 is approx Coulomb constant in these units
+            add_term("electrostatics", np.sum(83.0 * q_prod / (r_elec**2)))
 
-        # ==========================================
-        # 3b. DISULFIDE BONDS (Cysteine Bridges)
-        # ==========================================
+        # 3b. DISULFIDE
+        e_disulf = 0.0
         if len(self.idx_SG_atoms) > 1:
             sg_dists = D[np.ix_(self.idx_SG_atoms, self.idx_SG_atoms)]
             sg_mask = np.triu(np.ones_like(sg_dists, dtype=bool), k=1)
             valid_dists = sg_dists[sg_mask]
-            
-            # Attraction
+
             bond_strengths = np.exp(-(valid_dists - 2.05)**2 / 0.5)
             active_bonds = (valid_dists < 3.0)
-            total_energy -= np.sum(25.0 * bond_strengths * active_bonds)
-            
-            # Valence Penalty (Don't form 3 bonds with one Sulfur)
+            e_disulf -= np.sum(25.0 * bond_strengths * active_bonds)
+
             full_strengths = np.exp(-(sg_dists - 2.05)**2 / 0.5) * (sg_dists < 3.0)
             np.fill_diagonal(full_strengths, 0.0)
             saturation = np.sum(full_strengths, axis=1)
             overload = saturation - 1.0
             penalty_mask = overload > 0.1
             if np.any(penalty_mask):
-                total_energy += np.sum(40.0 * (overload[penalty_mask])**2)
+                e_disulf += np.sum(40.0 * (overload[penalty_mask])**2)
 
-        # ==========================================
-        # 4. STERICS (Softened Lennard-Jones)
-        # ==========================================
-        # Prevents atoms from being in the same place.
+        add_term("disulfide", e_disulf)
+
+        # 4. STERICS (repulsion only)
         Sigma_mat = self.vdw_radii_vector[:, None] + self.vdw_radii_vector[None, :]
         heavy_mat = self.mask_heavy[:, None] & self.mask_heavy[None, :]
         vdw_mask = np.triu(self.mask_non_bonded & heavy_mat, k=1)
-        
+
         if np.any(vdw_mask):
             r_vdw = D[vdw_mask]
             s_vdw = Sigma_mat[vdw_mask]
-            collision_mask = r_vdw < s_vdw # Only calculate if overlapping
-            
+            collision_mask = r_vdw < s_vdw
+
             if np.any(collision_mask):
                 r_col = r_vdw[collision_mask]
                 s_col = s_vdw[collision_mask]
-                
-                # Standard Repulsion term
                 term = (s_col / (r_col + 0.1)) ** 12
-                
-                # SOFTENING: Log-cap to prevent infinite energy (gradient explosion)
                 high_e = term > 50.0
-                if np.any(high_e): term[high_e] = 50.0 + np.log(term[high_e] - 49.0)
-                
-                total_energy += np.sum(0.1 * term)
+                if np.any(high_e): 
+                    term[high_e] = 50.0 + np.log(term[high_e] - 49.0)
+                add_term("vdw_repulsion", np.sum(0.1 * term))
 
-        # ==========================================
-        # LOCALS (Rotamer, Quadrupole, Rama, Geometry)
-        # ==========================================
+        # LOCALS
         angle_dict = {f"{x['res']}_{x['type']}": val for x, val in zip(self.dof_map, angle_vec)}
-        
-        # 5. Rotamers (Side chain preferences)
-        total_energy += self._calculate_rotamer_energy(angle_dict)
-        
-        # 6. Aromatic Stacking (Pi-Pi interactions)
-        total_energy += self._calculate_aromatic_quadrupole(coords, self.static_labels, self.atom_to_res)
-        
-        # 7. Ramachandran (Backbone torsion preferences)
+
+        e_rot = self._calculate_rotamer_energy(angle_dict)
+        add_term("rotamer", e_rot)
+
+        e_pi = self._calculate_aromatic_quadrupole(coords, self.static_labels, self.atom_to_res)
+        add_term("pi_stacking", e_pi)
+
+        e_rama = 0.0
         for i in range(self.n_residues):
-             if f"{i}_phi" in angle_dict and f"{i}_psi" in angle_dict:
+            if f"{i}_phi" in angle_dict and f"{i}_psi" in angle_dict:
                 phi = angle_dict[f"{i}_phi"]; psi = angle_dict[f"{i}_psi"]
                 aa = self.sequence[i]
-                
-                # Ideal regions for Helix (-1, -0.8) and Sheet (-2.3, 2.4)
                 d_helix = (phi - (-1.0))**2 + (psi - (-0.8))**2
                 d_sheet = (phi - (-2.3))**2 + (psi - (2.4))**2
-                
+
                 if aa == 'G': # Glycine is flexible
                     d_helix_L = (phi - (1.0))**2 + (psi - (0.8))**2
                     d_sheet_L = (phi - (2.3))**2 + (psi - (-2.4))**2
                     dist_best = min(d_helix, d_sheet, d_helix_L, d_sheet_L)
-                    total_energy += -3.0 * np.exp(-dist_best/0.6)
-                else: # General case with forbidden regions
+                    e_rama += -3.0 * np.exp(-dist_best/0.6)
+                else:
                     d_forbidden = (phi - (-2.0))**2 + (psi - (1.0))**2
                     term = -3.0 * np.exp(-d_helix/0.6) - 3.0 * np.exp(-d_sheet/0.6) + 5.0 * np.exp(-d_forbidden/1.0)
-                    total_energy += term
+                    e_rama += term
+        add_term("rama", e_rama)
 
-        # 8. Geometry Integrity (Chirality, Planarity)
-        total_energy += self._calculate_geometry_integrity(coords, self.static_labels, self.atom_to_res)
+        e_geom = self._calculate_geometry_integrity(coords, self.static_labels, self.atom_to_res)
+        add_term("geometry", e_geom)
 
         if self.tracker:
             self.tracker.log(total_energy)
-        
+
+        if return_terms:
+            self.last_energy_terms = {**terms, "total": float(total_energy)}
+
         return total_energy
 
-    # --- KEEPING HELPERS (Standard implementations) ---
+
     def _calculate_rotamer_energy(self, angle_dict):
         """
         Ensures side chains adopt physically observed angles (gauche+, gauche-, trans).
@@ -848,7 +833,7 @@ class QuantumBiophysicsFolder:
                     if twist_penalty > 0.05: energy += 20.0 * twist_penalty
         return energy
 
-    def get_smart_initialization(self, n_attempts=20):
+    def get_smart_initialization(self, n_attempts=20, seed=None):
         """
         Samples random parameters to find a good starting point (Basin Hopping).
         This avoids getting stuck in high-energy states immediately.
@@ -858,12 +843,14 @@ class QuantumBiophysicsFolder:
         This ensures that every run with the same sequence starts from the same 
         initial geometry, allowing you to test energy function changes reliably.
         """
-        # Create a deterministic seed from the protein sequence
-        seed_val = int(hashlib.sha256(self.sequence.encode('utf-8')).hexdigest(), 16) % (2**32)
-        rng = np.random.default_rng(seed_val)
+        if seed is not None:
+            # Create a deterministic seed from the protein sequence
+            seed = int(hashlib.sha256(self.sequence.encode('utf-8')).hexdigest(), 16) % (2**32)
+        
+        rng = np.random.default_rng(seed)
         
         print(f"--- SCOUTING: Checking {n_attempts} starting points ---")
-        print(f" > Deterministic Seed: {seed_val} (Derived from Sequence)")
+        print(f" > Deterministic Seed: {seed} (Derived from Sequence)")
         
         best_params = None
         best_energy = float('inf')
@@ -921,11 +908,12 @@ class QuantumBiophysicsFolder:
         coords, labels, bonds = self.build_full_structure(self._get_angles(res_3.x))
         return coords, labels, bonds, self.tracker, res_3.x, res_3.fun
 
-    def save_pdb(self, coords, labels, filename="biophysics_fold.pdb"):
+    def save_pdb(self, coords, labels, filename="structure.pdb", energy=0.0):
         """
         Saves the result to a PDB file viewable in PyMOL or Chimera.
         """
         with open(filename, 'w') as f:
+            f.write(f"REMARK   1 ENERGY: {energy:.3f}\n")
             for k, (pos, (res_id, atom_name, elem)) in enumerate(zip(coords, labels)):
                 res_name = self.sequence[res_id]
                 f.write(f"ATOM  {k+1:>5}  {atom_name:<4} {res_name:>3} A{res_id+1:>4}    {pos[0]:8.3f}{pos[1]:8.3f}{pos[2]:8.3f}  1.00  0.00           {elem:>2}\n")
@@ -941,13 +929,13 @@ class EnsembleFoldingManager:
         self.folder = folder_instance
         self.results = [] 
     
-    def prime_circuit(self, target_type='helix', seed_val=42):
+    def prime_circuit(self, target_type='helix', seed=42):
         """
         Smart Initialization: Pre-optimizes circuit to output Secondary Structure angles.
         """
         print(f"--- PRIMING CIRCUIT FOR {target_type.upper()} ---")
         
-        rng = np.random.default_rng(seed_val)
+        rng = np.random.default_rng(seed)
         
         if target_type == 'helix':
             t_phi, t_psi = np.deg2rad(-60.0), np.deg2rad(-45.0)
@@ -973,9 +961,13 @@ class EnsembleFoldingManager:
         print(f" > Priming Error: {res.fun:.4f}")
         return res.x
 
-    def run_ensemble(self, n_runs=5, prime_strategy='mixed'):
+    def run_ensemble(self, n_runs=5, max_iter=2000, prime_strategy='mixed'):
         print(f"=== STARTING ENSEMBLE RUN ({n_runs} Trajectories) ===")
         self.results = []
+
+        # Create a deterministic seed from the protein sequence
+        # Retrieve the protein sequence from the folder object
+        seed = int(hashlib.sha256(self.folder.sequence.encode('utf-8')).hexdigest(), 16) % (2**32)
         
         for i in range(n_runs):
             print(f"\n>> REPLICA {i+1}/{n_runs}")
@@ -989,16 +981,16 @@ class EnsembleFoldingManager:
                 
             # Initialization
             if strat == 'random':
-                start_params = self.folder.get_smart_initialization(n_attempts=50)
+                start_params = self.folder.get_smart_initialization(n_attempts=50, seed=seed+i)
             else:
-                start_params = self.prime_circuit(target_type=strat, seed_val=i)
+                start_params = self.prime_circuit(target_type=strat, seed=seed+i)
             
             # Execute Fold
-            coords, _, _, tracker, final_params, final_energy = self.folder.fold(max_iter=2000, initial_params=start_params)
+            coords, _, _, tracker, final_params, final_energy = self.folder.fold(max_iter=max_iter, initial_params=start_params)
             
             print(f" >> Replica {i+1} Final Energy: {final_energy:.2f}")
             self.results.append({
-                'id': i, 'type': strat, 'energy': final_energy,
+                'id': i, 'seed': seed+i, 'type': strat, 'energy': final_energy,
                 'coords': coords, 'params': final_params, 'tracker': tracker
             })
 
@@ -1016,3 +1008,39 @@ class EnsembleFoldingManager:
             StabilityAnalyzer.analyze_convergence(self.results)
 
         return best
+
+    def get_ranked_results(self):
+        """Return all ensemble results sorted by energy (ascending)."""
+        if not self.results:
+            return []
+        return sorted(self.results, key=lambda x: x['energy'])
+
+    def select_top(self, top_k=None, top_frac=None):
+        """
+        Select top low-energy structures.
+
+        Parameters
+        ----------
+        top_k : int | None
+            Keep the top_k lowest-energy structures.
+        top_frac : float | None
+            Keep the top fraction (0<top_frac<=1) of lowest-energy structures.
+            If provided, top_frac takes precedence over top_k.
+
+        Returns
+        -------
+        list[dict]
+            Ranked subset of self.results.
+        """
+        ranked = self.get_ranked_results()
+        if not ranked:
+            return []
+        if top_frac is not None:
+            k = max(1, int(np.ceil(len(ranked) * float(top_frac))))
+            return ranked[:k]
+        if top_k is not None:
+            k = max(1, min(int(top_k), len(ranked)))
+            return ranked[:k]
+        return ranked
+
+
