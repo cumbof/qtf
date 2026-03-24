@@ -1,10 +1,17 @@
 import numpy as np
+import os
 import matplotlib.pyplot as plt
 import hashlib
 from copy import deepcopy
 from mpl_toolkits.mplot3d import Axes3D
-from qiskit.circuit.library import efficient_su2
-from qiskit.quantum_info import Statevector
+try:
+    from qiskit.circuit.library import efficient_su2
+    from qiskit.quantum_info import Statevector
+    QISKIT_AVAILABLE = True
+except ImportError:
+    efficient_su2 = None
+    Statevector = None
+    QISKIT_AVAILABLE = False
 from scipy.optimize import minimize
 from scipy.spatial.distance import pdist, squareform
 
@@ -135,7 +142,13 @@ class QuantumBiophysicsFolder:
     5. Heuristics: Manual tuning ("Quantum Velcro") for folding convergence.
     """
 
-    def __init__(self, sequence, force_field='charmm'):
+    def __init__(
+        self,
+        sequence,
+        force_field='charmm',
+        chi_mode='all',
+        selective_chi_map=None,
+    ):
         """
         Initialize the folder.
         
@@ -146,6 +159,8 @@ class QuantumBiophysicsFolder:
         self.sequence = sequence.upper()
         self.n_residues = len(sequence)
         self.force_field = force_field.lower()
+        self.chi_mode = chi_mode
+        self.selective_chi_map = selective_chi_map or {}
         
         print(f"--- INITIALIZING QUANTUM BIOPHYSICS FOLDER ---")
         print(f"--- FORCE FIELD: {self.force_field.upper()} ---")
@@ -284,16 +299,19 @@ class QuantumBiophysicsFolder:
         # 1. Map sequence to Degrees of Freedom (DoF)
         self.dof_map = []
         for i, aa in enumerate(self.sequence):
-            self.dof_map.append({'res': i, 'type': 'phi'}) # Backbone torsion
-            self.dof_map.append({'res': i, 'type': 'psi'}) # Backbone torsion
-            
-            # Add Sidechain torsions (chi)
+            self.dof_map.append({'res': i, 'type': 'phi'})
+            self.dof_map.append({'res': i, 'type': 'psi'})
+
             topo = self.SIDE_CHAIN_TOPO.get(aa, self.SIDE_CHAIN_TOPO['DEFAULT'])
             chis = set()
             for atom in topo:
                 tor = atom[4]
-                if isinstance(tor, str) and 'chi' in tor: chis.add(tor)
-            for k in sorted(chis): self.dof_map.append({'res': i, 'type': k})
+                if isinstance(tor, str) and 'chi' in tor:
+                    chis.add(tor.replace('_branch', ''))
+
+            allowed_chis = self._allowed_chis_for_residue(i, aa, chis)
+            for k in allowed_chis:
+                self.dof_map.append({'res': i, 'type': k})
         
         self.total_angles = len(self.dof_map)
         
@@ -306,8 +324,13 @@ class QuantumBiophysicsFolder:
         # 'efficient_su2' is a heuristic circuit often used in VQE.
         # 'reps' controls depth. More reps = more expressive = harder to train.
         self.reps = int(np.ceil(self.total_angles / self.n_qubits)) + 2
-        self.ansatz = efficient_su2(self.n_qubits, reps=self.reps, entanglement='circular')
-        self.n_params = self.ansatz.num_parameters
+
+        if QISKIT_AVAILABLE:
+            self.ansatz = efficient_su2(self.n_qubits, reps=self.reps, entanglement='circular')
+            self.n_params = self.ansatz.num_parameters
+        else:
+            self.ansatz = None
+            self.n_params = 1
         
         self.current_stage = 1
         
@@ -318,21 +341,40 @@ class QuantumBiophysicsFolder:
         self._initialize_topology_cache()
         self.tracker = None  # TRACKER REFERENCE
 
+    def _allowed_chis_for_residue(self, res_idx, aa, available_chis):
+        """
+        Decide which chi DOFs to expose for a residue.
+        """
+
+        available = sorted(set(available_chis), key=lambda x: (len(x), x))
+
+        if self.chi_mode == "all":
+            return available
+
+        if self.chi_mode == "chi1_only":
+            return [c for c in available if c == "chi1"]
+
+        if self.chi_mode == "selective":
+            allowed = self.selective_chi_map.get(aa, ["chi1"])
+            allowed = set(allowed)
+            return [c for c in available if c in allowed]
+
+        raise ValueError(f"Unknown chi_mode: {self.chi_mode}")
+
     def _get_angles(self, params):
         """
         THE HOLOGRAPHIC MAPPING
         Maps Circuit Parameters (Theta) -> Torsion Angles (Phi/Psi/Chi).
-        
-        Logic:
-        1. Assign parameters to the quantum circuit.
-        2. Calculate the Statevector (Full wavefunction).
-        3. Extract the 'Angle' (phase) of the complex amplitudes.
-        4. Use the first N phases as our N torsion angles.
         """
+        if self.ansatz is None or Statevector is None:
+            raise RuntimeError(
+                "Qiskit is not available. Either install qiskit or override _get_angles()."
+            )
+
         param_dict = dict(zip(self.ansatz.parameters, params))
         bound_circuit = self.ansatz.assign_parameters(param_dict)
-        psi = Statevector(bound_circuit).data # Get complex amplitudes
-        return np.angle(psi)[:self.total_angles] # Extract phases
+        psi = Statevector(bound_circuit).data
+        return np.angle(psi)[:self.total_angles]
 
     def _nerf_step(self, a, b, c, bond_len, bond_angle, torsion):
         """
@@ -504,10 +546,21 @@ class QuantumBiophysicsFolder:
         self.mask_heavy = np.array([not x.startswith('H') for x in self.atom_names], dtype=bool)
         
         # Mask for Hydrophobic atoms (SASA)
-        hydro_res_set = {'ALA','VAL','LEU','ILE','MET','PHE','TRP','PRO','CYS'}
+        # NOTE: self.sequence is 1-letter codes
+        hydro_res_set = set(list("AVLIMFWYPC"))  # include Tyr (Y) + Trp (W)
+
         self.mask_hydrophobic = np.zeros(n_atoms, dtype=bool)
-        for k, (rid, name, _) in enumerate(self.static_labels):
-            if self.sequence[rid] in hydro_res_set and name.startswith('C'):
+        for k, (rid, name, elem) in enumerate(self.static_labels):
+            aa = self.sequence[rid]
+
+            # Only mark atoms from hydrophobic residues
+            if aa not in hydro_res_set:
+                continue
+
+            # Prefer sidechain carbons (avoid backbone C/CA), and include sulfur if desired
+            if name.startswith("C") and name not in ("C", "CA"):
+                self.mask_hydrophobic[k] = True
+            elif elem == "S":
                 self.mask_hydrophobic[k] = True
                 
         # Mask for Bonded/Neighbor Exclusions (i, i+1 residues)
@@ -537,12 +590,12 @@ class QuantumBiophysicsFolder:
         # ==========================================
         # STAGE CONTROLLER (Guided Relaxation)
         # ==========================================
-        gamma = 15.0              
+        gamma = 15.0            
         constraint_strength = 50.0 
 
         # Stage 3: RELAXATION
         if self.current_stage == 3:
-            gamma = 5.0
+            gamma = 2.5
             constraint_strength = 5.0
 
         # 1. GENERATION: Get Geometry from Quantum Parameters
@@ -553,9 +606,11 @@ class QuantumBiophysicsFolder:
             "constraint": 0.0,
             "sasa": 0.0,
             "hbond": 0.0,
+            "hbond_raw": 0.0,
             "electrostatics": 0.0,
             "disulfide": 0.0,
             "vdw_repulsion": 0.0,
+            "vdw_attractive": 0.0,
             "rotamer": 0.0,
             "pi_stacking": 0.0,
             "rama": 0.0,
@@ -573,6 +628,10 @@ class QuantumBiophysicsFolder:
         diffs = coords[:, None, :] - coords[None, :, :]
         D = np.sqrt(np.sum(diffs**2, axis=-1)) + 1e-9
 
+        # defaults so diagnostics always exist
+        neighbor_counts = np.array([0.0], dtype=float)
+        burial_fractions = np.array([0.0], dtype=float)
+
         # 0. END-TO-END BIAS
         ca_indices = [i for i, lbl in enumerate(self.static_labels) if lbl[1] == 'CA']
         if len(ca_indices) >= 2:
@@ -583,20 +642,26 @@ class QuantumBiophysicsFolder:
             add_term("constraint", e_constraint)
 
         # 1. IMPLICIT SOLVENT (SASA)
-        hydro_dists = D[self.mask_hydrophobic, :]
-        weights = 1.0 / (1.0 + np.exp(1.0 * (hydro_dists - 6.0)))
-        neighbor_counts = np.sum(weights, axis=1) - 1.0 
-        burial_fractions = neighbor_counts / 15.0
-        burial_fractions = np.clip(burial_fractions, 0.0, 1.0)
-        exposed_area = 30.0 * (1.0 - burial_fractions)
-        add_term("sasa", np.sum(gamma * exposed_area))
+        if np.sum(self.mask_hydrophobic) > 0:
+            hydro_dists = D[self.mask_hydrophobic, :]
+            weights = 1.0 / (1.0 + np.exp(1.0 * (hydro_dists - 6.0)))
+            neighbor_counts = np.sum(weights, axis=1) - 1.0
+            burial_fractions = neighbor_counts / 35.0
+            burial_fractions = np.clip(burial_fractions, 0.0, 1.0)
+            exposed_area = 30.0 * (1.0 - burial_fractions)
+            SASA_SCALE = float(os.getenv("QTF_SASA_SCALE", "0.7"))
+            e_sasa = SASA_SCALE*np.sum(gamma * exposed_area)
+            add_term("sasa", e_sasa)
+
 
         # 2. EXPLICIT H-BONDING
+        HBOND_SCALE = float(os.getenv("QTF_HBOND_SCALE", "0.75"))
+
         e_hbond = 0.0
         for i_n in self.idx_N_atoms:
             res_d = self.atom_to_res[i_n]
             idx_ca = i_n + 1
-            idx_prev_c = i_n - 2 
+            idx_prev_c = i_n - 2
 
             if idx_prev_c < 0 or self.atom_names[idx_prev_c] != 'C':
                 pos_h = coords[i_n] + np.array([0,0,1.0]); pos_n = coords[i_n]
@@ -610,13 +675,13 @@ class QuantumBiophysicsFolder:
             o_coords = coords[self.idx_O_atoms]
             o_res = self.atom_to_res[self.idx_O_atoms]
             valid_mask = np.abs(o_res - res_d) >= 2
-            if not np.any(valid_mask): 
+            if not np.any(valid_mask):
                 continue
 
             valid_o_coords = o_coords[valid_mask]
             d_ho = np.linalg.norm(valid_o_coords - pos_h, axis=1)
             close_mask = d_ho < 3.5
-            if not np.any(close_mask): 
+            if not np.any(close_mask):
                 continue
 
             final_d_ho = d_ho[close_mask]
@@ -626,15 +691,17 @@ class QuantumBiophysicsFolder:
             v_ho = final_o_coords - pos_h
             norms = np.linalg.norm(v_ho, axis=1)[:, None]
             v_ho /= norms
-            angle_cos = np.dot(v_ho, v_hn) 
-            ang_mask = angle_cos < -0.4 
+            angle_cos = np.dot(v_ho, v_hn)
+            ang_mask = angle_cos < -0.4
 
             radial_term = np.exp(-(final_d_ho - 2.0)**2 / 0.5)
-            angular_term = (np.abs(angle_cos) - 0.4) * 2.0 
-            term = -25.0 * radial_term * angular_term * ang_mask
+            angular_term = (np.abs(angle_cos) - 0.4) * 2.0
+            term = -50.0 * radial_term * angular_term * ang_mask
             e_hbond += np.sum(term)
 
-        add_term("hbond", e_hbond)
+        e_hbond_scaled = HBOND_SCALE * e_hbond
+        terms["hbond_raw"] = float(e_hbond)
+        add_term("hbond", e_hbond_scaled)
 
         # 3. ELECTROSTATICS
         Q_mat = np.outer(self.q_vector, self.q_vector)
@@ -666,33 +733,53 @@ class QuantumBiophysicsFolder:
 
         add_term("disulfide", e_disulf)
 
-        # 4. STERICS (repulsion only)
+        # 4. NONBONDED VDW (repulsive + weak attractive)
         Sigma_mat = self.vdw_radii_vector[:, None] + self.vdw_radii_vector[None, :]
         heavy_mat = self.mask_heavy[:, None] & self.mask_heavy[None, :]
         vdw_mask = np.triu(self.mask_non_bonded & heavy_mat, k=1)
 
+        # Tunable scales
+        VDW_REP_SCALE = float(os.getenv("QTF_VDW_REP_SCALE", "0.1"))
+        VDW_ATTR_SCALE = float(os.getenv("QTF_VDW_ATTR_SCALE", "0.1"))   # start modest; increase later only if needed
+
         if np.any(vdw_mask):
             r_vdw = D[vdw_mask]
             s_vdw = Sigma_mat[vdw_mask]
-            collision_mask = r_vdw < s_vdw
 
+            # dimensionless contact ratio
+            x = s_vdw / (r_vdw + 1e-9)
+
+            # repulsive branch: only for overlaps
+            collision_mask = r_vdw < s_vdw
             if np.any(collision_mask):
-                r_col = r_vdw[collision_mask]
-                s_col = s_vdw[collision_mask]
-                term = (s_col / (r_col + 0.1)) ** 12
-                high_e = term > 50.0
-                if np.any(high_e): 
-                    term[high_e] = 50.0 + np.log(term[high_e] - 49.0)
-                add_term("vdw_repulsion", np.sum(0.1 * term))
+                x_rep = x[collision_mask]
+                rep_term = x_rep ** 12
+                high_e = rep_term > 50.0
+                if np.any(high_e):
+                    rep_term[high_e] = 50.0 + np.log(rep_term[high_e] - 49.0)
+                add_term("vdw_repulsion", np.sum(VDW_REP_SCALE * rep_term))
+
+            # attractive branch: only for near-contact, not long-range
+            # window roughly from contact out to ~1.5 sigma
+            near_mask = (r_vdw >= s_vdw) & (r_vdw < 1.5 * s_vdw)
+            if np.any(near_mask):
+                x_att = x[near_mask]
+                # LJ-like attractive tail, clipped to avoid runaway collapse
+                att_term = -(x_att ** 6)
+                att_term = np.maximum(att_term, -2.0)
+                add_term("vdw_attractive", np.sum(VDW_ATTR_SCALE * att_term))
 
         # LOCALS
         angle_dict = {f"{x['res']}_{x['type']}": val for x, val in zip(self.dof_map, angle_vec)}
 
+        ROTAMER_SCALE = float(os.getenv("QTF_ROTAMER_SCALE", "1.0"))
+        PI_STACK_SCALE = float(os.getenv("QTF_PI_STACK_SCALE", "1.0"))
+
         e_rot = self._calculate_rotamer_energy(angle_dict)
-        add_term("rotamer", e_rot)
+        add_term("rotamer", ROTAMER_SCALE * e_rot)
 
         e_pi = self._calculate_aromatic_quadrupole(coords, self.static_labels, self.atom_to_res)
-        add_term("pi_stacking", e_pi)
+        add_term("pi_stacking", PI_STACK_SCALE * e_pi)
 
         e_rama = 0.0
         for i in range(self.n_residues):
@@ -713,39 +800,100 @@ class QuantumBiophysicsFolder:
                     e_rama += term
         add_term("rama", e_rama)
 
-        e_geom = self._calculate_geometry_integrity(coords, self.static_labels, self.atom_to_res)
+        e_geom, geom_subterms = self._calculate_geometry_integrity(
+        coords, self.static_labels, self.atom_to_res, return_terms=True
+        )
         add_term("geometry", e_geom)
+
 
         if self.tracker:
             self.tracker.log(total_energy)
 
         if return_terms:
-            self.last_energy_terms = {**terms, "total": float(total_energy)}
+            self.last_energy_terms = {
+            **terms,
+
+            # geometry diagnostics
+            "geom_pro_ring": float(geom_subterms["pro_ring"]),
+            "geom_chirality": float(geom_subterms["chirality"]),
+            "geom_planarity": float(geom_subterms["planarity"]),
+
+            # burial diagnostics
+            "burial_mean": float(np.mean(burial_fractions)) if np.sum(self.mask_hydrophobic) > 0 else 0.0,
+            "burial_min": float(np.min(burial_fractions)) if np.sum(self.mask_hydrophobic) > 0 else 0.0,
+            "burial_max": float(np.max(burial_fractions)) if np.sum(self.mask_hydrophobic) > 0 else 0.0,
+            "neighbor_mean": float(np.mean(neighbor_counts)) if np.sum(self.mask_hydrophobic) > 0 else 0.0,
+            "neighbor_min": float(np.min(neighbor_counts)) if np.sum(self.mask_hydrophobic) > 0 else 0.0,
+            "neighbor_max": float(np.max(neighbor_counts)) if np.sum(self.mask_hydrophobic) > 0 else 0.0,
+
+            "total": float(total_energy),
+        }
 
         return total_energy
 
-
     def _calculate_rotamer_energy(self, angle_dict):
         """
-        Ensures side chains adopt physically observed angles (gauche+, gauche-, trans).
+        Rotamer prior for sidechain torsions.
+
+        chi1 is strongest and residue-aware.
+        chi2+ are weaker priors that still discourage unphysical placements.
         """
         energy = 0.0
+
+        def wrap_delta(a, b):
+            return (a - b + np.pi) % (2.0 * np.pi) - np.pi
+
+        chi_centers = [-1.0471975512, 1.0471975512, 3.1415926536]  # -60, +60, 180 deg
+
         for i in range(self.n_residues):
             res_name = self.sequence[i]
-            key = f"{i}_chi1"
-            if key in angle_dict:
-                chi = angle_dict[key]
-                if res_name in ['VAL', 'ILE', 'THR']:
-                    d_trans = (chi - 3.14159)**2; d_gplus = (chi - (-1.047))**2
-                    energy += -3.0 * (np.exp(-d_trans/0.5) + np.exp(-d_gplus/0.5))
-                elif res_name == 'PRO':
-                    d_down = (chi - (-0.5))**2; d_up = (chi - (0.5))**2
+
+            # ---- chi1: strongest prior ----
+            key1 = f"{i}_chi1"
+            if key1 in angle_dict:
+                chi = angle_dict[key1]
+
+                if res_name in ['V', 'I', 'T']:
+                    # beta-branched residues prefer trans / gauche+
+                    d_trans = wrap_delta(chi, np.pi) ** 2
+                    d_gplus = wrap_delta(chi, -1.0471975512) ** 2
+                    energy += -3.0 * (np.exp(-d_trans / 0.5) + np.exp(-d_gplus / 0.5))
+
+                elif res_name == 'P':
+                    d_down = wrap_delta(chi, -0.5) ** 2
+                    d_up = wrap_delta(chi, 0.5) ** 2
                     energy += 10.0 * min(d_down, d_up)
-                elif res_name in ['TRP', 'PHE', 'TYR', 'HIS']:
-                    d_trans = (chi - 3.14159)**2; d_gplus = (chi - (-1.047))**2
-                    energy += -2.0 * (np.exp(-d_trans/0.5) + np.exp(-d_gplus/0.5))
+
+                elif res_name in ['W', 'F', 'Y', 'H']:
+                    # aromatics: trans/gauche favored, slightly narrower
+                    d_trans = wrap_delta(chi, np.pi) ** 2
+                    d_gplus = wrap_delta(chi, -1.0471975512) ** 2
+                    d_gminus = wrap_delta(chi, 1.0471975512) ** 2
+                    energy += -2.0 * (
+                        np.exp(-d_trans / 0.45)
+                        + 0.8 * np.exp(-d_gplus / 0.45)
+                        + 0.8 * np.exp(-d_gminus / 0.45)
+                    )
+
                 else:
                     energy += 1.0 * (1.0 + np.cos(3.0 * chi))
+
+            # ---- chi2+ : weaker generic rotamer prior ----
+            for chi_idx in (2, 3, 4, 5):
+                key = f"{i}_chi{chi_idx}"
+                if key not in angle_dict:
+                    continue
+
+                chi = angle_dict[key]
+
+                # aromatic chi2 is especially important
+                if chi_idx == 2 and res_name in ['W', 'F', 'Y', 'H']:
+                    wells = sum(np.exp(-(wrap_delta(chi, c) ** 2) / 0.35) for c in chi_centers)
+                    energy += -1.5 * wells
+                else:
+                    wells = sum(np.exp(-(wrap_delta(chi, c) ** 2) / 0.50) for c in chi_centers)
+                    energy += -0.75 * wells
+
         return energy
 
     def _calculate_aromatic_quadrupole(self, coords, labels, atom_to_res_idx):
@@ -756,7 +904,7 @@ class QuantumBiophysicsFolder:
         aromatics = []
         res_indices = np.unique(atom_to_res_idx)
         for r_idx in res_indices:
-            if self.sequence[r_idx] in ['PHE', 'TYR', 'TRP']:
+            if self.sequence[r_idx] in ['F', 'Y', 'W']:
                 mask = (atom_to_res_idx == r_idx)
                 r_coords = coords[mask]
                 r_names = self.atom_names[mask]
@@ -788,49 +936,85 @@ class QuantumBiophysicsFolder:
                      energy_pi -= 5.0 * np.exp(-(dist - 3.8)**2)
         return energy_pi
 
-    def _calculate_geometry_integrity(self, coords, labels, atom_to_res_idx):
+    def _calculate_geometry_integrity(self, coords, labels, atom_to_res_idx, return_terms=False):
         """
-        Penalizes physically impossible geometries (e.g. L-amino acids turning into D-amino acids).
+        Penalizes physically impossible geometries.
+        Optionally returns sub-terms for debugging.
         """
         energy = 0.0
+
+        geom_terms = {
+            "pro_ring": 0.0,
+            "chirality": 0.0,
+            "planarity": 0.0,
+        }
+
         res_map = {}
         for k, lbl in enumerate(labels):
-            r = lbl[0]; atom = lbl[1]
-            if r not in res_map: res_map[r] = {}
+            r = lbl[0]
+            atom = lbl[1]
+            if r not in res_map:
+                res_map[r] = {}
             res_map[r][atom] = k
-            
+
         for r in range(self.n_residues):
             atoms = res_map.get(r, {})
             res_name = self.sequence[r]
-            
-            # PRO Ring closure penalty
-            if res_name == 'PRO' and 'CD' in atoms and 'N' in atoms:
-                 d = np.linalg.norm(coords[atoms['CD']] - coords[atoms['N']])
-                 if abs(d - 1.47) > 0.1: energy += 50.0 * (d - 1.47)**2
-            
-            # Chirality check (Ensure L-amino acids)
+
+            # PRO ring closure penalty
+            if res_name == 'P' and 'CD' in atoms and 'N' in atoms:
+                d = np.linalg.norm(coords[atoms['CD']] - coords[atoms['N']])
+                if abs(d - 1.47) > 0.1:
+                    penalty = 50.0 * (d - 1.47) ** 2
+                    energy += penalty
+                    geom_terms["pro_ring"] += penalty
+
+            # Chirality check
             if 'CA' in atoms and 'N' in atoms and 'C' in atoms and 'CB' in atoms:
-                ca = coords[atoms['CA']]; n = coords[atoms['N']]
-                c = coords[atoms['C']]; cb = coords[atoms['CB']]
-                volume = np.dot(np.cross(n-ca, c-ca), cb-ca)
-                if volume < 1.0: energy += 50.0 * (1.0 - volume)**2
-            
-            # Peptide Planarity (Omega angle should be 180 or 0)
+                ca = coords[atoms['CA']]
+                n = coords[atoms['N']]
+                c = coords[atoms['C']]
+                cb = coords[atoms['CB']]
+                volume = np.dot(np.cross(n - ca, c - ca), cb - ca)
+                if volume < 1.0:
+                    penalty = 50.0 * (1.0 - volume) ** 2
+                    energy += penalty
+                    geom_terms["chirality"] += penalty
+
+            # Peptide planarity
             if r < self.n_residues - 1:
-                next_atoms = res_map.get(r+1, {})
+                next_atoms = res_map.get(r + 1, {})
                 if 'C' in atoms and 'CA' in atoms and 'N' in next_atoms and 'CA' in next_atoms:
                     idx1, idx2, idx3, idx4 = atoms['CA'], atoms['C'], next_atoms['N'], next_atoms['CA']
                     p1, p2, p3, p4 = coords[idx1], coords[idx2], coords[idx3], coords[idx4]
-                    b1 = p2-p1; b2=p3-p2; b3=p4-p3
-                    n1 = np.cross(b1, b2); n1/=np.linalg.norm(n1)
-                    n2 = np.cross(b2, b3); n2/=np.linalg.norm(n2)
-                    parallelism = np.dot(n1, n2)
-                    
-                    next_seq = self.sequence[r+1]
-                    if next_seq == 'PRO': twist_penalty = min(1.0 - parallelism, 1.0 + parallelism)
-                    else: twist_penalty = 1.0 - parallelism
-                    
-                    if twist_penalty > 0.05: energy += 20.0 * twist_penalty
+
+                    b1 = p2 - p1
+                    b2 = p3 - p2
+                    b3 = p4 - p3
+
+                    n1 = np.cross(b1, b2)
+                    n2 = np.cross(b2, b3)
+
+                    n1_norm = np.linalg.norm(n1)
+                    n2_norm = np.linalg.norm(n2)
+
+                    if n1_norm > 1e-8 and n2_norm > 1e-8:
+                        n1 /= n1_norm
+                        n2 /= n2_norm
+                        parallelism = np.dot(n1, n2)
+
+                        next_seq = self.sequence[r + 1]
+                        # For peptide planarity, we care that the planes are either parallel OR anti-parallel.
+                        # Both correspond to a planar peptide geometry.
+                        twist_penalty = 1.0 - abs(parallelism)
+
+                        if twist_penalty > 0.05:
+                            penalty = 20.0 * twist_penalty
+                            energy += penalty
+                            geom_terms["planarity"] += penalty
+
+        if return_terms:
+            return energy, geom_terms
         return energy
 
     def get_smart_initialization(self, n_attempts=20, seed=None):

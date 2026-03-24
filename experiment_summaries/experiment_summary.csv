@@ -1,0 +1,11 @@
+experiment_id,description,proteins,chi_mode,hbond_scale,sasa_scale,vdw_rep_scale,vdw_attr_scale,rotamer_scale,pi_stack_scale,mean_best_rmsd,mean_energy_rmsd,mean_ranking_gap,notes
+E0_baseline,Initial beam search (no selective chi),chignolin,chi1_only,1.0,1.0,1.0,0.0,1.0,1.0,4.5,~5.0,~0.5,High RMSD baseline
+E1_selective_chi,Selective chi DOF added,chignolin,selective,1.0,1.0,1.0,0.0,1.0,1.0,~2.3,~3.0,~0.3,Major improvement from representation
+E2_hbond_boost,Increased Hbond weight,chignolin,selective,1.5,1.0,1.0,0.0,1.0,1.0,~2.3,~2.8,~0.2,Better ranking slightly
+E3_sasa_scaled,Reduced SASA,chignolin,selective,1.5,0.7,1.0,0.0,1.0,1.0,~2.25,~2.9,~0.25,Slight RMSD gain
+E4_vdw_reduced,Reduced vdW repulsion,chignolin,selective,1.5,0.7,0.05,0.0,1.0,1.0,~2.24,~3.1,~0.3,Confirmed repulsion too strong
+E5_lj_attractive,Added vdW attraction,chignolin,selective,1.5,0.7,0.05,0.1,1.0,1.0,~2.24,~3.0,~0.25,Little RMSD change
+E6_multi_protein,Panel run (3 proteins),multi,selective,0.6–0.75,0.7–0.8,0.05–0.1,0.1–0.15,1.0,1.0,~3.9,~4.6,~0.7,Generalization drop
+E7_grid_4param,Grid over 4 terms,multi,selective,varied,varied,varied,varied,1.0,1.0,~3.8–4.0,~4.6,~0.7–0.9,Flat landscape
+E8_grid_rot_pi,Added rotamer + pi scales,multi,selective,0.6–0.75,0.7–0.8,0.05,0.1–0.15,0.5,0.25,~3.9,~4.6,~0.7,Identified over-weighted terms
+E9_current_large_grid,Expanded grid (running),multi,selective,0.55–0.75,0.65–0.85,0.03–0.07,0.1–0.2,0.25–1.0,0.1–0.75,TBD,TBD,TBD,Full parameter sweep
