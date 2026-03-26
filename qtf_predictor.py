@@ -26,6 +26,9 @@ def _jsonify(x):
     return x
 
 
+
+
+
 def __main__():
     '''
     Main entry point for running Quantum Torsion Folder.
@@ -134,7 +137,11 @@ def __main__():
         for rank, res in enumerate(selected_results, start=1):
             coords = res['coords']
             pred_ca = np.array([coords[i] for i, lbl in enumerate(folder.static_labels) if lbl[1] == 'CA'])
-            folder.save_pdb(pred_ca, folder.static_labels, filename=os.path.join(job_output_dir, f"model_{rank}.pdb"), energy=res['energy']) # save PDB of predicted structure
+            sidechain_centroids = folder.compute_sidechain_centroids(coords, folder.static_labels)
+            ca_pdb_path = os.path.join(job_output_dir, f"model_{rank}_ca.pdb")
+            ca_centroid_pdb_path = os.path.join(job_output_dir, f"model_{rank}_ca_centroid.pdb")
+            folder.save_reduced_pdb(pred_ca, filename=ca_pdb_path, sidechain_centroids=None, energy=res['energy'])
+            folder.save_reduced_pdb(pred_ca, filename=ca_centroid_pdb_path, sidechain_centroids=sidechain_centroids, energy=res['energy'])
             p_e2e, p_rg = evaluator.calculate_physics_metrics(pred_ca)
             if true_ca is not None:
                 n = min(len(pred_ca), len(true_ca))
@@ -160,6 +167,8 @@ def __main__():
                 "pred_rg_A": float(p_rg),
                 "ref_e2e_A": float(t_e2e) if not np.isnan(t_e2e) else np.nan,
                 "ref_rg_A": float(t_rg) if not np.isnan(t_rg) else np.nan,
+                "rebuilt_ca_pdb_path": ca_pdb_path,
+                "rebuilt_ca_centroid_pdb_path": ca_centroid_pdb_path,
                 **flat_terms,
             })
 
