@@ -20,6 +20,8 @@ HBOND_SCALE=0.75
 SASA_SCALE=0.7
 VDW_REP_SCALE=0.1
 VDW_ATTR_SCALE=0.1
+PI_STACK_SCALE=0.25
+ROTAMER_SCALE=0.5
 
 mkdir -p "${OUTROOT}"
 
@@ -85,39 +87,43 @@ hbond_scale=${HBOND_SCALE}
 sasa_scale=${SASA_SCALE}
 vdw_rep_scale=${VDW_REP_SCALE}
 vdw_attr_scale=${VDW_ATTR_SCALE}
+pi_stack_scale=${PI_STACK_SCALE}
+rotamer_scale=${ROTAMER_SCALE}
 EOF2
 
-  echo "Beam search..."
-  QTF_HBOND_SCALE="${HBOND_SCALE}" \
-  QTF_SASA_SCALE="${SASA_SCALE}" \
-  QTF_VDW_REP_SCALE="${VDW_REP_SCALE}" \
-  QTF_VDW_ATTR_SCALE="${VDW_ATTR_SCALE}" \
-  python qtf_beamsearch_benchmark.py \
-    --protein_name "${NAME}" \
-    --sequence "${SEQUENCE}" \
-    --forcefield "${FORCEFIELD}" \
-    --beam_width "${BEAM_WIDTH}" \
-    --window_deg "${WINDOW_DEG}" \
-    --step_deg "${STEP_DEG}" \
-    --chi_mode "${CHI_MODE}" \
-    --max_sidechain_opts_per_residue "${MAX_SIDECHAIN_OPTS}" \
-    --random_seed "${RANDOM_SEED}" \
-    --reference_pdb "${ABS_PDB_PATH}" \
-    --outdir "${RUN_DIR}/beam"
+  # echo "Beam search..."
+  # QTF_HBOND_SCALE="${HBOND_SCALE}" \
+  # QTF_SASA_SCALE="${SASA_SCALE}" \
+  # QTF_VDW_REP_SCALE="${VDW_REP_SCALE}" \
+  # QTF_VDW_ATTR_SCALE="${VDW_ATTR_SCALE}" \
+  # python qtf_beamsearch_benchmark_test.py \
+  #   --protein_name "${NAME}" \
+  #   --sequence "${SEQUENCE}" \
+  #   --forcefield "${FORCEFIELD}" \
+  #   --beam_width "${BEAM_WIDTH}" \
+  #   --window_deg "${WINDOW_DEG}" \
+  #   --step_deg "${STEP_DEG}" \
+  #   --chi_mode "${CHI_MODE}" \
+  #   --max_sidechain_opts_per_residue "${MAX_SIDECHAIN_OPTS}" \
+  #   --random_seed "${RANDOM_SEED}" \
+  #   --reference_pdb "${ABS_PDB_PATH}" \
+  #   --outdir "${RUN_DIR}/beam"
 
   echo "Native scoring..."
   QTF_HBOND_SCALE="${HBOND_SCALE}" \
   QTF_SASA_SCALE="${SASA_SCALE}" \
   QTF_VDW_REP_SCALE="${VDW_REP_SCALE}" \
   QTF_VDW_ATTR_SCALE="${VDW_ATTR_SCALE}" \
-  python qtf_score_experimental.py \
+  QTF_PI_STACK_SCALE="${PI_STACK_SCALE}" \
+  QTF_ROTAMER_SCALE="${ROTAMER_SCALE}" \
+  python qtf_score_experimental_runner_exports.py \
     --name "${NAME}" \
     --pdb_path "${ABS_PDB_PATH}" \
     --chain "${CHAIN}" \
     --forcefield "${FORCEFIELD}" \
     --chi_mode "${CHI_MODE}" \
     --out_csv "${RUN_DIR}/native/${SAFE_NAME}_native_score.csv" \
-    --out_json "${RUN_DIR}/native/${SAFE_NAME}_native_score.json"
+    --out_json "${RUN_DIR}/native/${SAFE_NAME}_native_score.json" \
 
   echo "Wrote beam outputs to: ${RUN_DIR}/beam"
   ls -1 "${RUN_DIR}/beam" || true

@@ -10,7 +10,6 @@ import mdtraj as md
 import numpy as np
 import pandas as pd
 from Bio.PDB import PDBIO, PDBParser, Select
-from pathlib import Path
 import QTF.runner as runner
 
 
@@ -20,6 +19,7 @@ AA3_TO_1 = {
     'LEU': 'L', 'LYS': 'K', 'MET': 'M', 'PHE': 'F', 'PRO': 'P',
     'SER': 'S', 'THR': 'T', 'TRP': 'W', 'TYR': 'Y', 'VAL': 'V',
 }
+
 
 def pdb_id_from_path(p) -> str:
     return Path(str(p)).stem.upper()
@@ -54,12 +54,13 @@ def extract_subset_pdb(
     chain_id: Optional[str],
     start: Optional[int],
     end: Optional[int],
-) -> Tuple[str, List[int], str]:
+) -> Tuple[str, List[int], str, str]:
     """
     Extract first MODEL only, one chain, optional residue range, and return:
       - path to a temporary trimmed PDB
       - list of original PDB residue numbers
       - 1-letter sequence
+      - selected chain id
     """
     parser = PDBParser(QUIET=True)
     structure = parser.get_structure("native", src_pdb)
@@ -99,7 +100,7 @@ def extract_subset_pdb(
     io.set_structure(structure)
     io.save(out.name, _SelectChainResidues(chain_id, start, end))
 
-    return out.name, pdb_resseqs, "".join(seq_chars)
+    return out.name, pdb_resseqs, "".join(seq_chars), chain_id
 
 
 def compute_qtf_angle_vector(
@@ -191,6 +192,34 @@ def build_ca_coords(folder: runner.QuantumBiophysicsFolder, angle_vec: np.ndarra
         folder._get_angles = orig_get_angles
 
 
+def build_full_coords(folder: runner.QuantumBiophysicsFolder, angle_vec: np.ndarray):
+    """
+    Rebuild the full structure in QTF geometry and return coordinates, labels, and bonds.
+    """
+    orig_get_angles = folder._get_angles
+    try:
+        folder._get_angles = lambda _params: angle_vec
+        coords, labels, bonds = folder.build_full_structure(angle_vec)
+        return coords, labels, bonds
+    finally:
+        folder._get_angles = orig_get_angles
+
+
+
+
+
+
+def make_rebuilt_output_paths(output_dir: Path, spec_name: str, start: Optional[int], end: Optional[int]) -> Tuple[Path, Path]:
+    safe_name = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in spec_name)
+    if start is not None or end is not None:
+        start_str = start if start is not None else "NA"
+        end_str = end if end is not None else "NA"
+        stem = f"{safe_name}_{start_str}_{end_str}_rebuilt"
+    else:
+        stem = f"{safe_name}_rebuilt"
+    return output_dir / f"{stem}_ca.pdb", output_dir / f"{stem}_ca_centroid.pdb"
+
+
 def kabsch_rmsd(P, Q):
     """
     Calculates RMSD between two coordinate sets after optimal alignment.
@@ -236,6 +265,7 @@ def calculate_metrics(ca_coords: np.ndarray) -> Dict[str, float]:
     return {"end_to_end": end_to_end, "radius_of_gyration": rg}
 
 
+
 def score_one(
     name: str,
     pdb_path: str,
@@ -244,8 +274,10 @@ def score_one(
     end: Optional[int],
     forcefield: str,
     chi_mode: str,
+    rebuilt_ca_pdb_path: Optional[str] = None,
+    rebuilt_ca_centroid_pdb_path: Optional[str] = None,
 ) -> Dict:
-    trimmed_pdb, pdb_resseqs, sequence = extract_subset_pdb(pdb_path, chain, start, end)
+    trimmed_pdb, pdb_resseqs, sequence, selected_chain_id = extract_subset_pdb(pdb_path, chain, start, end)
 
     try:
         selective_chi_map = {
@@ -268,8 +300,34 @@ def score_one(
         angle_vec, observed = compute_qtf_angle_vector(trimmed_pdb, folder, chi_mode=chi_mode)
 
         total_energy, terms = eval_energy_terms(folder, angle_vec)
-        rebuilt_ca = build_ca_coords(folder, angle_vec)
+        rebuilt_coords, rebuilt_labels, _ = build_full_coords(folder, angle_vec)
+        rebuilt_ca = np.array([
+            rebuilt_coords[i] for i, lbl in enumerate(rebuilt_labels) if lbl[1] == "CA"
+        ])
         rebuilt_metrics = calculate_metrics(rebuilt_ca)
+        sidechain_centroids = folder.compute_sidechain_centroids(rebuilt_coords, rebuilt_labels)
+
+        if rebuilt_ca_pdb_path is not None:
+            rebuilt_ca_pdb_path = str(rebuilt_ca_pdb_path)
+            folder.save_reduced_pdb(
+                rebuilt_ca,
+                filename=rebuilt_ca_pdb_path,
+                sidechain_centroids=None,
+                energy=total_energy,
+                chain_id=selected_chain_id,
+                resseqs=pdb_resseqs,
+            )
+
+        if rebuilt_ca_centroid_pdb_path is not None:
+            rebuilt_ca_centroid_pdb_path = str(rebuilt_ca_centroid_pdb_path)
+            folder.save_reduced_pdb(
+                rebuilt_ca,
+                filename=rebuilt_ca_centroid_pdb_path,
+                sidechain_centroids=sidechain_centroids,
+                energy=total_energy,
+                chain_id=selected_chain_id,
+                resseqs=pdb_resseqs,
+            )
 
         native_traj = md.load(trimmed_pdb)
         native_ca_idx = native_traj.topology.select("name CA")
@@ -295,7 +353,7 @@ def score_one(
             "experiment_id": experiment_id,
             "name": name,
             "pdb_path": str(pdb_path),
-            "chain": chain or "",
+            "chain": selected_chain_id or "",
             "residue_start": start if start is not None else pdb_resseqs[0],
             "residue_end": end if end is not None else pdb_resseqs[-1],
             "sequence": sequence,
@@ -316,6 +374,8 @@ def score_one(
             "rebuilt_vs_native_ca_rmsd": rebuilt_vs_native_ca_rmsd,
             "n_observed_torsions": len(observed),
             "n_qtf_angles": int(folder.total_angles),
+            "rebuilt_ca_pdb_path": rebuilt_ca_pdb_path or "",
+            "rebuilt_ca_centroid_pdb_path": rebuilt_ca_centroid_pdb_path or "",
         }
 
         for k, v in terms.items():
@@ -352,24 +412,35 @@ def main():
     ap.add_argument("--out_json", default=None)
     args = ap.parse_args()
 
+    base_output_dir = Path(args.out_json).parent if args.out_json else Path(args.out_csv).parent
+    base_output_dir.mkdir(parents=True, exist_ok=True)
+
     rows = []
     if args.panel:
         specs = load_panel(args.panel)
         for spec in specs:
+            start = spec.get("residue_start")
+            end = spec.get("residue_end")
+            rebuilt_ca_pdb_path, rebuilt_ca_centroid_pdb_path = make_rebuilt_output_paths(base_output_dir, spec["name"], start, end)
             rows.append(
                 score_one(
                     name=spec["name"],
                     pdb_path=spec["pdb_path"],
                     chain=spec.get("chain") or None,
-                    start=spec.get("residue_start"),
-                    end=spec.get("residue_end"),
+                    start=start,
+                    end=end,
                     forcefield=spec.get("forcefield", args.forcefield),
                     chi_mode=spec.get("chi_mode", args.chi_mode),
+                    rebuilt_ca_pdb_path=str(rebuilt_ca_pdb_path),
+                    rebuilt_ca_centroid_pdb_path=str(rebuilt_ca_centroid_pdb_path),
                 )
             )
     else:
         if not args.name or not args.pdb_path:
             raise SystemExit("single-structure mode requires --name and --pdb_path")
+        rebuilt_ca_pdb_path, rebuilt_ca_centroid_pdb_path = make_rebuilt_output_paths(
+            base_output_dir, args.name, args.residue_start, args.residue_end
+        )
         rows.append(
             score_one(
                 name=args.name,
@@ -379,6 +450,8 @@ def main():
                 end=args.residue_end,
                 forcefield=args.forcefield,
                 chi_mode=args.chi_mode,
+                rebuilt_ca_pdb_path=str(rebuilt_ca_pdb_path),
+                rebuilt_ca_centroid_pdb_path=str(rebuilt_ca_centroid_pdb_path),
             )
         )
 

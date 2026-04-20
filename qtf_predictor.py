@@ -10,7 +10,7 @@ from datetime import datetime
 
 ### qtf imports
 import QTF.evaluator as evaluator
-import QTF.runner_exports as runner
+import QTF.runner as runner
 
 
 def _jsonify(x):
@@ -58,8 +58,6 @@ def __main__():
 
     parser.add_argument('--forcefield', default="amber", choices=["amber", "opls", "charmm", "all"],
                         help='choice of force field for scoring')
-    parser.add_argument('--chi_mode', default="selective", choices=["chi1_only", "selective", "all"],
-                        help='sidechain DOF exposure mode (match beam/native defaults with selective)')
     parser.add_argument('--mode', default="predict_and_compare", choices=["predict_and_compare", "predict_only"],
                         help='which mode to run script in')
 
@@ -76,7 +74,7 @@ def __main__():
     parser.add_argument('--maxiter', default=2000, type=int, help='max iterations for each trajectory')
 
     args = parser.parse_args()
-    
+
     # required inputs
     sequence = args.predict
     if not sequence:
@@ -89,15 +87,6 @@ def __main__():
     prime_strategy = args.prime_strategy.lower()
     top_k = args.top_k
     top_frac = args.top_frac
-
-    selective_chi_map = {
-        "Y": ["chi1", "chi2"], "W": ["chi1", "chi2"], "F": ["chi1", "chi2"], "H": ["chi1", "chi2"],
-        "D": ["chi1"], "E": ["chi1"], "N": ["chi1"], "Q": ["chi1"],
-        "T": ["chi1"], "S": ["chi1"],
-        "V": ["chi1"], "I": ["chi1"], "L": ["chi1"], "M": ["chi1"],
-        "K": ["chi1"], "R": ["chi1"], "C": ["chi1"], "P": ["chi1"],
-        "A": [], "G": [],
-    }
     
     # iterate over force fields (if "all" is selected) or just the specified one
     force_fields = []
@@ -118,20 +107,9 @@ def __main__():
         # 1. Initialize Folder & Manager
         print(f"--- DIAGNOSING BACKBONE: {sequence} ---")
         if force_field == "all":
-            folder = runner.QuantumBiophysicsFolder(
-                sequence,
-                force_field=["amber", "opls", "charmm"],
-                chi_mode=args.chi_mode,
-                selective_chi_map=selective_chi_map,
-            )
+            folder = runner.QuantumBiophysicsFolder(sequence, force_field=["amber", "opls", "charmm"])
         else:
-            folder = runner.QuantumBiophysicsFolder(
-                sequence,
-                force_field=force_field,
-                chi_mode=args.chi_mode,
-                selective_chi_map=selective_chi_map,
-            )
-        folder.current_stage = 3
+            folder = runner.QuantumBiophysicsFolder(sequence, force_field=force_field)
 
         manager = runner.EnsembleFoldingManager(folder)
 
@@ -191,7 +169,6 @@ def __main__():
                 "ref_rg_A": float(t_rg) if not np.isnan(t_rg) else np.nan,
                 "rebuilt_ca_pdb_path": ca_pdb_path,
                 "rebuilt_ca_centroid_pdb_path": ca_centroid_pdb_path,
-                "chi_mode": args.chi_mode,
                 **flat_terms,
             })
 
@@ -237,7 +214,6 @@ def __main__():
             "mode": args.mode,
             "Reference Structure": (reference_structure_pdb_id if reference_structure_pdb_id is not None and args.mode != "predict_only" else None),
             "Force Field": force_field,
-            "Chi Mode": args.chi_mode,
             "Prime Strategy": prime_strategy,
             "Top K": int(top_k) if top_k is not None else None,
             "Top Frac": float(top_frac) if top_frac is not None else None,

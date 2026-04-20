@@ -234,6 +234,21 @@ def build_ca_coords(folder: runner.QuantumBiophysicsFolder, angle_vec: np.ndarra
     finally:
         folder._get_angles = orig_get_angles
 
+def build_full_coords(folder: runner.QuantumBiophysicsFolder, angle_vec: np.ndarray):
+    """Build full QTF structure and return coordinates, labels, and bonds."""
+    orig_get_angles = folder._get_angles
+    try:
+        folder._get_angles = lambda _params: angle_vec
+        dummy_params = np.zeros(folder.n_params, dtype=float)
+        angle_vec2 = folder._get_angles(dummy_params)
+        coords, labels, bonds = folder.build_full_structure(angle_vec2)
+        return coords, labels, bonds
+    finally:
+        folder._get_angles = orig_get_angles
+
+
+
+
 
 def backbone_signature(folder: runner.QuantumBiophysicsFolder, angle_vec: np.ndarray, round_deg: float = 15.0):
     """
@@ -437,10 +452,20 @@ def main():
             print(f"[warn] failed to load reference backbone for {args.reference_pdb}: {e}")
             ref_coords = None
 
+    pdb_dir = os.path.join(args.outdir, "pdbs")
+    os.makedirs(pdb_dir, exist_ok=True)
+
     for i, st in enumerate(beam, start=1):
         angle_full = st.angles
         E, terms = eval_energy_terms(full_folder, angle_full)
-        ca = build_ca_coords(full_folder, angle_full)
+        coords_full, labels_full, _ = build_full_coords(full_folder, angle_full)
+        ca = np.array([coords_full[j] for j, lbl in enumerate(labels_full) if lbl[1] == "CA"])
+        sidechain_centroids = full_folder.compute_sidechain_centroids(coords_full, labels_full)
+
+        ca_pdb_path = os.path.join(pdb_dir, f"rank_{i:04d}_ca.pdb")
+        ca_centroid_pdb_path = os.path.join(pdb_dir, f"rank_{i:04d}_ca_centroid.pdb")
+        full_folder.save_reduced_pdb(ca, filename=ca_pdb_path, sidechain_centroids=None, energy=E)
+        full_folder.save_reduced_pdb(ca, filename=ca_centroid_pdb_path, sidechain_centroids=sidechain_centroids, energy=E)
 
         row = {
             "protein_name": protein_name,
@@ -460,6 +485,8 @@ def main():
             "energy": float(E),
             "depth": int(st.depth),
             "angles_deg_json": json.dumps([float(np.rad2deg(a)) for a in angle_full]),
+            "rebuilt_ca_pdb_path": ca_pdb_path,
+            "rebuilt_ca_centroid_pdb_path": ca_centroid_pdb_path,
         }
         for k, v in terms.items():
             row[f"term_{k}"] = float(v)

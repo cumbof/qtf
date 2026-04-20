@@ -1092,15 +1092,117 @@ class QuantumBiophysicsFolder:
         coords, labels, bonds = self.build_full_structure(self._get_angles(res_3.x))
         return coords, labels, bonds, self.tracker, res_3.x, res_3.fun
 
-    def save_pdb(self, coords, labels, filename="structure.pdb", energy=0.0):
+    def _aa1_to_3(self, aa):
+        aa1_to_3 = {
+            'A': 'ALA', 'R': 'ARG', 'N': 'ASN', 'D': 'ASP', 'C': 'CYS',
+            'Q': 'GLN', 'E': 'GLU', 'G': 'GLY', 'H': 'HIS', 'I': 'ILE',
+            'L': 'LEU', 'K': 'LYS', 'M': 'MET', 'F': 'PHE', 'P': 'PRO',
+            'S': 'SER', 'T': 'THR', 'W': 'TRP', 'Y': 'TYR', 'V': 'VAL',
+        }
+        return aa1_to_3.get(str(aa).upper(), 'UNK')
+
+    def _format_pdb_atom_line(self, serial, atom_name, res_name, chain_id, resseq, x, y, z, element='C'):
+        return (
+            f"ATOM  {serial:5d} {atom_name:>4} {res_name:>3} {chain_id:1}{resseq:4d}    "
+            f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00           {element:>2}\n"
+        )
+
+    def compute_sidechain_centroids(self, coords, labels):
         """
-        Saves the result to a PDB file viewable in PyMOL or Chimera.
+        Compute one heavy-atom sidechain centroid per residue from rebuilt coordinates.
+        Backbone atoms and hydrogens are excluded.
         """
+        backbone_atoms = {'N', 'CA', 'C', 'O', 'OXT'}
+        by_residue = {}
+
+        for pos, (res_id, atom_name, elem) in zip(coords, labels):
+            if atom_name in backbone_atoms:
+                continue
+            if atom_name.startswith('H') or elem == 'H':
+                continue
+            by_residue.setdefault(int(res_id), []).append(np.asarray(pos, dtype=float))
+
+        return {
+            rid: np.mean(np.vstack(points), axis=0)
+            for rid, points in by_residue.items()
+            if points
+        }
+
+    def save_pdb(self, coords, labels, filename="structure.pdb", energy=0.0, chain_id='A', resseqs=None, resnames=None, remarks=None):
+        """
+        Save arbitrary coordinates/labels to a PDB file viewable in PyMOL or Chimera.
+
+        Args:
+            coords: array-like of shape (N, 3)
+            labels: iterable of (res_id, atom_name, element)
+            filename: output PDB path
+            energy: optional energy remark value
+            chain_id: output chain identifier
+            resseqs: optional list/dict mapping res_id -> residue number
+            resnames: optional list/dict mapping res_id -> residue name (3-letter preferred)
+            remarks: optional iterable of additional REMARK strings
+        """
+        outdir = os.path.dirname(filename)
+        if outdir:
+            os.makedirs(outdir, exist_ok=True)
+
+        chain_out = (chain_id or 'A')[:1]
+        coords = np.asarray(coords, dtype=float)
+
         with open(filename, 'w') as f:
-            f.write(f"REMARK   1 ENERGY: {energy:.3f}\n")
-            for k, (pos, (res_id, atom_name, elem)) in enumerate(zip(coords, labels)):
-                res_name = self.sequence[res_id]
-                f.write(f"ATOM  {k+1:>5}  {atom_name:<4} {res_name:>3} A{res_id+1:>4}    {pos[0]:8.3f}{pos[1]:8.3f}{pos[2]:8.3f}  1.00  0.00           {elem:>2}\n")
+            if energy is not None:
+                f.write(f"REMARK   1 ENERGY: {float(energy):.3f}\n")
+            if remarks:
+                for idx, remark in enumerate(remarks, start=2):
+                    f.write(f"REMARK {idx:3d} {remark}\n")
+
+            for k, (pos, (res_id, atom_name, elem)) in enumerate(zip(coords, labels), start=1):
+                res_id = int(res_id)
+                if resnames is None:
+                    aa = self.sequence[res_id] if 0 <= res_id < len(self.sequence) else 'X'
+                    res_name = self._aa1_to_3(aa)
+                elif isinstance(resnames, dict):
+                    res_name = str(resnames.get(res_id, 'UNK'))
+                else:
+                    res_name = str(resnames[res_id])
+
+                if resseqs is None:
+                    resseq = res_id + 1
+                elif isinstance(resseqs, dict):
+                    resseq = int(resseqs.get(res_id, res_id + 1))
+                else:
+                    resseq = int(resseqs[res_id])
+
+                f.write(self._format_pdb_atom_line(
+                    k, atom_name, res_name, chain_out, resseq,
+                    float(pos[0]), float(pos[1]), float(pos[2]), str(elem)
+                ))
+            f.write('END\n')
+
+    def save_reduced_pdb(self, ca_coords, filename="structure_ca.pdb", sidechain_centroids=None, energy=0.0,
+                         chain_id='A', resseqs=None, resnames=None):
+        """
+        Save a reduced PDB containing CA only, or CA plus one sidechain centroid pseudoatom (SC) per residue.
+        """
+        ca_coords = np.asarray(ca_coords, dtype=float)
+        labels = []
+        coords_out = []
+        n_res = len(ca_coords)
+
+        for i in range(n_res):
+            coords_out.append(ca_coords[i])
+            labels.append((i, 'CA', 'C'))
+            if sidechain_centroids is not None and i in sidechain_centroids:
+                sc = np.asarray(sidechain_centroids[i], dtype=float)
+                coords_out.append(sc)
+                labels.append((i, 'SC', 'C'))
+
+        remarks = [
+            'REDUCED REPRESENTATION GENERATED FROM QTF-OPTIMIZED STRUCTURE',
+            'CONTENTS: CA ONLY' if sidechain_centroids is None else 'CONTENTS: CA PLUS SIDCHAIN CENTROID PSEUDOATOMS (SC)',
+        ]
+        self.save_pdb(coords_out, labels, filename=filename, energy=energy, chain_id=chain_id,
+                      resseqs=resseqs, resnames=resnames, remarks=remarks)
 
 # ==========================================
 # 4. ORCHESTRATOR: ENSEMBLE MANAGER

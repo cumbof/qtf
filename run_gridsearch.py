@@ -1,40 +1,37 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import csv
 import itertools
-import json
 import os
 import subprocess
 from pathlib import Path
 from typing import Dict, Iterable, List
 
 # -----------------------------
-# User-editable settings
+# User-editable defaults
 # -----------------------------
-PANEL_CSV = "protein_panel.csv"
-OUTROOT = Path("grid_runs/grid_v3_rot_pi_largegrid")
+DEFAULT_PANEL_CSV = "protein_panel.csv"
 PYTHON = "python"
 
-BEAM_SCRIPT = "qtf_beamsearch_benchmark.py"
-NATIVE_SCRIPT = "qtf_score_experimental.py"
+BEAM_SCRIPT = "qtf_beamsearch_benchmark_runner.py"
+NATIVE_SCRIPT = "qtf_score_experimental_runner.py"
 
-BEAM_WIDTH = 200
-WINDOW_DEG = 30
-STEP_DEG = 15
+BEAM_WIDTH = 2000
 MAX_SIDECHAIN_OPTS = 9
 RANDOM_SEED = 42
 
-# Grid combinations
-HBOND_SCALE = [0.55, 0.65, 0.75]
-SASA_SCALE = [0.65, 0.75, 0.85]
-VDW_REP_SCALE = [0.03, 0.05, 0.07]
-VDW_ATTR_SCALE = [0.10, 0.15, 0.20]
-ROTAMER_SCALE = [0.25, 0.5, 0.75, 1.0]
-PI_STACK_SCALE = [0.10, 0.25, 0.5, 0.75]
+# Grid combinations (fixed for search-space sweep)
+HBOND_SCALE = [0.45, 0.55, 0.65]
+SASA_SCALE = [0.85]
+VDW_REP_SCALE = [0.05, 0.07, 0.09]
+VDW_ATTR_SCALE = [0.10]
+ROTAMER_SCALE = [0.75, 1.00, 1.25]
+PI_STACK_SCALE = [0.10]
 
 # Optional filters
-ONLY_PROTEINS: list[str] = ["chignolin", "trp_cage", "MBH12"]   # e.g. ["chignolin", "trp_cage"]
+ONLY_PROTEINS: list[str] = ["chignolin", "trp_cage", "MBH12", "1513_MSP-1", "PH1"]
 SKIP_EXISTING = True
 
 
@@ -75,9 +72,34 @@ def write_run_settings(path: Path, settings: Dict[str, str | float]) -> None:
     path.write_text("\n".join(lines) + "\n")
 
 
+def parse_args() -> argparse.Namespace:
+    ap = argparse.ArgumentParser(description="Run QTF grid search over panel proteins.")
+
+    ap.add_argument("--panel_csv", default=DEFAULT_PANEL_CSV,
+                    help="Protein panel CSV file.")
+
+    ap.add_argument("--outsubdir", required=True,
+                    help="Subdirectory under grid_runs/ for this experiment batch.")
+
+    ap.add_argument("--window_deg", type=int, required=True,
+                    help="Backbone basin window in degrees.")
+
+    ap.add_argument("--step_deg", type=int, required=True,
+                    help="Backbone sampling step size in degrees.")
+
+    return ap.parse_args()
+
+
 def main() -> None:
-    panel = load_panel(PANEL_CSV)
-    OUTROOT.mkdir(parents=True, exist_ok=True)
+    args = parse_args()
+
+    print(f"[config] window_deg={args.window_deg}, step_deg={args.step_deg}")
+    
+    panel = load_panel(args.panel_csv)
+
+    # Always enforce grid_runs/ as parent
+    outroot = Path("grid_runs") / args.outsubdir
+    outroot.mkdir(parents=True, exist_ok=True)
 
     manifest_rows = []
 
@@ -95,6 +117,7 @@ def main() -> None:
 
             exp_id = (
                 f"{name}_ff-{forcefield}_chi-{chi_mode}"
+                f"_win-{args.window_deg}_step-{args.step_deg}"
                 f"_hb-{params['hbond_scale']}"
                 f"_sasa-{params['sasa_scale']}"
                 f"_vdwr-{params['vdw_rep_scale']}"
@@ -103,7 +126,7 @@ def main() -> None:
                 f"_pi-{params['pi_stack_scale']}"
             )
 
-            run_dir = OUTROOT / exp_id
+            run_dir = outroot / exp_id
             beam_dir = run_dir / "beam"
             native_dir = run_dir / "native"
             beam_dir.mkdir(parents=True, exist_ok=True)
@@ -132,8 +155,8 @@ def main() -> None:
                 "forcefield": forcefield,
                 "chi_mode": chi_mode,
                 "beam_width": BEAM_WIDTH,
-                "window_deg": WINDOW_DEG,
-                "step_deg": STEP_DEG,
+                "window_deg": args.window_deg,
+                "step_deg": args.step_deg,
                 "max_sidechain_opts_per_residue": MAX_SIDECHAIN_OPTS,
                 "random_seed": RANDOM_SEED,
                 **params,
@@ -151,8 +174,8 @@ def main() -> None:
                     "--sequence", seq,
                     "--forcefield", forcefield,
                     "--beam_width", str(BEAM_WIDTH),
-                    "--window_deg", str(WINDOW_DEG),
-                    "--step_deg", str(STEP_DEG),
+                    "--window_deg", str(args.window_deg),
+                    "--step_deg", str(args.step_deg),
                     "--chi_mode", chi_mode,
                     "--max_sidechain_opts_per_residue", str(MAX_SIDECHAIN_OPTS),
                     "--random_seed", str(RANDOM_SEED),
@@ -186,19 +209,21 @@ def main() -> None:
                 "sequence": seq,
                 "forcefield": forcefield,
                 "chi_mode": chi_mode,
+                "window_deg": args.window_deg,
+                "step_deg": args.step_deg,
                 **params,
                 "status": status,
                 "error": error,
                 "run_dir": str(run_dir),
             })
 
-            manifest = OUTROOT / "grid_manifest.csv"
+            manifest = outroot / "grid_manifest.csv"
             with open(manifest, "w", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=list(manifest_rows[0].keys()))
                 writer.writeheader()
                 writer.writerows(manifest_rows)
 
-    print(f"[done] wrote manifest: {OUTROOT / 'grid_manifest.csv'}")
+    print(f"[done] wrote manifest: {outroot / 'grid_manifest.csv'}")
 
 
 if __name__ == "__main__":
