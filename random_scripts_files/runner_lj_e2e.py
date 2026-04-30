@@ -12,17 +12,6 @@ except ImportError:
     efficient_su2 = None
     Statevector = None
     QISKIT_AVAILABLE = False
-
-try:
-    import pyrosetta
-    from pyrosetta import rosetta
-    PYROSETTA_AVAILABLE = True
-except ImportError:
-    pyrosetta = None
-    rosetta = None
-    PYROSETTA_AVAILABLE = False
-
-_PYROSETTA_INIT_DONE = False
 from scipy.optimize import minimize
 from scipy.spatial.distance import pdist, squareform
 
@@ -159,12 +148,6 @@ class QuantumBiophysicsFolder:
         force_field='charmm',
         chi_mode='all',
         selective_chi_map=None,
-        energy_backend=None,
-        use_e2e_constraint=None,
-        e2e_scale=None,
-        rosetta_repack=None,
-        rosetta_fa_min=None,
-        rosetta_cen_min=None,
     ):
         """
         Initialize the folder.
@@ -246,27 +229,10 @@ class QuantumBiophysicsFolder:
         # Ref: Bondi, A. (1964). J. Phys. Chem. 68, 441-451.
         self.VDW_RADII = {'H': 0.6, 'C': 1.7, 'N': 1.55, 'O': 1.52, 'S': 1.8}
 
-        # 3b. Minimal atom-typed Lennard-Jones parameters.
-        # These are not a complete AMBER/CHARMM parameter table; they are a
-        # pragmatic intermediate model that distinguishes backbone, carbonyl,
-        # aliphatic sidechain, aromatic, polar heteroatom, sulfur, and hydrogen
-        # environments while preserving the existing output term names.
-        # Values are in Angstrom-ish r_min/2 radii and kcal/mol-ish epsilons.
-        self.LJ_TYPE_PARAMS = {
-            'H':          {'radius': 1.20, 'epsilon': 0.0157},
-            'H_polar':    {'radius': 1.05, 'epsilon': 0.0157},
-            'C_backbone': {'radius': 1.75, 'epsilon': 0.0700},  # CA-like
-            'C_carbonyl': {'radius': 1.70, 'epsilon': 0.0860},
-            'C_aliphatic':{'radius': 1.90, 'epsilon': 0.1094},
-            'C_aromatic': {'radius': 1.85, 'epsilon': 0.1200},
-            'N_backbone': {'radius': 1.65, 'epsilon': 0.1700},
-            'N_sidechain':{'radius': 1.65, 'epsilon': 0.1700},
-            'O_carbonyl': {'radius': 1.60, 'epsilon': 0.2100},
-            'O_hydroxyl': {'radius': 1.55, 'epsilon': 0.1700},
-            'O_carboxyl': {'radius': 1.60, 'epsilon': 0.2100},
-            'S_sulfur':   {'radius': 2.00, 'epsilon': 0.2500},
-            'X':          {'radius': 1.75, 'epsilon': 0.1000},
-        }
+        # 3b. Lennard-Jones well depths (kcal/mol-ish relative scale)
+        # Element-level approximation, intended to improve packing balance while
+        # preserving the existing output term names (vdw_repulsion/vdw_attractive).
+        self.LJ_EPSILON = {'H': 0.0157, 'C': 0.1094, 'N': 0.17, 'O': 0.21, 'S': 0.25}
         
         # 4. SIDE CHAIN TOPOLOGY
         # Ref: Engh, R. A., & Huber, R. (1991). Acta Cryst. A47, 392-400.
@@ -371,41 +337,6 @@ class QuantumBiophysicsFolder:
             self.ansatz = None
             self.n_params = 1
         
-        # --- OPTIONAL STAGE-3 BACKEND ---
-        # Preferred control path is explicit constructor args from argparse callers.
-        # Environment variables remain as backwards-compatible fallbacks for notebooks
-        # and existing shell/grid scripts.
-        def _as_bool(value, default=False):
-            if value is None:
-                return bool(default)
-            if isinstance(value, bool):
-                return value
-            return str(value).strip().lower() not in ("0", "false", "no", "off", "none", "")
-
-        self.stage3_backend = (energy_backend or os.getenv("QTF_STAGE3_BACKEND", "custom")).strip().lower()
-        if self.stage3_backend not in ("custom", "rosetta"):
-            raise ValueError("energy_backend/stage3_backend must be 'custom' or 'rosetta'")
-
-        self.use_e2e_constraint = _as_bool(
-            use_e2e_constraint,
-            os.getenv("QTF_USE_E2E_CONSTRAINT", "1").strip().lower() not in ("0", "false", "no", "off")
-        )
-        self.e2e_scale = float(e2e_scale if e2e_scale is not None else os.getenv("QTF_E2E_SCALE", "1.0"))
-
-        self.rosetta_flags = os.getenv("QTF_PYROSETTA_FLAGS", "-mute all")
-        self.rosetta_centroid_weights = os.getenv("QTF_ROSETTA_CEN_WTS", "cen_std")
-        self.rosetta_fullatom_weights = os.getenv("QTF_ROSETTA_FA_WTS", "ref2015")
-        self.rosetta_cen_weight = float(os.getenv("QTF_ROSETTA_CEN_WEIGHT", "0.35"))
-        self.rosetta_fa_weight = float(os.getenv("QTF_ROSETTA_FA_WEIGHT", "1.0"))
-        self.rosetta_do_centroid_min = _as_bool(rosetta_cen_min, os.getenv("QTF_ROSETTA_CEN_MIN", "0") == "1")
-        self.rosetta_do_fullatom_min = _as_bool(rosetta_fa_min, os.getenv("QTF_ROSETTA_FA_MIN", "0") == "1")
-        self.rosetta_do_repack = _as_bool(rosetta_repack, os.getenv("QTF_ROSETTA_REPACK", "0") == "1")
-        self._rosetta_ready = False
-        self._rosetta_scorefxn_cen = None
-        self._rosetta_scorefxn_fa = None
-        self._last_rosetta_pose = None
-        self._last_rosetta_ca = None
-
         self.current_stage = 1
         
         # --- PRE-COMPUTE CACHE (Optimization) ---
@@ -581,45 +512,6 @@ class QuantumBiophysicsFolder:
 
         return np.array(coords), labels, bonds
 
-    def _assign_lj_type(self, rid: int, atom_name: str, elem: str) -> str:
-        """Assign a compact LJ atom type from residue, atom name, and element."""
-        aa = self.sequence[int(rid)] if 0 <= int(rid) < self.n_residues else "X"
-        name = str(atom_name)
-        elem = str(elem)
-
-        if elem == "H" or name.startswith("H"):
-            if name in ("H", "HN", "HG", "HG1", "HH", "HE1", "HE2"):
-                return "H_polar"
-            return "H"
-
-        if elem == "S" or name.startswith("S"):
-            return "S_sulfur"
-
-        if elem == "O":
-            if name == "O" or name == "OXT":
-                return "O_carbonyl"
-            if name in ("OD1", "OD2", "OE1", "OE2"):
-                return "O_carboxyl"
-            return "O_hydroxyl"
-
-        if elem == "N":
-            if name == "N":
-                return "N_backbone"
-            return "N_sidechain"
-
-        if elem == "C":
-            if name == "C":
-                return "C_carbonyl"
-            if name == "CA":
-                return "C_backbone"
-            if aa in ("F", "Y", "W", "H") and name in {
-                "CG", "CD1", "CD2", "CE1", "CE2", "CE3", "CZ", "CZ2", "CZ3", "CH2"
-            }:
-                return "C_aromatic"
-            return "C_aliphatic"
-
-        return "X"
-
     def _initialize_topology_cache(self):
         """
         Runs structure builder once to determine static properties of atoms.
@@ -651,19 +543,9 @@ class QuantumBiophysicsFolder:
                 if name in ['N', 'CA', 'C', 'O', 'OXT', 'H1', 'H2', 'H3', 'H']: q = 0.0
             self.q_vector[k] = q
         
-        # 3. Pre-calculate atom-typed LJ radii / epsilons (Vectorized)
-        self.lj_type_vector = np.array([
-            self._assign_lj_type(rid, name, elem)
-            for rid, name, elem in self.static_labels
-        ])
-        self.vdw_radii_vector = np.array([
-            self.LJ_TYPE_PARAMS.get(t, self.LJ_TYPE_PARAMS['X'])['radius']
-            for t in self.lj_type_vector
-        ], dtype=float)
-        self.lj_epsilon_vector = np.array([
-            self.LJ_TYPE_PARAMS.get(t, self.LJ_TYPE_PARAMS['X'])['epsilon']
-            for t in self.lj_type_vector
-        ], dtype=float)
+        # 3. Pre-calculate VdW Radii / LJ Epsilon (Vectorized)
+        self.vdw_radii_vector = np.array([self.VDW_RADII.get(x[2], 1.7) for x in self.static_labels])
+        self.lj_epsilon_vector = np.array([self.LJ_EPSILON.get(x[2], 0.1094) for x in self.static_labels])
 
         # 3b. Build a bond-graph topology map so nonbonded terms can exclude
         # true 1-2 / 1-3 pairs and soften 1-4 pairs. This is more physical than
@@ -735,145 +617,6 @@ class QuantumBiophysicsFolder:
         
         self._cache_initialized = True
 
-    def _ensure_rosetta(self):
-        global _PYROSETTA_INIT_DONE
-        if self._rosetta_ready:
-            return
-        if not PYROSETTA_AVAILABLE:
-            raise RuntimeError("PyRosetta is not installed, but QTF_STAGE3_BACKEND=rosetta was requested.")
-        if not _PYROSETTA_INIT_DONE:
-            pyrosetta.init(self.rosetta_flags)
-            _PYROSETTA_INIT_DONE = True
-        self._rosetta_scorefxn_cen = pyrosetta.create_score_function(self.rosetta_centroid_weights)
-        try:
-            self._rosetta_scorefxn_fa = pyrosetta.create_score_function(self.rosetta_fullatom_weights)
-        except Exception:
-            self._rosetta_scorefxn_fa = pyrosetta.get_fa_scorefxn()
-        self._rosetta_ready = True
-
-    def _build_rosetta_pose_from_angles(self, angle_vec):
-        self._ensure_rosetta()
-        pose = pyrosetta.pose_from_sequence(self.sequence, "fa_standard")
-        for i in range(1, pose.total_residue()):
-            pose.set_omega(i, 180.0)
-        for dof, ang in zip(self.dof_map, angle_vec):
-            resi = int(dof["res"]) + 1
-            t = str(dof["type"])
-            deg = float(np.rad2deg(ang))
-            try:
-                if t == "phi":
-                    pose.set_phi(resi, deg)
-                elif t == "psi":
-                    pose.set_psi(resi, deg)
-                elif t.startswith("chi"):
-                    chi_idx = int(t.replace("chi", ""))
-                    if chi_idx <= pose.residue(resi).nchi():
-                        pose.set_chi(chi_idx, resi, deg)
-            except Exception:
-                continue
-        return pose
-
-    def _pose_ca_coords(self, pose):
-        ca = []
-        for i in range(1, pose.total_residue() + 1):
-            rsd = pose.residue(i)
-            if rsd.has("CA"):
-                xyz = rsd.xyz("CA")
-                ca.append([float(xyz.x), float(xyz.y), float(xyz.z)])
-        return np.asarray(ca, dtype=float) if ca else np.zeros((0, 3), dtype=float)
-
-    def _extract_rosetta_terms(self, pose, scorefxn, prefix):
-        """Return a stable set of Rosetta term columns, including zeros."""
-        _ = scorefxn(pose)
-        emap = pose.energies().total_energies()
-        names = [
-            "fa_atr", "fa_rep", "fa_sol", "lk_ball_wtd", "fa_elec",
-            "hbond_sr_bb", "hbond_lr_bb", "hbond_bb_sc", "hbond_sc",
-            "rama_prepro", "omega", "p_aa_pp", "fa_dun", "dslf_fa13", "ref",
-            "env", "pair", "cbeta", "vdw", "rg", "rama",
-        ]
-        out = {}
-        for name in names:
-            val = 0.0
-            if hasattr(rosetta.core.scoring, name):
-                st = getattr(rosetta.core.scoring, name)
-                try:
-                    val = float(emap[st])
-                except Exception:
-                    val = 0.0
-            out[f"{prefix}_{name}"] = val
-        out[f"{prefix}_total"] = float(scorefxn(pose))
-        return out
-
-    def _score_stage3_rosetta(self, angle_vec, return_terms=False):
-        terms = {"energy_backend_rosetta": 1.0, "energy_backend_custom": 0.0}
-        try:
-            self._ensure_rosetta()
-            fa_pose = self._build_rosetta_pose_from_angles(angle_vec)
-
-            cen_pose = fa_pose.clone()
-            rosetta.protocols.simple_moves.SwitchResidueTypeSetMover("centroid").apply(cen_pose)
-            cen_score = float(self._rosetta_scorefxn_cen(cen_pose))
-            terms.update(self._extract_rosetta_terms(cen_pose, self._rosetta_scorefxn_cen, "cen"))
-
-            if self.rosetta_do_centroid_min:
-                mm = rosetta.core.kinematics.MoveMap()
-                mm.set_bb(True)
-                mm.set_chi(False)
-                minmov = rosetta.protocols.minimization_packing.MinMover()
-                minmov.movemap(mm)
-                minmov.score_function(self._rosetta_scorefxn_cen)
-                minmov.min_type("lbfgs_armijo_nonmonotone")
-                minmov.apply(cen_pose)
-                cen_score = float(self._rosetta_scorefxn_cen(cen_pose))
-                terms.update(self._extract_rosetta_terms(cen_pose, self._rosetta_scorefxn_cen, "cen"))
-
-            if self.rosetta_do_repack:
-                task = pyrosetta.standard_packer_task(fa_pose)
-                task.restrict_to_repacking()
-                task.or_include_current(True)
-                packer = rosetta.protocols.minimization_packing.PackRotamersMover(self._rosetta_scorefxn_fa, task)
-                packer.apply(fa_pose)
-
-            if self.rosetta_do_fullatom_min:
-                mm = rosetta.core.kinematics.MoveMap()
-                mm.set_bb(False)
-                mm.set_chi(True)
-                minmov = rosetta.protocols.minimization_packing.MinMover()
-                minmov.movemap(mm)
-                minmov.score_function(self._rosetta_scorefxn_fa)
-                minmov.min_type("lbfgs_armijo_nonmonotone")
-                minmov.apply(fa_pose)
-
-            fa_score = float(self._rosetta_scorefxn_fa(fa_pose))
-            terms.update(self._extract_rosetta_terms(fa_pose, self._rosetta_scorefxn_fa, "fa"))
-            total = self.rosetta_cen_weight * cen_score + self.rosetta_fa_weight * fa_score
-            terms["rosetta_cen_weight"] = float(self.rosetta_cen_weight)
-            terms["rosetta_fa_weight"] = float(self.rosetta_fa_weight)
-            terms["rosetta_total"] = float(total)
-            terms["rosetta_error"] = 0.0
-            self._last_rosetta_pose = fa_pose.clone()
-            self._last_rosetta_ca = self._pose_ca_coords(fa_pose)
-        except Exception as exc:
-            total = 1.0e6
-            # Emit stable columns even on failure so CSV/analyzer columns do not
-            # become all-empty or disappear in mixed runs.
-            for p in ("cen", "fa"):
-                for name in [
-                    "fa_atr", "fa_rep", "fa_sol", "lk_ball_wtd", "fa_elec",
-                    "hbond_sr_bb", "hbond_lr_bb", "hbond_bb_sc", "hbond_sc",
-                    "rama_prepro", "omega", "p_aa_pp", "fa_dun", "dslf_fa13", "ref",
-                    "env", "pair", "cbeta", "vdw", "rg", "rama", "total",
-                ]:
-                    terms[f"{p}_{name}"] = 0.0
-            terms["rosetta_cen_weight"] = float(self.rosetta_cen_weight)
-            terms["rosetta_fa_weight"] = float(self.rosetta_fa_weight)
-            terms["rosetta_total"] = float(total)
-            terms["rosetta_error"] = 1.0
-            terms["rosetta_message_hash"] = float(abs(hash(str(exc))) % 1000000)
-        self.last_energy_terms = {k: float(v) for k, v in terms.items()}
-        return float(total)
-
     def energy_function(self, params, return_terms: bool = False):
         """
         THE CRITIC (Objective Function)
@@ -899,9 +642,6 @@ class QuantumBiophysicsFolder:
 
         # 1. GENERATION: Get Geometry from Quantum Parameters
         angle_vec = self._get_angles(params)
-        if self.current_stage == 3 and self.stage3_backend == "rosetta":
-            return self._score_stage3_rosetta(angle_vec, return_terms=return_terms)
-
         coords, _, _ = self.build_full_structure(angle_vec)
 
         terms = {
@@ -934,24 +674,21 @@ class QuantumBiophysicsFolder:
         neighbor_counts = np.array([0.0], dtype=float)
         burial_fractions = np.array([0.0], dtype=float)
 
-        # 0. END-TO-END BIAS (optional, length-aware, weaker, with slack)
+        # 0. END-TO-END BIAS (length-aware, weaker, with slack)
         ca_indices = [i for i, lbl in enumerate(self.static_labels) if lbl[1] == 'CA']
-        dist_ends = 0.0
-        target_e2e = 0.0
-        slack_e2e = 0.0
         if len(ca_indices) >= 2:
             start_ca = coords[ca_indices[0]]
             end_ca = coords[ca_indices[-1]]
-            dist_ends = float(np.linalg.norm(start_ca - end_ca))
+            dist_ends = np.linalg.norm(start_ca - end_ca)
 
-            # Mild sequence-length-aware prior. It can be disabled with
-            # QTF_USE_E2E_CONSTRAINT=0 while preserving diagnostics.
-            target_e2e = float(4.5 + 0.40 * max(0, self.n_residues - 5))
-            slack_e2e = float(1.5 + 0.05 * self.n_residues)
-            if self.use_e2e_constraint:
-                deviation = max(0.0, abs(dist_ends - target_e2e) - slack_e2e)
-                e_constraint = self.e2e_scale * constraint_strength * (deviation ** 2)
-                add_term("constraint", e_constraint)
+            # Replace the fixed 5.5 A target with a mild sequence-length-aware prior.
+            # This is intentionally weak: it should discourage absurdly extended or
+            # over-collapsed states without dictating one exact end-to-end distance.
+            target_e2e = 4.5 + 0.40 * max(0, self.n_residues - 5)
+            slack_e2e = 1.5 + 0.05 * self.n_residues
+            deviation = max(0.0, abs(dist_ends - target_e2e) - slack_e2e)
+            e_constraint = constraint_strength * (deviation ** 2)
+            add_term("constraint", e_constraint)
 
         # 1. IMPLICIT SOLVENT (SASA)
         if np.sum(self.mask_hydrophobic) > 0:
@@ -1085,10 +822,11 @@ class QuantumBiophysicsFolder:
             # Soft-cap the repulsive branch. The unmodified wall is too brittle for
             # the current rebuilt geometry and swamps the total score.
             rep_raw = np.clip(lj, 0.0, None)
-            rep_term = rep_raw.copy()
-            high_rep = rep_raw > LJ_REP_CLIP
-            if np.any(high_rep):
-                rep_term[high_rep] = LJ_REP_CLIP + np.log1p(rep_raw[high_rep] - LJ_REP_CLIP)
+            rep_term = np.where(
+                rep_raw <= LJ_REP_CLIP,
+                rep_raw,
+                LJ_REP_CLIP + np.log1p(rep_raw - LJ_REP_CLIP),
+            )
             att_term = np.clip(lj, LJ_ATT_CLIP, 0.0)
 
             if np.any(rep_term > 0.0):
@@ -1142,10 +880,6 @@ class QuantumBiophysicsFolder:
         if return_terms:
             self.last_energy_terms = {
             **terms,
-
-            "energy_backend_custom": 1.0,
-            "energy_backend_rosetta": 0.0,
-            "use_e2e_constraint": 1.0 if self.use_e2e_constraint else 0.0,
 
             # end-to-end diagnostics
             "e2e_distance": float(dist_ends) if len(ca_indices) >= 2 else 0.0,

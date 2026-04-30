@@ -73,6 +73,33 @@ def kabsch_rmsd(P, Q):
     return float(rms)
 
 
+def core_ca_slice(coords: np.ndarray) -> np.ndarray:
+    """Return CA coordinates excluding flexible terminal residues.
+
+    Uses residues 2..N-1 (1-indexed), i.e. drops the first and last CA.
+    Falls back to all coordinates for very short chains.
+    """
+    arr = np.asarray(coords)
+    if arr.shape[0] > 2:
+        return arr[1:-1]
+    return arr
+
+
+def core_ca_rmsd(P: np.ndarray, Q: np.ndarray) -> float:
+    """Kabsch RMSD over the core CA range: residue 2 through second-to-last."""
+    return kabsch_rmsd(core_ca_slice(P), core_ca_slice(Q))
+
+
+def core_ca_range_metadata(n_residues: int) -> Dict[str, object]:
+    use_core = n_residues > 2
+    return {
+        "rmsd_ca_excludes_terminal_residues": bool(use_core),
+        "rmsd_ca_start_residue_1indexed": 2 if use_core else 1,
+        "rmsd_ca_end_residue_1indexed": (n_residues - 1) if use_core else n_residues,
+        "rmsd_ca_n_aligned": (n_residues - 2) if use_core else n_residues,
+    }
+
+
 def load_reference_ca_coords(pdb_path: str) -> np.ndarray:
     """
     Load CA coordinates from the reference PDB in Angstroms.
@@ -141,27 +168,38 @@ def residue_assignments(
     dof_entries: List[Dict[str, Any]],
     backbone_pairs: List[Tuple[float, float]],
     chi_rotamer_map: Dict[str, List[float]],
+    max_options_per_residue: Optional[int] = None,
+    rng: Optional[np.random.Generator] = None,
 ) -> List[np.ndarray]:
     """
     Build per-residue assignment vectors in dof_entries order.
 
-    Supports residue-specific chi branching:
-      chi1, chi2, ... each get their own discrete rotamer list.
+    IMPORTANT: this function is deliberately lazy when max_options_per_residue
+    is set. With large windows (e.g. 125/5) and chi_mode='all', the local
+    Cartesian product can be millions of combinations for a single residue.
+    The old implementation materialized that full list and then downsampled it,
+    which can blow up memory/time before beam search even starts.
+
+    Behavior:
+      * max_options_per_residue is None or <=0: enumerate the full local space.
+      * otherwise: uniformly sample up to max_options_per_residue unique local
+        combinations from the implicit Cartesian product without materializing
+        the full product.
+
+    The returned options are still real combinations from the requested
+    window/step/chi-mode space; we just avoid constructing combinations that
+    will never be scored.
     """
     types = [d["type"] for d in dof_entries]
     has_phi = "phi" in types
     has_psi = "psi" in types
 
-    backbone_assigns: List[Dict[str, float]] = []
     if has_phi and has_psi:
-        for phi, psi in backbone_pairs:
-            backbone_assigns.append({"phi": phi, "psi": psi})
+        backbone_assigns = [{"phi": float(phi), "psi": float(psi)} for phi, psi in backbone_pairs]
     elif has_phi:
-        for phi, _ in backbone_pairs:
-            backbone_assigns.append({"phi": phi})
+        backbone_assigns = [{"phi": float(phi)} for phi, _ in backbone_pairs]
     elif has_psi:
-        for _, psi in backbone_pairs:
-            backbone_assigns.append({"psi": psi})
+        backbone_assigns = [{"psi": float(psi)} for _, psi in backbone_pairs]
     else:
         backbone_assigns = [{}]
 
@@ -169,26 +207,34 @@ def residue_assignments(
         [t for t in types if t.startswith("chi")],
         key=lambda x: int(x.replace("chi", ""))
     )
+    chi_values = [list(map(float, chi_rotamer_map.get(t, [0.0]))) for t in chi_types]
 
-    assigns = backbone_assigns
-    for chi_t in chi_types:
-        chi_vals = chi_rotamer_map.get(chi_t, [0.0])
-        new_assigns = []
-        for base in assigns:
-            for v in chi_vals:
-                d = dict(base)
-                d[chi_t] = float(v)
-                new_assigns.append(d)
-        assigns = new_assigns
+    axes = [backbone_assigns] + chi_values
+    axis_lengths = [len(ax) for ax in axes]
+    total = int(np.prod(axis_lengths, dtype=np.int64)) if axis_lengths else 1
 
-    out = []
-    for a in assigns:
-        vec = []
-        for d in dof_entries:
-            t = d["type"]
-            vec.append(a.get(t, 0.0))
-        out.append(np.array(vec, dtype=float))
-    return out
+    if max_options_per_residue is None or int(max_options_per_residue) <= 0 or total <= int(max_options_per_residue):
+        selected = range(total)
+    else:
+        if rng is None:
+            rng = np.random.default_rng()
+        selected = sorted(rng.choice(total, size=int(max_options_per_residue), replace=False).tolist())
+
+    def decode(flat_idx: int) -> np.ndarray:
+        idx = int(flat_idx)
+        per_axis = []
+        for n in reversed(axis_lengths):
+            per_axis.append(idx % n)
+            idx //= n
+        per_axis = list(reversed(per_axis))
+
+        assign = dict(backbone_assigns[per_axis[0]])
+        for chi_t, vals, axis_i in zip(chi_types, chi_values, per_axis[1:]):
+            assign[chi_t] = float(vals[axis_i])
+
+        return np.array([assign.get(d["type"], 0.0) for d in dof_entries], dtype=float)
+
+    return [decode(i) for i in selected]
 
 
 def maybe_downsample_options(
@@ -196,12 +242,18 @@ def maybe_downsample_options(
     max_options_per_residue: Optional[int],
     rng: np.random.Generator,
 ) -> List[np.ndarray]:
-    if max_options_per_residue is None or len(options) <= max_options_per_residue:
+    """
+    Backward-compatible helper retained for older call sites.
+
+    New code should pass max_options_per_residue into residue_assignments()
+    directly so huge local option lists are never materialized. This helper only
+    handles already-built lists.
+    """
+    if max_options_per_residue is None or int(max_options_per_residue) <= 0 or len(options) <= int(max_options_per_residue):
         return options
-    idx = rng.choice(len(options), size=max_options_per_residue, replace=False)
+    idx = rng.choice(len(options), size=int(max_options_per_residue), replace=False)
     idx = sorted(idx.tolist())
     return [options[i] for i in idx]
-
 
 def eval_energy_terms(folder: runner.QuantumBiophysicsFolder, angle_vec: np.ndarray) -> Tuple[float, Dict[str, float]]:
     """
@@ -294,9 +346,28 @@ def main():
     ap.add_argument("--outdir", default="beamsearch_outputs")
     ap.add_argument("--save_partial", action="store_true", help="save beam survivors at each residue depth to CSV")
     ap.add_argument("--chi_mode", default="selective", choices=["chi1_only", "selective", "all"])
-    ap.add_argument("--max_sidechain_opts_per_residue", type=int, default=9)
+    ap.add_argument("--max_sidechain_opts_per_residue", type=int, default=9,
+                    help="Max sampled local torsion choices per residue. 0 means exhaustive local enumeration and can explode for 125/5/all.")
+    ap.add_argument("--energy_backend", default="custom", choices=["custom", "rosetta"],
+                    help="Stage-3 scorer: custom QTF energy or PyRosetta-backed score.")
+    ap.add_argument("--use_e2e_constraint", type=int, default=1,
+                    help="1 to use length-scaled E2E constraint in custom scorer, 0 to disable.")
+    ap.add_argument("--e2e_scale", type=float, default=1.0,
+                    help="Multiplier for the length-scaled E2E constraint when enabled.")
+    ap.add_argument("--rosetta_repack", type=int, default=0)
+    ap.add_argument("--rosetta_fa_min", type=int, default=0)
+    ap.add_argument("--rosetta_cen_min", type=int, default=0)
     ap.add_argument("--random_seed", type=int, default=123)
     args = ap.parse_args()
+
+    # Keep command-line args as source of truth, but mirror them into env vars
+    # because some lower-level helper code still uses env fallbacks.
+    os.environ["QTF_STAGE3_BACKEND"] = str(args.energy_backend)
+    os.environ["QTF_USE_E2E_CONSTRAINT"] = "1" if int(args.use_e2e_constraint) else "0"
+    os.environ["QTF_E2E_SCALE"] = str(args.e2e_scale)
+    os.environ["QTF_ROSETTA_REPACK"] = "1" if int(args.rosetta_repack) else "0"
+    os.environ["QTF_ROSETTA_FA_MIN"] = "1" if int(args.rosetta_fa_min) else "0"
+    os.environ["QTF_ROSETTA_CEN_MIN"] = "1" if int(args.rosetta_cen_min) else "0"
 
     os.makedirs(args.outdir, exist_ok=True)
     rng = np.random.default_rng(args.random_seed)
@@ -309,6 +380,7 @@ def main():
     reference_pdb_path = str(args.reference_pdb) if args.reference_pdb else None
     experiment_id = (
         f"{protein_name}_ff-{args.forcefield}_chi-{args.chi_mode}"
+        f"_backend-{args.energy_backend}_e2e-{args.use_e2e_constraint}"
         f"_hb-{tuning['hbond_scale']}_sasa-{tuning['sasa_scale']}"
         f"_vdwr-{tuning['vdw_rep_scale']}_vdwa-{tuning['vdw_attr_scale']}"
     )
@@ -341,6 +413,12 @@ def main():
             force_field=args.forcefield,
             chi_mode=args.chi_mode,
             selective_chi_map=selective_chi_map,
+            energy_backend=args.energy_backend,
+            use_e2e_constraint=bool(args.use_e2e_constraint),
+            e2e_scale=args.e2e_scale,
+            rosetta_repack=bool(args.rosetta_repack),
+            rosetta_fa_min=bool(args.rosetta_fa_min),
+            rosetta_cen_min=bool(args.rosetta_cen_min),
         )
         folders_by_k[k].current_stage = 3
 
@@ -357,11 +435,8 @@ def main():
             dofs_by_res.get(r, []),
             backbone_pairs,
             chi_rotamer_map,
-        )
-        residue_opts[r] = maybe_downsample_options(
-            residue_opts[r],
-            args.max_sidechain_opts_per_residue,
-            rng,
+            max_options_per_residue=args.max_sidechain_opts_per_residue,
+            rng=rng,
         )
 
     dof_count_by_res = [len(dofs_by_res.get(r, [])) for r in range(L)]
@@ -502,8 +577,9 @@ def main():
                     row["native_like"] = False
                     row["rmsd_error"] = f"shape mismatch: built {ca.shape}, ref {ref_coords.shape}"
                 else:
-                    rmsd = kabsch_rmsd(ca, ref_coords)
+                    rmsd = core_ca_rmsd(ca, ref_coords)
                     row["rmsd_to_reference_A"] = rmsd
+                    row.update(core_ca_range_metadata(len(ca)))
                     row["ref_e2e_A"] = ref_e2e
                     row["ref_rg_A"] = ref_rg
                     row["native_like"] = bool(float(rmsd) <= float(args.native_thresh))
@@ -546,6 +622,9 @@ def main():
         "chi_mode": args.chi_mode,
         "chi_rotamers_deg": [-60, 60, 180],
         "native_thresh_A": args.native_thresh,
+        "energy_backend": args.energy_backend,
+        "use_e2e_constraint": bool(args.use_e2e_constraint),
+        "e2e_scale": args.e2e_scale,
         "tuning": tuning,
         "best": {k: _jsonify(v) for k, v in best.items()},
     }

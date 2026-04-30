@@ -247,6 +247,33 @@ def kabsch_rmsd(P, Q):
     return float(rms)
 
 
+def core_ca_slice(coords: np.ndarray) -> np.ndarray:
+    """Return CA coordinates excluding flexible terminal residues.
+
+    Uses residues 2..N-1 (1-indexed), i.e. drops the first and last CA.
+    Falls back to all coordinates for very short chains.
+    """
+    arr = np.asarray(coords)
+    if arr.shape[0] > 2:
+        return arr[1:-1]
+    return arr
+
+
+def core_ca_rmsd(P: np.ndarray, Q: np.ndarray) -> float:
+    """Kabsch RMSD over the core CA range: residue 2 through second-to-last."""
+    return kabsch_rmsd(core_ca_slice(P), core_ca_slice(Q))
+
+
+def core_ca_range_metadata(n_residues: int) -> Dict[str, object]:
+    use_core = n_residues > 2
+    return {
+        "rmsd_ca_excludes_terminal_residues": bool(use_core),
+        "rmsd_ca_start_residue_1indexed": 2 if use_core else 1,
+        "rmsd_ca_end_residue_1indexed": (n_residues - 1) if use_core else n_residues,
+        "rmsd_ca_n_aligned": (n_residues - 2) if use_core else n_residues,
+    }
+
+
 def get_tuning_settings():
     return {
         "hbond_scale": float(os.getenv("QTF_HBOND_SCALE", "0.75")),
@@ -274,6 +301,12 @@ def score_one(
     end: Optional[int],
     forcefield: str,
     chi_mode: str,
+    energy_backend: str = "custom",
+    use_e2e_constraint: bool = True,
+    e2e_scale: float = 1.0,
+    rosetta_repack: bool = False,
+    rosetta_fa_min: bool = False,
+    rosetta_cen_min: bool = False,
     rebuilt_ca_pdb_path: Optional[str] = None,
     rebuilt_ca_centroid_pdb_path: Optional[str] = None,
 ) -> Dict:
@@ -294,6 +327,12 @@ def score_one(
             force_field=forcefield,
             chi_mode="selective" if chi_mode == "selective" else "all",
             selective_chi_map=selective_chi_map,
+            energy_backend=energy_backend,
+            use_e2e_constraint=use_e2e_constraint,
+            e2e_scale=e2e_scale,
+            rosetta_repack=rosetta_repack,
+            rosetta_fa_min=rosetta_fa_min,
+            rosetta_cen_min=rosetta_cen_min,
         )
         folder.current_stage = 3
 
@@ -334,7 +373,8 @@ def score_one(
         native_ca = native_traj.xyz[0, native_ca_idx, :] * 10.0
         native_metrics = calculate_metrics(native_ca)
 
-        rebuilt_vs_native_ca_rmsd = kabsch_rmsd(rebuilt_ca, native_ca)
+        rebuilt_vs_native_ca_rmsd = core_ca_rmsd(rebuilt_ca, native_ca)
+        rmsd_meta = core_ca_range_metadata(len(rebuilt_ca))
 
         tuning = get_tuning_settings()
         protein_name = name
@@ -342,6 +382,7 @@ def score_one(
         reference_pdb_path = str(pdb_path)
         experiment_id = (
             f"{protein_name}_ff-{forcefield}_chi-{chi_mode}"
+            f"_backend-{energy_backend}_e2e-{int(bool(use_e2e_constraint))}"
             f"_hb-{tuning['hbond_scale']}_sasa-{tuning['sasa_scale']}"
             f"_vdwr-{tuning['vdw_rep_scale']}_vdwa-{tuning['vdw_attr_scale']}"
         )
@@ -359,6 +400,9 @@ def score_one(
             "sequence": sequence,
             "forcefield": forcefield,
             "chi_mode": chi_mode,
+            "energy_backend": energy_backend,
+            "use_e2e_constraint": bool(use_e2e_constraint),
+            "e2e_scale": float(e2e_scale),
             "hbond_scale": tuning["hbond_scale"],
             "sasa_scale": tuning["sasa_scale"],
             "vdw_rep_scale": tuning["vdw_rep_scale"],
@@ -372,6 +416,7 @@ def score_one(
             "rebuilt_end_to_end": rebuilt_metrics["end_to_end"],
             "rebuilt_rg": rebuilt_metrics["radius_of_gyration"],
             "rebuilt_vs_native_ca_rmsd": rebuilt_vs_native_ca_rmsd,
+            **rmsd_meta,
             "n_observed_torsions": len(observed),
             "n_qtf_angles": int(folder.total_angles),
             "rebuilt_ca_pdb_path": rebuilt_ca_pdb_path or "",
@@ -408,6 +453,12 @@ def main():
     ap.add_argument("--residue_end", type=int, default=None)
     ap.add_argument("--forcefield", default="amber", choices=["amber", "charmm", "opls"])
     ap.add_argument("--chi_mode", default="selective", choices=["beam", "selective", "all"])
+    ap.add_argument("--energy_backend", default="custom", choices=["custom", "rosetta"])
+    ap.add_argument("--use_e2e_constraint", type=int, default=1)
+    ap.add_argument("--e2e_scale", type=float, default=1.0)
+    ap.add_argument("--rosetta_repack", type=int, default=0)
+    ap.add_argument("--rosetta_fa_min", type=int, default=0)
+    ap.add_argument("--rosetta_cen_min", type=int, default=0)
     ap.add_argument("--out_csv", required=True)
     ap.add_argument("--out_json", default=None)
     args = ap.parse_args()
@@ -431,6 +482,12 @@ def main():
                     end=end,
                     forcefield=spec.get("forcefield", args.forcefield),
                     chi_mode=spec.get("chi_mode", args.chi_mode),
+                    energy_backend=args.energy_backend,
+                    use_e2e_constraint=bool(args.use_e2e_constraint),
+                    e2e_scale=args.e2e_scale,
+                    rosetta_repack=bool(args.rosetta_repack),
+                    rosetta_fa_min=bool(args.rosetta_fa_min),
+                    rosetta_cen_min=bool(args.rosetta_cen_min),
                     rebuilt_ca_pdb_path=str(rebuilt_ca_pdb_path),
                     rebuilt_ca_centroid_pdb_path=str(rebuilt_ca_centroid_pdb_path),
                 )
@@ -450,6 +507,12 @@ def main():
                 end=args.residue_end,
                 forcefield=args.forcefield,
                 chi_mode=args.chi_mode,
+                energy_backend=args.energy_backend,
+                use_e2e_constraint=bool(args.use_e2e_constraint),
+                e2e_scale=args.e2e_scale,
+                rosetta_repack=bool(args.rosetta_repack),
+                rosetta_fa_min=bool(args.rosetta_fa_min),
+                rosetta_cen_min=bool(args.rosetta_cen_min),
                 rebuilt_ca_pdb_path=str(rebuilt_ca_pdb_path),
                 rebuilt_ca_centroid_pdb_path=str(rebuilt_ca_centroid_pdb_path),
             )

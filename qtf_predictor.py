@@ -27,6 +27,25 @@ def _jsonify(x):
 
 
 
+def core_ca_slice(coords: np.ndarray) -> np.ndarray:
+    """Return CA coordinates excluding flexible terminal residues.
+
+    Uses residues 2..N-1 (1-indexed), i.e. drops the first and last CA.
+    Falls back to all coordinates for very short chains.
+    """
+    arr = np.asarray(coords)
+    if arr.shape[0] > 2:
+        return arr[1:-1]
+    return arr
+
+def core_ca_range_metadata(n_residues: int) -> dict:
+    use_core = n_residues > 2
+    return {
+        "rmsd_ca_excludes_terminal_residues": bool(use_core),
+        "rmsd_ca_start_residue_1indexed": 2 if use_core else 1,
+        "rmsd_ca_end_residue_1indexed": (n_residues - 1) if use_core else n_residues,
+        "rmsd_ca_n_aligned": (n_residues - 2) if use_core else n_residues,
+    }
 
 
 def __main__():
@@ -72,6 +91,15 @@ def __main__():
                         choices=["Random", "mixed", "Helix", "Sheet"],
                         help='prime strategy for initialization')
     parser.add_argument('--maxiter', default=2000, type=int, help='max iterations for each trajectory')
+    parser.add_argument('--energy_backend', default='custom', choices=['custom', 'rosetta'],
+                        help='stage-3 scoring backend used by runner')
+    parser.add_argument('--use_e2e_constraint', default=1, type=int,
+                        help='1 to use length-scaled E2E constraint in custom scorer, 0 to disable')
+    parser.add_argument('--e2e_scale', default=1.0, type=float,
+                        help='multiplier for E2E constraint if enabled')
+    parser.add_argument('--rosetta_repack', default=0, type=int)
+    parser.add_argument('--rosetta_fa_min', default=0, type=int)
+    parser.add_argument('--rosetta_cen_min', default=0, type=int)
 
     args = parser.parse_args()
 
@@ -107,9 +135,27 @@ def __main__():
         # 1. Initialize Folder & Manager
         print(f"--- DIAGNOSING BACKBONE: {sequence} ---")
         if force_field == "all":
-            folder = runner.QuantumBiophysicsFolder(sequence, force_field=["amber", "opls", "charmm"])
+            folder = runner.QuantumBiophysicsFolder(
+                sequence,
+                force_field=["amber", "opls", "charmm"],
+                energy_backend=args.energy_backend,
+                use_e2e_constraint=bool(args.use_e2e_constraint),
+                e2e_scale=args.e2e_scale,
+                rosetta_repack=bool(args.rosetta_repack),
+                rosetta_fa_min=bool(args.rosetta_fa_min),
+                rosetta_cen_min=bool(args.rosetta_cen_min),
+            )
         else:
-            folder = runner.QuantumBiophysicsFolder(sequence, force_field=force_field)
+            folder = runner.QuantumBiophysicsFolder(
+                sequence,
+                force_field=force_field,
+                energy_backend=args.energy_backend,
+                use_e2e_constraint=bool(args.use_e2e_constraint),
+                e2e_scale=args.e2e_scale,
+                rosetta_repack=bool(args.rosetta_repack),
+                rosetta_fa_min=bool(args.rosetta_fa_min),
+                rosetta_cen_min=bool(args.rosetta_cen_min),
+            )
 
         manager = runner.EnsembleFoldingManager(folder)
 
@@ -148,10 +194,14 @@ def __main__():
                 pred_ca_n = pred_ca[:n]
                 true_ca_n = true_ca[:n]
                 t_e2e, t_rg = evaluator.calculate_physics_metrics(true_ca_n)
-                rmsd, _ = runner.StabilityAnalyzer.kabsch_rmsd(pred_ca_n, true_ca_n)
+                pred_ca_core = core_ca_slice(pred_ca_n)
+                true_ca_core = core_ca_slice(true_ca_n)
+                rmsd, _ = runner.StabilityAnalyzer.kabsch_rmsd(pred_ca_core, true_ca_core)
                 rmsd = float(rmsd)
+                rmsd_meta = core_ca_range_metadata(n)
             else:
                 t_e2e, t_rg, rmsd = np.nan, np.nan, np.nan
+                rmsd_meta = core_ca_range_metadata(len(pred_ca))
 
             # flatten energy term decomposition (if available)
             energy_terms = res.get("energy_terms") or {}
@@ -163,6 +213,7 @@ def __main__():
                 "energy_rank": int(rank),
                 "energy": float(res["energy"]),
                 "rmsd_to_reference_A": rmsd,
+                **rmsd_meta,
                 "pred_e2e_A": float(p_e2e),
                 "pred_rg_A": float(p_rg),
                 "ref_e2e_A": float(t_e2e) if not np.isnan(t_e2e) else np.nan,
@@ -215,6 +266,12 @@ def __main__():
             "Reference Structure": (reference_structure_pdb_id if reference_structure_pdb_id is not None and args.mode != "predict_only" else None),
             "Force Field": force_field,
             "Prime Strategy": prime_strategy,
+            "energy_backend": args.energy_backend,
+            "use_e2e_constraint": bool(args.use_e2e_constraint),
+            "e2e_scale": float(args.e2e_scale),
+            "rosetta_repack": bool(args.rosetta_repack),
+            "rosetta_fa_min": bool(args.rosetta_fa_min),
+            "rosetta_cen_min": bool(args.rosetta_cen_min),
             "Top K": int(top_k) if top_k is not None else None,
             "Top Frac": float(top_frac) if top_frac is not None else None,
             "Output Dir": job_output_dir,

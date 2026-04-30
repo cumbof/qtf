@@ -159,12 +159,6 @@ class QuantumBiophysicsFolder:
         force_field='charmm',
         chi_mode='all',
         selective_chi_map=None,
-        energy_backend=None,
-        use_e2e_constraint=None,
-        e2e_scale=None,
-        rosetta_repack=None,
-        rosetta_fa_min=None,
-        rosetta_cen_min=None,
     ):
         """
         Initialize the folder.
@@ -245,28 +239,6 @@ class QuantumBiophysicsFolder:
         # 3. VAN DER WAALS RADII (Angstroms)
         # Ref: Bondi, A. (1964). J. Phys. Chem. 68, 441-451.
         self.VDW_RADII = {'H': 0.6, 'C': 1.7, 'N': 1.55, 'O': 1.52, 'S': 1.8}
-
-        # 3b. Minimal atom-typed Lennard-Jones parameters.
-        # These are not a complete AMBER/CHARMM parameter table; they are a
-        # pragmatic intermediate model that distinguishes backbone, carbonyl,
-        # aliphatic sidechain, aromatic, polar heteroatom, sulfur, and hydrogen
-        # environments while preserving the existing output term names.
-        # Values are in Angstrom-ish r_min/2 radii and kcal/mol-ish epsilons.
-        self.LJ_TYPE_PARAMS = {
-            'H':          {'radius': 1.20, 'epsilon': 0.0157},
-            'H_polar':    {'radius': 1.05, 'epsilon': 0.0157},
-            'C_backbone': {'radius': 1.75, 'epsilon': 0.0700},  # CA-like
-            'C_carbonyl': {'radius': 1.70, 'epsilon': 0.0860},
-            'C_aliphatic':{'radius': 1.90, 'epsilon': 0.1094},
-            'C_aromatic': {'radius': 1.85, 'epsilon': 0.1200},
-            'N_backbone': {'radius': 1.65, 'epsilon': 0.1700},
-            'N_sidechain':{'radius': 1.65, 'epsilon': 0.1700},
-            'O_carbonyl': {'radius': 1.60, 'epsilon': 0.2100},
-            'O_hydroxyl': {'radius': 1.55, 'epsilon': 0.1700},
-            'O_carboxyl': {'radius': 1.60, 'epsilon': 0.2100},
-            'S_sulfur':   {'radius': 2.00, 'epsilon': 0.2500},
-            'X':          {'radius': 1.75, 'epsilon': 0.1000},
-        }
         
         # 4. SIDE CHAIN TOPOLOGY
         # Ref: Engh, R. A., & Huber, R. (1991). Acta Cryst. A47, 392-400.
@@ -370,36 +342,17 @@ class QuantumBiophysicsFolder:
         else:
             self.ansatz = None
             self.n_params = 1
-        
-        # --- OPTIONAL STAGE-3 BACKEND ---
-        # Preferred control path is explicit constructor args from argparse callers.
-        # Environment variables remain as backwards-compatible fallbacks for notebooks
-        # and existing shell/grid scripts.
-        def _as_bool(value, default=False):
-            if value is None:
-                return bool(default)
-            if isinstance(value, bool):
-                return value
-            return str(value).strip().lower() not in ("0", "false", "no", "off", "none", "")
 
-        self.stage3_backend = (energy_backend or os.getenv("QTF_STAGE3_BACKEND", "custom")).strip().lower()
-        if self.stage3_backend not in ("custom", "rosetta"):
-            raise ValueError("energy_backend/stage3_backend must be 'custom' or 'rosetta'")
-
-        self.use_e2e_constraint = _as_bool(
-            use_e2e_constraint,
-            os.getenv("QTF_USE_E2E_CONSTRAINT", "1").strip().lower() not in ("0", "false", "no", "off")
-        )
-        self.e2e_scale = float(e2e_scale if e2e_scale is not None else os.getenv("QTF_E2E_SCALE", "1.0"))
-
+        # --- OPTIONAL ROSETTA-BACKED STAGE-3 SCORING ---
+        self.stage3_backend = os.getenv("QTF_STAGE3_BACKEND", "rosetta" if PYROSETTA_AVAILABLE else "custom").strip().lower()
         self.rosetta_flags = os.getenv("QTF_PYROSETTA_FLAGS", "-mute all")
         self.rosetta_centroid_weights = os.getenv("QTF_ROSETTA_CEN_WTS", "cen_std")
         self.rosetta_fullatom_weights = os.getenv("QTF_ROSETTA_FA_WTS", "ref2015")
         self.rosetta_cen_weight = float(os.getenv("QTF_ROSETTA_CEN_WEIGHT", "0.35"))
         self.rosetta_fa_weight = float(os.getenv("QTF_ROSETTA_FA_WEIGHT", "1.0"))
-        self.rosetta_do_centroid_min = _as_bool(rosetta_cen_min, os.getenv("QTF_ROSETTA_CEN_MIN", "0") == "1")
-        self.rosetta_do_fullatom_min = _as_bool(rosetta_fa_min, os.getenv("QTF_ROSETTA_FA_MIN", "0") == "1")
-        self.rosetta_do_repack = _as_bool(rosetta_repack, os.getenv("QTF_ROSETTA_REPACK", "0") == "1")
+        self.rosetta_do_centroid_min = os.getenv("QTF_ROSETTA_CEN_MIN", "0") == "1"
+        self.rosetta_do_fullatom_min = os.getenv("QTF_ROSETTA_FA_MIN", "1") == "1"
+        self.rosetta_do_repack = os.getenv("QTF_ROSETTA_REPACK", "1") == "1"
         self._rosetta_ready = False
         self._rosetta_scorefxn_cen = None
         self._rosetta_scorefxn_fa = None
@@ -581,52 +534,13 @@ class QuantumBiophysicsFolder:
 
         return np.array(coords), labels, bonds
 
-    def _assign_lj_type(self, rid: int, atom_name: str, elem: str) -> str:
-        """Assign a compact LJ atom type from residue, atom name, and element."""
-        aa = self.sequence[int(rid)] if 0 <= int(rid) < self.n_residues else "X"
-        name = str(atom_name)
-        elem = str(elem)
-
-        if elem == "H" or name.startswith("H"):
-            if name in ("H", "HN", "HG", "HG1", "HH", "HE1", "HE2"):
-                return "H_polar"
-            return "H"
-
-        if elem == "S" or name.startswith("S"):
-            return "S_sulfur"
-
-        if elem == "O":
-            if name == "O" or name == "OXT":
-                return "O_carbonyl"
-            if name in ("OD1", "OD2", "OE1", "OE2"):
-                return "O_carboxyl"
-            return "O_hydroxyl"
-
-        if elem == "N":
-            if name == "N":
-                return "N_backbone"
-            return "N_sidechain"
-
-        if elem == "C":
-            if name == "C":
-                return "C_carbonyl"
-            if name == "CA":
-                return "C_backbone"
-            if aa in ("F", "Y", "W", "H") and name in {
-                "CG", "CD1", "CD2", "CE1", "CE2", "CE3", "CZ", "CZ2", "CZ3", "CH2"
-            }:
-                return "C_aromatic"
-            return "C_aliphatic"
-
-        return "X"
-
     def _initialize_topology_cache(self):
         """
         Runs structure builder once to determine static properties of atoms.
         Allows vectorization of Charges, Radii, and Types.
         """
-        # Build with dummy zeros to get lists and the reference bond graph.
-        dummy_coords, self.static_labels, static_bonds = self.build_full_structure(np.zeros(self.total_angles))
+        # Build with dummy zeros to get lists
+        dummy_coords, self.static_labels, _ = self.build_full_structure(np.zeros(self.total_angles))
         n_atoms = len(dummy_coords)
         
         # 1. Map Atom Index -> Residue Index
@@ -651,53 +565,8 @@ class QuantumBiophysicsFolder:
                 if name in ['N', 'CA', 'C', 'O', 'OXT', 'H1', 'H2', 'H3', 'H']: q = 0.0
             self.q_vector[k] = q
         
-        # 3. Pre-calculate atom-typed LJ radii / epsilons (Vectorized)
-        self.lj_type_vector = np.array([
-            self._assign_lj_type(rid, name, elem)
-            for rid, name, elem in self.static_labels
-        ])
-        self.vdw_radii_vector = np.array([
-            self.LJ_TYPE_PARAMS.get(t, self.LJ_TYPE_PARAMS['X'])['radius']
-            for t in self.lj_type_vector
-        ], dtype=float)
-        self.lj_epsilon_vector = np.array([
-            self.LJ_TYPE_PARAMS.get(t, self.LJ_TYPE_PARAMS['X'])['epsilon']
-            for t in self.lj_type_vector
-        ], dtype=float)
-
-        # 3b. Build a bond-graph topology map so nonbonded terms can exclude
-        # true 1-2 / 1-3 pairs and soften 1-4 pairs. This is more physical than
-        # residue-index masking and should stop the LJ wall from over-penalizing
-        # locally connected native geometry.
-        adjacency = [set() for _ in range(n_atoms)]
-        for i, j in static_bonds:
-            if 0 <= i < n_atoms and 0 <= j < n_atoms:
-                adjacency[i].add(j)
-                adjacency[j].add(i)
-
-        graph_dist = np.full((n_atoms, n_atoms), 99, dtype=int)
-        np.fill_diagonal(graph_dist, 0)
-        for i in range(n_atoms):
-            frontier = {i}
-            visited = {i}
-            depth = 0
-            while frontier and depth < 3:
-                depth += 1
-                next_frontier = set()
-                for node in frontier:
-                    for nbr in adjacency[node]:
-                        if nbr in visited:
-                            continue
-                        visited.add(nbr)
-                        if depth < graph_dist[i, nbr]:
-                            graph_dist[i, nbr] = depth
-                            graph_dist[nbr, i] = depth
-                        next_frontier.add(nbr)
-                frontier = next_frontier
-
-        offdiag = ~np.eye(n_atoms, dtype=bool)
-        self.mask_nonbonded_graph = offdiag & (graph_dist > 2)
-        self.mask_14_pairs = offdiag & (graph_dist == 3)
+        # 3. Pre-calculate VdW Radii (Vectorized)
+        self.vdw_radii_vector = np.array([self.VDW_RADII.get(x[2], 1.7) for x in self.static_labels])
         
         # 4. Masks
         # Mask for heavy atoms (not H) - useful for Sterics
@@ -721,12 +590,10 @@ class QuantumBiophysicsFolder:
             elif elem == "S":
                 self.mask_hydrophobic[k] = True
                 
-        # Keep a conservative residue-separation mask for electrostatics/H-bonds,
-        # but combine it with the bond-graph mask for VDW.
+        # Mask for Bonded/Neighbor Exclusions (i, i+1 residues)
+        # We generally don't calculate VdW/Electrostatics for atoms in the same or adjacent residues
         res_diff_matrix = np.abs(self.atom_to_res[:, None] - self.atom_to_res[None, :])
-        self.mask_non_bonded = (res_diff_matrix >= 2)
-        self.mask_non_bonded_vdw = self.mask_non_bonded & self.mask_nonbonded_graph
-        self.mask_non_bonded_vdw_14 = self.mask_non_bonded & self.mask_14_pairs
+        self.mask_non_bonded = (res_diff_matrix >= 2) 
         
         # Identify indices for specific calculations to avoid string parsing in loop
         self.idx_N_atoms = np.where(self.atom_names == 'N')[0]
@@ -734,6 +601,7 @@ class QuantumBiophysicsFolder:
         self.idx_SG_atoms = np.where(self.atom_names == 'SG')[0]
         
         self._cache_initialized = True
+
 
     def _ensure_rosetta(self):
         global _PYROSETTA_INIT_DONE
@@ -754,23 +622,24 @@ class QuantumBiophysicsFolder:
     def _build_rosetta_pose_from_angles(self, angle_vec):
         self._ensure_rosetta()
         pose = pyrosetta.pose_from_sequence(self.sequence, "fa_standard")
-        for i in range(1, pose.total_residue()):
+        nres = pose.total_residue()
+        for i in range(1, nres):
             pose.set_omega(i, 180.0)
         for dof, ang in zip(self.dof_map, angle_vec):
-            resi = int(dof["res"]) + 1
-            t = str(dof["type"])
+            resi = int(dof['res']) + 1
+            t = str(dof['type'])
             deg = float(np.rad2deg(ang))
-            try:
-                if t == "phi":
-                    pose.set_phi(resi, deg)
-                elif t == "psi":
-                    pose.set_psi(resi, deg)
-                elif t.startswith("chi"):
-                    chi_idx = int(t.replace("chi", ""))
-                    if chi_idx <= pose.residue(resi).nchi():
-                        pose.set_chi(chi_idx, resi, deg)
-            except Exception:
-                continue
+            if t == 'phi':
+                pose.set_phi(resi, deg)
+            elif t == 'psi':
+                pose.set_psi(resi, deg)
+            elif t.startswith('chi'):
+                try:
+                    chi_idx = int(t.replace('chi', ''))
+                except Exception:
+                    continue
+                if chi_idx <= pose.residue(resi).nchi():
+                    pose.set_chi(chi_idx, resi, deg)
         return pose
 
     def _pose_ca_coords(self, pose):
@@ -783,32 +652,31 @@ class QuantumBiophysicsFolder:
         return np.asarray(ca, dtype=float) if ca else np.zeros((0, 3), dtype=float)
 
     def _extract_rosetta_terms(self, pose, scorefxn, prefix):
-        """Return a stable set of Rosetta term columns, including zeros."""
         _ = scorefxn(pose)
         emap = pose.energies().total_energies()
         names = [
-            "fa_atr", "fa_rep", "fa_sol", "lk_ball_wtd", "fa_elec",
-            "hbond_sr_bb", "hbond_lr_bb", "hbond_bb_sc", "hbond_sc",
-            "rama_prepro", "omega", "p_aa_pp", "fa_dun", "dslf_fa13", "ref",
-            "env", "pair", "cbeta", "vdw", "rg", "rama",
+            'fa_atr', 'fa_rep', 'fa_sol', 'lk_ball_wtd', 'fa_elec',
+            'hbond_sr_bb', 'hbond_lr_bb', 'hbond_bb_sc', 'hbond_sc',
+            'rama_prepro', 'omega', 'p_aa_pp', 'fa_dun', 'dslf_fa13', 'ref',
+            'env', 'pair', 'cbeta', 'vdw', 'rg', 'rama'
         ]
         out = {}
         for name in names:
-            val = 0.0
             if hasattr(rosetta.core.scoring, name):
                 st = getattr(rosetta.core.scoring, name)
                 try:
                     val = float(emap[st])
                 except Exception:
-                    val = 0.0
-            out[f"{prefix}_{name}"] = val
+                    continue
+                if abs(val) > 1e-12:
+                    out[f"{prefix}_{name}"] = val
         out[f"{prefix}_total"] = float(scorefxn(pose))
         return out
 
     def _score_stage3_rosetta(self, angle_vec, return_terms=False):
-        terms = {"energy_backend_rosetta": 1.0, "energy_backend_custom": 0.0}
+        self._ensure_rosetta()
+        terms = {}
         try:
-            self._ensure_rosetta()
             fa_pose = self._build_rosetta_pose_from_angles(angle_vec)
 
             cen_pose = fa_pose.clone()
@@ -837,7 +705,7 @@ class QuantumBiophysicsFolder:
 
             if self.rosetta_do_fullatom_min:
                 mm = rosetta.core.kinematics.MoveMap()
-                mm.set_bb(False)
+                mm.set_bb(True)
                 mm.set_chi(True)
                 minmov = rosetta.protocols.minimization_packing.MinMover()
                 minmov.movemap(mm)
@@ -851,28 +719,13 @@ class QuantumBiophysicsFolder:
             terms["rosetta_cen_weight"] = float(self.rosetta_cen_weight)
             terms["rosetta_fa_weight"] = float(self.rosetta_fa_weight)
             terms["rosetta_total"] = float(total)
-            terms["rosetta_error"] = 0.0
             self._last_rosetta_pose = fa_pose.clone()
             self._last_rosetta_ca = self._pose_ca_coords(fa_pose)
         except Exception as exc:
             total = 1.0e6
-            # Emit stable columns even on failure so CSV/analyzer columns do not
-            # become all-empty or disappear in mixed runs.
-            for p in ("cen", "fa"):
-                for name in [
-                    "fa_atr", "fa_rep", "fa_sol", "lk_ball_wtd", "fa_elec",
-                    "hbond_sr_bb", "hbond_lr_bb", "hbond_bb_sc", "hbond_sc",
-                    "rama_prepro", "omega", "p_aa_pp", "fa_dun", "dslf_fa13", "ref",
-                    "env", "pair", "cbeta", "vdw", "rg", "rama", "total",
-                ]:
-                    terms[f"{p}_{name}"] = 0.0
-            terms["rosetta_cen_weight"] = float(self.rosetta_cen_weight)
-            terms["rosetta_fa_weight"] = float(self.rosetta_fa_weight)
-            terms["rosetta_total"] = float(total)
-            terms["rosetta_error"] = 1.0
-            terms["rosetta_message_hash"] = float(abs(hash(str(exc))) % 1000000)
-        self.last_energy_terms = {k: float(v) for k, v in terms.items()}
-        return float(total)
+            terms = {"rosetta_error": 1.0, "rosetta_total": float(total), "rosetta_message_hash": float(abs(hash(str(exc))) % 1000000)}
+        self.last_energy_terms = terms
+        return total
 
     def energy_function(self, params, return_terms: bool = False):
         """
@@ -883,24 +736,24 @@ class QuantumBiophysicsFolder:
         If return_terms=True, a per-term decomposition is stored in:
             self.last_energy_terms (dict)
         """
-        if not self._cache_initialized: 
+        if not self._cache_initialized:
             self._initialize_topology_cache()
+
+        # Stages 1-2 keep the original hand-built landscape for collapse/refinement.
+        # Stage 3 can be replaced by Rosetta centroid + all-atom scoring.
+        angle_vec = self._get_angles(params)
+        if self.current_stage == 3 and self.stage3_backend == 'rosetta':
+            return self._score_stage3_rosetta(angle_vec, return_terms=return_terms)
 
         # ==========================================
         # STAGE CONTROLLER (Guided Relaxation)
         # ==========================================
         gamma = 15.0
-        constraint_strength = 8.0
+        constraint_strength = 50.0
 
-        # Stage 3: RELAXATION
         if self.current_stage == 3:
             gamma = 2.5
-            constraint_strength = 1.5
-
-        # 1. GENERATION: Get Geometry from Quantum Parameters
-        angle_vec = self._get_angles(params)
-        if self.current_stage == 3 and self.stage3_backend == "rosetta":
-            return self._score_stage3_rosetta(angle_vec, return_terms=return_terms)
+            constraint_strength = 5.0
 
         coords, _, _ = self.build_full_structure(angle_vec)
 
@@ -926,251 +779,96 @@ class QuantumBiophysicsFolder:
             terms[name] += v
             total_energy += v
 
-        # --- VECTORIZED DISTANCE MATRIX ---
         diffs = coords[:, None, :] - coords[None, :, :]
         D = np.sqrt(np.sum(diffs**2, axis=-1)) + 1e-9
 
-        # defaults so diagnostics always exist
         neighbor_counts = np.array([0.0], dtype=float)
         burial_fractions = np.array([0.0], dtype=float)
 
-        # 0. END-TO-END BIAS (optional, length-aware, weaker, with slack)
         ca_indices = [i for i, lbl in enumerate(self.static_labels) if lbl[1] == 'CA']
-        dist_ends = 0.0
-        target_e2e = 0.0
-        slack_e2e = 0.0
         if len(ca_indices) >= 2:
             start_ca = coords[ca_indices[0]]
             end_ca = coords[ca_indices[-1]]
-            dist_ends = float(np.linalg.norm(start_ca - end_ca))
+            dist_ends = np.linalg.norm(start_ca - end_ca)
+            e_constraint = constraint_strength * (dist_ends - 5.5)**2
+            add_term("constraint", e_constraint)
 
-            # Mild sequence-length-aware prior. It can be disabled with
-            # QTF_USE_E2E_CONSTRAINT=0 while preserving diagnostics.
-            target_e2e = float(4.5 + 0.40 * max(0, self.n_residues - 5))
-            slack_e2e = float(1.5 + 0.05 * self.n_residues)
-            if self.use_e2e_constraint:
-                deviation = max(0.0, abs(dist_ends - target_e2e) - slack_e2e)
-                e_constraint = self.e2e_scale * constraint_strength * (deviation ** 2)
-                add_term("constraint", e_constraint)
-
-        # 1. IMPLICIT SOLVENT (SASA)
-        if np.sum(self.mask_hydrophobic) > 0:
-            hydro_dists = D[self.mask_hydrophobic, :]
-            weights = 1.0 / (1.0 + np.exp(1.0 * (hydro_dists - 6.0)))
-            neighbor_counts = np.sum(weights, axis=1) - 1.0
-            burial_fractions = neighbor_counts / 35.0
-            burial_fractions = np.clip(burial_fractions, 0.0, 1.0)
-            exposed_area = 30.0 * (1.0 - burial_fractions)
-            SASA_SCALE = float(os.getenv("QTF_SASA_SCALE", "0.7"))
-            e_sasa = SASA_SCALE*np.sum(gamma * exposed_area)
+        hydro_indices = np.where(self.mask_hydrophobic)[0]
+        if len(hydro_indices) > 1:
+            hydro_coords = coords[hydro_indices]
+            hydro_D = squareform(pdist(hydro_coords))
+            neighbor_counts = np.sum((hydro_D < 8.5) & (hydro_D > 0), axis=1)
+            burial_fractions = np.clip((neighbor_counts - 2.0) / 6.0, 0.0, 1.0)
+            hydro_scale = float(os.getenv("QTF_SASA_SCALE", "1.0"))
+            e_sasa = hydro_scale * (-gamma * np.sum(self.HYDROPHOBICITY[self.sequence[self.atom_to_res[hydro_indices]]] * burial_fractions))
             add_term("sasa", e_sasa)
 
+        n_idx = self.idx_N_atoms
+        o_idx = self.idx_O_atoms
+        if len(n_idx) and len(o_idx):
+            for n in n_idx:
+                for o in o_idx:
+                    if abs(self.atom_to_res[n] - self.atom_to_res[o]) < 2:
+                        continue
+                    d = D[n, o]
+                    if d < 3.5:
+                        e_hb = -3.0 * np.exp(-((d - 2.9) ** 2) / 0.15)
+                        terms["hbond_raw"] += float(e_hb)
+                        add_term("hbond", e_hb * float(os.getenv("QTF_HBOND_SCALE", "1.0")))
 
-        # 2. EXPLICIT H-BONDING
-        HBOND_SCALE = float(os.getenv("QTF_HBOND_SCALE", "0.75"))
-
-        e_hbond = 0.0
-        for i_n in self.idx_N_atoms:
-            res_d = self.atom_to_res[i_n]
-            idx_ca = i_n + 1
-            idx_prev_c = i_n - 2
-
-            if idx_prev_c < 0 or self.atom_names[idx_prev_c] != 'C':
-                pos_h = coords[i_n] + np.array([0,0,1.0]); pos_n = coords[i_n]
-            else:
-                p_c = coords[idx_prev_c]; p_n = coords[i_n]; p_ca = coords[idx_ca]
-                v_nc = p_c - p_n; v_nc /= np.linalg.norm(v_nc)
-                v_nca = p_ca - p_n; v_nca /= np.linalg.norm(v_nca)
-                v_h = -(v_nc + v_nca); v_h /= np.linalg.norm(v_h)
-                pos_h = p_n + v_h * 1.01; pos_n = p_n
-
-            o_coords = coords[self.idx_O_atoms]
-            o_res = self.atom_to_res[self.idx_O_atoms]
-            valid_mask = np.abs(o_res - res_d) >= 2
-            if not np.any(valid_mask):
-                continue
-
-            valid_o_coords = o_coords[valid_mask]
-            d_ho = np.linalg.norm(valid_o_coords - pos_h, axis=1)
-            close_mask = d_ho < 3.5
-            if not np.any(close_mask):
-                continue
-
-            final_d_ho = d_ho[close_mask]
-            final_o_coords = valid_o_coords[close_mask]
-
-            v_hn = pos_n - pos_h; v_hn /= np.linalg.norm(v_hn)
-            v_ho = final_o_coords - pos_h
-            norms = np.linalg.norm(v_ho, axis=1)[:, None]
-            v_ho /= norms
-            angle_cos = np.dot(v_ho, v_hn)
-            ang_mask = angle_cos < -0.4
-
-            radial_term = np.exp(-(final_d_ho - 2.0)**2 / 0.5)
-            angular_term = (np.abs(angle_cos) - 0.4) * 2.0
-            term = -50.0 * radial_term * angular_term * ang_mask
-            e_hbond += np.sum(term)
-
-        e_hbond_scaled = HBOND_SCALE * e_hbond
-        terms["hbond_raw"] = float(e_hbond)
-        add_term("hbond", e_hbond_scaled)
-
-        # 3. ELECTROSTATICS
-        Q_mat = np.outer(self.q_vector, self.q_vector)
-        elec_mask = np.triu(self.mask_non_bonded, k=1) & (np.abs(Q_mat) > 0.0001)
+        qq = np.outer(self.q_vector, self.q_vector)
+        elec_mask = self.mask_non_bonded & (np.abs(qq) > 1e-8)
         if np.any(elec_mask):
-            r_elec = D[elec_mask]
-            r_elec = np.maximum(r_elec, 1.0)
-            q_prod = Q_mat[elec_mask]
-            add_term("electrostatics", np.sum(83.0 * q_prod / (r_elec**2)))
+            e_elec = np.sum(332.0 * qq[elec_mask] / (4.0 * D[elec_mask]))
+            add_term("electrostatics", e_elec)
 
-        # 3b. DISULFIDE
-        e_disulf = 0.0
-        if len(self.idx_SG_atoms) > 1:
-            sg_dists = D[np.ix_(self.idx_SG_atoms, self.idx_SG_atoms)]
-            sg_mask = np.triu(np.ones_like(sg_dists, dtype=bool), k=1)
-            valid_dists = sg_dists[sg_mask]
+        if len(self.idx_SG_atoms) >= 2:
+            sg_coords = coords[self.idx_SG_atoms]
+            sg_d = squareform(pdist(sg_coords))
+            for i in range(len(self.idx_SG_atoms)):
+                for j in range(i + 1, len(self.idx_SG_atoms)):
+                    d = sg_d[i, j]
+                    if d < 2.5:
+                        add_term("disulfide", -20.0 * np.exp(-((d - 2.05) ** 2) / 0.02))
 
-            bond_strengths = np.exp(-(valid_dists - 2.05)**2 / 0.5)
-            active_bonds = (valid_dists < 3.0)
-            e_disulf -= np.sum(25.0 * bond_strengths * active_bonds)
+        heavy_idx = np.where(self.mask_heavy)[0]
+        if len(heavy_idx) > 1:
+            D_h = D[np.ix_(heavy_idx, heavy_idx)]
+            rad = self.vdw_radii_vector[heavy_idx]
+            sigma = rad[:, None] + rad[None, :]
+            mask = self.mask_non_bonded[np.ix_(heavy_idx, heavy_idx)]
+            rep = ((sigma / D_h) ** 12)
+            attr = ((sigma / D_h) ** 6)
+            rep_scale = float(os.getenv("QTF_VDW_REP_SCALE", "1.0"))
+            attr_scale = float(os.getenv("QTF_VDW_ATTR_SCALE", "1.0"))
+            add_term("vdw_repulsion", rep_scale * np.sum(rep[mask]))
+            add_term("vdw_attractive", -attr_scale * np.sum(attr[mask]))
 
-            full_strengths = np.exp(-(sg_dists - 2.05)**2 / 0.5) * (sg_dists < 3.0)
-            np.fill_diagonal(full_strengths, 0.0)
-            saturation = np.sum(full_strengths, axis=1)
-            overload = saturation - 1.0
-            penalty_mask = overload > 0.1
-            if np.any(penalty_mask):
-                e_disulf += np.sum(40.0 * (overload[penalty_mask])**2)
-
-        add_term("disulfide", e_disulf)
-
-        # 4. NONBONDED VDW
-        # Next test patch:
-        #   - exclude true 1-2 / 1-3 pairs from the bond graph
-        #   - treat true 1-4 pairs with reduced weight
-        #   - slightly tighten the effective contact distance to avoid overcounting
-        #     clashes from coarse rebuilt geometry
-        #   - soften the positive LJ wall so a few near-contacts do not dominate
-        Sigma_mat = self.vdw_radii_vector[:, None] + self.vdw_radii_vector[None, :]
-        Epsilon_mat = np.sqrt(self.lj_epsilon_vector[:, None] * self.lj_epsilon_vector[None, :])
-        heavy_mat = self.mask_heavy[:, None] & self.mask_heavy[None, :]
-        vdw_mask = np.triu(self.mask_non_bonded_vdw & heavy_mat, k=1)
-        vdw_14_mask = np.triu(self.mask_non_bonded_vdw_14 & heavy_mat, k=1)
-
-        # Tunable scales retained so output tables stay comparable to prior runs.
-        VDW_REP_SCALE = float(os.getenv("QTF_VDW_REP_SCALE", "1.0"))
-        VDW_ATTR_SCALE = float(os.getenv("QTF_VDW_ATTR_SCALE", "1.0"))
-
-        # Internal stabilization defaults for the next diagnostic test.
-        LJ_CONTACT_SCALE = 0.95
-        LJ_14_SCALE = 0.35
-        LJ_REP_CLIP = 25.0
-        LJ_ATT_CLIP = -2.5
-
-        def _add_lj_from_mask(mask, pair_scale):
-            if not np.any(mask):
-                return
-
-            r_vdw = np.maximum(D[mask], 1.2)
-            contact_dist = LJ_CONTACT_SCALE * Sigma_mat[mask]
-            eps_ij = Epsilon_mat[mask]
-
-            # Interpret the contact distance as the LJ minimum distance r_min,
-            # then convert to sigma via r_min = 2^(1/6) * sigma.
-            sigma_ij = contact_dist / (2.0 ** (1.0 / 6.0))
-            sr6 = (sigma_ij / r_vdw) ** 6
-            lj = 4.0 * eps_ij * (sr6**2 - sr6)
-
-            # Soft-cap the repulsive branch. The unmodified wall is too brittle for
-            # the current rebuilt geometry and swamps the total score.
-            rep_raw = np.clip(lj, 0.0, None)
-            rep_term = rep_raw.copy()
-            high_rep = rep_raw > LJ_REP_CLIP
-            if np.any(high_rep):
-                rep_term[high_rep] = LJ_REP_CLIP + np.log1p(rep_raw[high_rep] - LJ_REP_CLIP)
-            att_term = np.clip(lj, LJ_ATT_CLIP, 0.0)
-
-            if np.any(rep_term > 0.0):
-                add_term("vdw_repulsion", np.sum(pair_scale * VDW_REP_SCALE * rep_term))
-            if np.any(att_term < 0.0):
-                add_term("vdw_attractive", np.sum(pair_scale * VDW_ATTR_SCALE * att_term))
-
-        _add_lj_from_mask(vdw_mask, 1.0)
-        _add_lj_from_mask(vdw_14_mask, LJ_14_SCALE)
-
-        # LOCALS
         angle_dict = {f"{x['res']}_{x['type']}": val for x, val in zip(self.dof_map, angle_vec)}
+        rot_scale = float(os.getenv("QTF_ROTAMER_SCALE", "1.0"))
+        pi_scale = float(os.getenv("QTF_PI_STACK_SCALE", "1.0"))
+        add_term("rotamer", rot_scale * self._calculate_rotamer_energy(angle_dict))
+        add_term("pi_stacking", pi_scale * self._calculate_aromatic_quadrupole(coords, self.static_labels, self.atom_to_res))
 
-        ROTAMER_SCALE = float(os.getenv("QTF_ROTAMER_SCALE", "1.0"))
-        PI_STACK_SCALE = float(os.getenv("QTF_PI_STACK_SCALE", "1.0"))
-
-        e_rot = self._calculate_rotamer_energy(angle_dict)
-        add_term("rotamer", ROTAMER_SCALE * e_rot)
-
-        e_pi = self._calculate_aromatic_quadrupole(coords, self.static_labels, self.atom_to_res)
-        add_term("pi_stacking", PI_STACK_SCALE * e_pi)
-
-        e_rama = 0.0
+        rama_energy = 0.0
         for i in range(self.n_residues):
-            if f"{i}_phi" in angle_dict and f"{i}_psi" in angle_dict:
-                phi = angle_dict[f"{i}_phi"]; psi = angle_dict[f"{i}_psi"]
-                aa = self.sequence[i]
-                d_helix = (phi - (-1.0))**2 + (psi - (-0.8))**2
-                d_sheet = (phi - (-2.3))**2 + (psi - (2.4))**2
+            phi = angle_dict.get(f"{i}_phi", 0.0)
+            psi = angle_dict.get(f"{i}_psi", 0.0)
+            if -2.3 < phi < -0.4 and -1.5 < psi < 0.4:
+                rama_energy -= 1.5
+            elif -2.8 < phi < -0.8 and 1.8 < psi < 3.2:
+                rama_energy -= 1.0
+            else:
+                rama_energy += 1.5
+        add_term("rama", rama_energy)
 
-                if aa == 'G': # Glycine is flexible
-                    d_helix_L = (phi - (1.0))**2 + (psi - (0.8))**2
-                    d_sheet_L = (phi - (2.3))**2 + (psi - (-2.4))**2
-                    dist_best = min(d_helix, d_sheet, d_helix_L, d_sheet_L)
-                    e_rama += -3.0 * np.exp(-dist_best/0.6)
-                else:
-                    d_forbidden = (phi - (-2.0))**2 + (psi - (1.0))**2
-                    term = -3.0 * np.exp(-d_helix/0.6) - 3.0 * np.exp(-d_sheet/0.6) + 5.0 * np.exp(-d_forbidden/1.0)
-                    e_rama += term
-        add_term("rama", e_rama)
+        geom_energy, _ = self._calculate_geometry_integrity(coords, self.static_labels, self.atom_to_res, return_terms=True)
+        add_term("geometry", geom_energy)
 
-        e_geom, geom_subterms = self._calculate_geometry_integrity(
-        coords, self.static_labels, self.atom_to_res, return_terms=True
-        )
-        add_term("geometry", e_geom)
-
-
-        if self.tracker:
-            self.tracker.log(total_energy)
-
+        self.last_energy_terms = {k: float(v) for k, v in terms.items()}
         if return_terms:
-            self.last_energy_terms = {
-            **terms,
-
-            "energy_backend_custom": 1.0,
-            "energy_backend_rosetta": 0.0,
-            "use_e2e_constraint": 1.0 if self.use_e2e_constraint else 0.0,
-
-            # end-to-end diagnostics
-            "e2e_distance": float(dist_ends) if len(ca_indices) >= 2 else 0.0,
-            "e2e_target": float(target_e2e) if len(ca_indices) >= 2 else 0.0,
-            "e2e_slack": float(slack_e2e) if len(ca_indices) >= 2 else 0.0,
-            "vdw_pairs_full": float(np.sum(vdw_mask)) if "vdw_mask" in locals() else 0.0,
-            "vdw_pairs_14": float(np.sum(vdw_14_mask)) if "vdw_14_mask" in locals() else 0.0,
-
-            # geometry diagnostics
-            "geom_pro_ring": float(geom_subterms["pro_ring"]),
-            "geom_chirality": float(geom_subterms["chirality"]),
-            "geom_planarity": float(geom_subterms["planarity"]),
-
-            # burial diagnostics
-            "burial_mean": float(np.mean(burial_fractions)) if np.sum(self.mask_hydrophobic) > 0 else 0.0,
-            "burial_min": float(np.min(burial_fractions)) if np.sum(self.mask_hydrophobic) > 0 else 0.0,
-            "burial_max": float(np.max(burial_fractions)) if np.sum(self.mask_hydrophobic) > 0 else 0.0,
-            "neighbor_mean": float(np.mean(neighbor_counts)) if np.sum(self.mask_hydrophobic) > 0 else 0.0,
-            "neighbor_min": float(np.min(neighbor_counts)) if np.sum(self.mask_hydrophobic) > 0 else 0.0,
-            "neighbor_max": float(np.max(neighbor_counts)) if np.sum(self.mask_hydrophobic) > 0 else 0.0,
-
-            "total": float(total_energy),
-        }
-
-        return total_energy
+            return float(total_energy)
+        return float(total_energy)
 
     def _calculate_rotamer_energy(self, angle_dict):
         """

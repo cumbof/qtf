@@ -15,23 +15,29 @@ from typing import Dict, Iterable, List
 DEFAULT_PANEL_CSV = "protein_panel.csv"
 PYTHON = "python"
 
-BEAM_SCRIPT = "qtf_beamsearch_benchmark_runner.py"
-NATIVE_SCRIPT = "qtf_score_experimental_runner.py"
+BEAM_SCRIPT = "qtf_beamsearch_benchmark.py"
+NATIVE_SCRIPT = "qtf_score_experimental.py"
 
-BEAM_WIDTH = 2000
+BEAM_WIDTH = 1000
 MAX_SIDECHAIN_OPTS = 9
 RANDOM_SEED = 42
+ENERGY_BACKEND = "custom"
+USE_E2E_CONSTRAINT = 1
+E2E_SCALE = 1.0
+ROSETTA_REPACK = 0
+ROSETTA_FA_MIN = 0
+ROSETTA_CEN_MIN = 0
 
 # Grid combinations (fixed for search-space sweep)
-HBOND_SCALE = [0.45, 0.55, 0.65]
+HBOND_SCALE = [0.55]
 SASA_SCALE = [0.85]
-VDW_REP_SCALE = [0.05, 0.07, 0.09]
-VDW_ATTR_SCALE = [0.10]
-ROTAMER_SCALE = [0.75, 1.00, 1.25]
+VDW_REP_SCALE = [1.00]
+VDW_ATTR_SCALE = [1.00]
+ROTAMER_SCALE = [1.00]
 PI_STACK_SCALE = [0.10]
 
 # Optional filters
-ONLY_PROTEINS: list[str] = ["chignolin", "trp_cage", "MBH12", "1513_MSP-1", "PH1"]
+ONLY_PROTEINS: list[str] = ["chignolin", "trp_cage", "MBH12", "1513_MSP-1"]
 SKIP_EXISTING = True
 
 
@@ -86,6 +92,14 @@ def parse_args() -> argparse.Namespace:
 
     ap.add_argument("--step_deg", type=int, required=True,
                     help="Backbone sampling step size in degrees.")
+    ap.add_argument("--beam_width", type=int, default=BEAM_WIDTH)
+    ap.add_argument("--max_sidechain_opts_per_residue", type=int, default=MAX_SIDECHAIN_OPTS)
+    ap.add_argument("--energy_backend", default=ENERGY_BACKEND, choices=["custom", "rosetta"])
+    ap.add_argument("--use_e2e_constraint", type=int, default=USE_E2E_CONSTRAINT)
+    ap.add_argument("--e2e_scale", type=float, default=E2E_SCALE)
+    ap.add_argument("--rosetta_repack", type=int, default=ROSETTA_REPACK)
+    ap.add_argument("--rosetta_fa_min", type=int, default=ROSETTA_FA_MIN)
+    ap.add_argument("--rosetta_cen_min", type=int, default=ROSETTA_CEN_MIN)
 
     return ap.parse_args()
 
@@ -118,6 +132,8 @@ def main() -> None:
             exp_id = (
                 f"{name}_ff-{forcefield}_chi-{chi_mode}"
                 f"_win-{args.window_deg}_step-{args.step_deg}"
+                f"_bw-{args.beam_width}_scopts-{args.max_sidechain_opts_per_residue}"
+                f"_backend-{args.energy_backend}_e2e-{args.use_e2e_constraint}"
                 f"_hb-{params['hbond_scale']}"
                 f"_sasa-{params['sasa_scale']}"
                 f"_vdwr-{params['vdw_rep_scale']}"
@@ -154,11 +170,17 @@ def main() -> None:
                 "chain": chain,
                 "forcefield": forcefield,
                 "chi_mode": chi_mode,
-                "beam_width": BEAM_WIDTH,
+                "beam_width": args.beam_width,
                 "window_deg": args.window_deg,
                 "step_deg": args.step_deg,
-                "max_sidechain_opts_per_residue": MAX_SIDECHAIN_OPTS,
+                "max_sidechain_opts_per_residue": args.max_sidechain_opts_per_residue,
                 "random_seed": RANDOM_SEED,
+                "energy_backend": args.energy_backend,
+                "use_e2e_constraint": args.use_e2e_constraint,
+                "e2e_scale": args.e2e_scale,
+                "rosetta_repack": args.rosetta_repack,
+                "rosetta_fa_min": args.rosetta_fa_min,
+                "rosetta_cen_min": args.rosetta_cen_min,
                 **params,
             }
             write_run_settings(run_dir / "run_settings.txt", settings)
@@ -173,12 +195,18 @@ def main() -> None:
                     "--protein_name", name,
                     "--sequence", seq,
                     "--forcefield", forcefield,
-                    "--beam_width", str(BEAM_WIDTH),
+                    "--beam_width", str(args.beam_width),
                     "--window_deg", str(args.window_deg),
                     "--step_deg", str(args.step_deg),
                     "--chi_mode", chi_mode,
-                    "--max_sidechain_opts_per_residue", str(MAX_SIDECHAIN_OPTS),
+                    "--max_sidechain_opts_per_residue", str(args.max_sidechain_opts_per_residue),
                     "--random_seed", str(RANDOM_SEED),
+                    "--energy_backend", args.energy_backend,
+                    "--use_e2e_constraint", str(args.use_e2e_constraint),
+                    "--e2e_scale", str(args.e2e_scale),
+                    "--rosetta_repack", str(args.rosetta_repack),
+                    "--rosetta_fa_min", str(args.rosetta_fa_min),
+                    "--rosetta_cen_min", str(args.rosetta_cen_min),
                     "--reference_pdb", pdb_path,
                     "--outdir", str(beam_dir),
                 ], check=True, env=env)
@@ -190,6 +218,12 @@ def main() -> None:
                     "--chain", chain,
                     "--forcefield", forcefield,
                     "--chi_mode", chi_mode,
+                    "--energy_backend", args.energy_backend,
+                    "--use_e2e_constraint", str(args.use_e2e_constraint),
+                    "--e2e_scale", str(args.e2e_scale),
+                    "--rosetta_repack", str(args.rosetta_repack),
+                    "--rosetta_fa_min", str(args.rosetta_fa_min),
+                    "--rosetta_cen_min", str(args.rosetta_cen_min),
                     "--out_csv", str(native_csv),
                     "--out_json", str(native_dir / f"{name}_native_score.json"),
                 ], check=True, env=env)
@@ -211,6 +245,11 @@ def main() -> None:
                 "chi_mode": chi_mode,
                 "window_deg": args.window_deg,
                 "step_deg": args.step_deg,
+                "beam_width": args.beam_width,
+                "max_sidechain_opts_per_residue": args.max_sidechain_opts_per_residue,
+                "energy_backend": args.energy_backend,
+                "use_e2e_constraint": args.use_e2e_constraint,
+                "e2e_scale": args.e2e_scale,
                 **params,
                 "status": status,
                 "error": error,
