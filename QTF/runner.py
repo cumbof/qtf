@@ -782,6 +782,50 @@ class QuantumBiophysicsFolder:
                 ca.append([float(xyz.x), float(xyz.y), float(xyz.z)])
         return np.asarray(ca, dtype=float) if ca else np.zeros((0, 3), dtype=float)
 
+    def _pose_to_coords_labels_bonds(self, pose):
+        """
+        Convert the actual PyRosetta Pose that was scored/refined into the
+        runner.py coordinate/label/bond tuple used by downstream QTF code.
+
+        This is intentionally used in Rosetta mode so returned PDB/RMSD
+        coordinates match the object that Rosetta scored, repacked, and/or
+        minimized. Labels use 0-indexed residue IDs to preserve the existing
+        save_pdb() and centroid helpers. Bonds are left empty because QTF
+        downstream code treats them as optional metadata.
+        """
+        coords = []
+        labels = []
+        for i in range(1, pose.total_residue() + 1):
+            rsd = pose.residue(i)
+            for j in range(1, rsd.natoms() + 1):
+                atom_name = rsd.atom_name(j).strip()
+                xyz = rsd.xyz(j)
+                elem = "X"
+                try:
+                    elem = rsd.atom_type(j).element().strip() or atom_name[0]
+                except Exception:
+                    # Fallback for older PyRosetta builds.
+                    elem = atom_name[0] if atom_name else "X"
+                coords.append([float(xyz.x), float(xyz.y), float(xyz.z)])
+                labels.append((i - 1, atom_name, elem))
+        return np.asarray(coords, dtype=float), labels, []
+
+    def _final_output_structure_from_params(self, params):
+        """
+        Return the final structure for fold(). In custom mode this is the
+        original QTF NERF rebuild. In Rosetta mode this forcibly refreshes
+        scoring at the final optimizer parameters and returns the actual
+        PyRosetta full-atom pose used for scoring/refinement.
+        """
+        angle_vec = self._get_angles(params)
+        if self.current_stage == 3 and self.stage3_backend == "rosetta":
+            # Force one final score call at res_3.x so _last_rosetta_pose is
+            # synchronized with the optimizer's final parameter vector.
+            self._score_stage3_rosetta(angle_vec, return_terms=True)
+            if self._last_rosetta_pose is not None and self.last_energy_terms.get("rosetta_error", 1.0) == 0.0:
+                return self._pose_to_coords_labels_bonds(self._last_rosetta_pose)
+        return self.build_full_structure(angle_vec)
+
     def _extract_rosetta_terms(self, pose, scorefxn, prefix):
         """Return a stable set of Rosetta term columns, including zeros."""
         _ = scorefxn(pose)
@@ -1430,7 +1474,7 @@ class QuantumBiophysicsFolder:
         res_3 = minimize(self.energy_function, res_2.x, method='SLSQP', tol=1e-6, options={'maxiter': max_iter, 'disp': True})
         print(f" > Relaxation Energy (Final Energy): {res_3.fun:.2f}")
         
-        coords, labels, bonds = self.build_full_structure(self._get_angles(res_3.x))
+        coords, labels, bonds = self._final_output_structure_from_params(res_3.x)
         return coords, labels, bonds, self.tracker, res_3.x, res_3.fun
 
     def _aa1_to_3(self, aa):
