@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qtf"
+version = "0.1.0"
+description = "Quantum Torsion Folding: a hybrid quantum-classical protein structure prediction package"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+keywords = ["quantum computing", "protein folding", "biophysics", "VQE", "qiskit"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "qiskit>=1.0",
+    "plotly>=5.18",
+    "pandas>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "ruff",
+    "mypy",
+]
+notebook = [
+    "jupyter",
+    "nbformat",
+]
+
+[project.urls]
+Homepage = "https://github.com/cumbof/QTF"
+Repository = "https://github.com/cumbof/QTF"
+Issues = "https://github.com/cumbof/QTF/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["qtf*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"

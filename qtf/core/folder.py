@@ -1,0 +1,734 @@
+"""QuantumBiophysicsFolder — hybrid quantum-classical protein structure predictor.
+
+Architecture
+------------
+1. **Quantum Actor**: a parameterised EfficientSU2 circuit whose statevector
+   phases encode backbone/side-chain torsion angles.
+2. **Classical Critic**: a physics-based energy function (hydrophobicity, H-bonds,
+   electrostatics, sterics, Ramachandran bias, geometry integrity).
+3. **Optimisation Loop**: COBYLA + SLSQP in three progressive stages (collapse →
+   refine → relax).
+
+References
+----------
+* Kyte & Doolittle (1982) hydrophobicity scale.
+* CHARMM22 / AMBER ff14SB / OPLS-AA partial charges (approximate).
+* Bondi (1964) van der Waals radii.
+* Engh & Huber (1991) bond/angle parameters.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+
+import numpy as np
+from qiskit.circuit.library import efficient_su2
+from qiskit.quantum_info import Statevector
+from scipy.optimize import minimize
+
+from qtf.core.tracker import LandscapeTracker
+
+logger = logging.getLogger(__name__)
+
+
+class QuantumBiophysicsFolder:
+    """Hybrid quantum-classical protein folder."""
+
+    # ------------------------------------------------------------------
+    # Force-field tables
+    # ------------------------------------------------------------------
+    _HYDROPHOBICITY: dict[str, float] = {
+        "I": 4.5, "V": 4.2, "L": 3.8, "F": 2.8, "C": 2.5,
+        "M": 1.9, "A": 1.8, "G": -0.4, "T": -0.7, "S": -0.8,
+        "W": -0.9, "Y": -1.3, "P": -1.6, "H": -3.2, "E": -3.5,
+        "Q": -3.5, "D": -3.5, "N": -3.5, "K": -3.9, "R": -4.5,
+    }
+
+    _VDW_RADII: dict[str, float] = {
+        "H": 0.6, "C": 1.7, "N": 1.55, "O": 1.52, "S": 1.8,
+    }
+
+    _SIDE_CHAIN_TOPO: dict[str, list] = {
+        "G": [],
+        "A": [("CB", "CA", 1.53, 1.91, 2.1)],
+        "V": [("CB", "CA", 1.53, 1.91, "chi1"),
+              ("CG1", "CB", 1.52, 1.91, "chi2"), ("CG2", "CB", 1.52, 1.91, "chi2_branch")],
+        "L": [("CB", "CA", 1.53, 1.91, "chi1"),
+              ("CG", "CB", 1.52, 1.91, "chi2"),
+              ("CD1", "CG", 1.52, 1.91, "chi3"), ("CD2", "CG", 1.52, 1.91, "chi3_branch")],
+        "I": [("CB", "CA", 1.53, 1.91, "chi1"),
+              ("CG1", "CB", 1.54, 1.91, "chi2"), ("CD1", "CG1", 1.52, 1.91, "chi3"),
+              ("CG2", "CB", 1.54, 1.91, "chi2_branch")],
+        "M": [("CB", "CA", 1.53, 1.91, "chi1"), ("CG", "CB", 1.52, 1.91, "chi2"),
+              ("SD", "CG", 1.81, 1.91, "chi3"), ("CE", "SD", 1.79, 1.76, "chi4")],
+        "P": [("CB", "CA", 1.53, 1.80, "chi1"), ("CG", "CB", 1.50, 1.82, "chi2"),
+              ("CD", "CG", 1.52, 1.83, "chi3")],
+        "F": [("CB", "CA", 1.53, 1.91, "chi1"), ("CG", "CB", 1.50, 1.91, "chi2"),
+              ("CD1", "CG", 1.39, 2.09, 1.57), ("CD2", "CG", 1.39, 2.09, -1.57),
+              ("CE1", "CD1", 1.39, 2.09, 3.14), ("CE2", "CD2", 1.39, 2.09, 3.14),
+              ("CZ", "CE1", 1.39, 2.09, 0.0)],
+        "Y": [("CB", "CA", 1.53, 1.91, "chi1"), ("CG", "CB", 1.50, 1.91, "chi2"),
+              ("CD1", "CG", 1.39, 2.09, 1.57), ("CD2", "CG", 1.39, 2.09, -1.57),
+              ("CE1", "CD1", 1.39, 2.09, 3.14), ("CE2", "CD2", 1.39, 2.09, 3.14),
+              ("CZ", "CE1", 1.39, 2.09, 0.0),
+              ("OH", "CZ", 1.37, 2.09, 3.14), ("HH", "OH", 0.96, 1.83, "chi3")],
+        "W": [("CB", "CA", 1.53, 1.91, "chi1"), ("CG", "CB", 1.50, 1.91, "chi2"),
+              ("CD1", "CG", 1.37, 2.15, 1.0), ("CD2", "CG", 1.43, 2.15, -1.0),
+              ("NE1", "CD1", 1.38, 1.90, 3.14), ("HE1", "NE1", 1.01, 2.09, 0.0),
+              ("CE2", "CD2", 1.40, 1.90, 0.0), ("CE3", "CD2", 1.40, 2.30, 3.14),
+              ("CZ2", "CE2", 1.40, 2.10, 0.0), ("CZ3", "CE3", 1.40, 2.10, 0.0),
+              ("CH2", "CZ2", 1.40, 2.10, 0.0)],
+        "S": [("CB", "CA", 1.53, 1.91, "chi1"), ("OG", "CB", 1.42, 1.91, "chi2"),
+              ("HG", "OG", 0.96, 1.83, "chi3")],
+        "T": [("CB", "CA", 1.53, 1.91, "chi1"),
+              ("OG1", "CB", 1.43, 1.91, "chi2"), ("HG1", "OG1", 0.96, 1.83, "chi3"),
+              ("CG2", "CB", 1.53, 1.91, "chi2_branch")],
+        "C": [("CB", "CA", 1.53, 1.91, "chi1"), ("SG", "CB", 1.81, 1.91, "chi2")],
+        "D": [("CB", "CA", 1.53, 1.91, "chi1"), ("CG", "CB", 1.52, 1.91, "chi2"),
+              ("OD1", "CG", 1.25, 2.0, 1.0), ("OD2", "CG", 1.25, 2.0, -1.0)],
+        "N": [("CB", "CA", 1.53, 1.91, "chi1"), ("CG", "CB", 1.52, 1.91, "chi2"),
+              ("OD1", "CG", 1.23, 2.09, 0.0), ("ND2", "CG", 1.32, 2.09, 3.14)],
+        "E": [("CB", "CA", 1.53, 1.91, "chi1"), ("CG", "CB", 1.52, 1.91, "chi2"),
+              ("CD", "CG", 1.52, 1.91, "chi3"), ("OE1", "CD", 1.25, 2.0, 1.0), ("OE2", "CD", 1.25, 2.0, -1.0)],
+        "Q": [("CB", "CA", 1.53, 1.91, "chi1"), ("CG", "CB", 1.52, 1.91, "chi2"),
+              ("CD", "CG", 1.52, 1.91, "chi3"), ("OE1", "CD", 1.23, 2.09, 0.0), ("NE2", "CD", 1.32, 2.09, 3.14)],
+        "K": [("CB", "CA", 1.53, 1.91, "chi1"), ("CG", "CB", 1.52, 1.91, "chi2"),
+              ("CD", "CG", 1.52, 1.91, "chi3"), ("CE", "CD", 1.52, 1.91, "chi4"),
+              ("NZ", "CE", 1.49, 1.91, "chi5")],
+        "R": [("CB", "CA", 1.53, 1.91, "chi1"), ("CG", "CB", 1.52, 1.91, "chi2"),
+              ("CD", "CG", 1.52, 1.91, "chi3"), ("NE", "CD", 1.46, 1.91, "chi4"),
+              ("CZ", "NE", 1.33, 2.15, "chi5"), ("NH1", "CZ", 1.33, 2.10, 0.0), ("NH2", "CZ", 1.33, 2.10, 3.14)],
+        "H": [("CB", "CA", 1.53, 1.91, "chi1"), ("CG", "CB", 1.50, 1.91, "chi2"),
+              ("ND1", "CG", 1.38, 2.15, 1.0), ("CD2", "CG", 1.36, 2.15, -1.0),
+              ("CE1", "ND1", 1.32, 1.90, 0.0),
+              ("NE2", "CD2", 1.32, 1.90, 0.0), ("HE2", "NE2", 1.01, 2.09, 0.0)],
+        "DEFAULT": [("CB", "CA", 1.53, 1.91, "chi1")],
+    }
+
+    def __init__(self, sequence: str, force_field: str = "charmm") -> None:
+        """
+        Parameters
+        ----------
+        sequence:
+            Single-letter amino acid sequence (e.g. ``"MAGTWY"``).
+        force_field:
+            One of ``"charmm"`` (default), ``"amber"``, or ``"opls"``.
+        """
+        self.sequence = sequence.upper()
+        self.n_residues = len(self.sequence)
+        self.force_field = force_field.lower()
+
+        logger.info("Initialising QuantumBiophysicsFolder | FF=%s | seq=%s", self.force_field.upper(), self.sequence)
+
+        self.HYDROPHOBICITY = self._HYDROPHOBICITY
+        self.VDW_RADII = self._VDW_RADII
+        self.SIDE_CHAIN_TOPO = self._SIDE_CHAIN_TOPO
+
+        self.CHARGES = self._build_charges(self.force_field)
+
+        # ------------------------------------------------------------------
+        # Degrees of freedom
+        # ------------------------------------------------------------------
+        self.dof_map: list[dict] = []
+        for i, aa in enumerate(self.sequence):
+            self.dof_map.append({"res": i, "type": "phi"})
+            self.dof_map.append({"res": i, "type": "psi"})
+            topo = self.SIDE_CHAIN_TOPO.get(aa, self.SIDE_CHAIN_TOPO["DEFAULT"])
+            chis: set[str] = set()
+            for atom in topo:
+                tor = atom[4]
+                if isinstance(tor, str) and "chi" in tor:
+                    chis.add(tor)
+            for k in sorted(chis):
+                self.dof_map.append({"res": i, "type": k})
+
+        self.total_angles = len(self.dof_map)
+
+        # ------------------------------------------------------------------
+        # Quantum circuit
+        # ------------------------------------------------------------------
+        self.n_qubits = max(2, int(np.ceil(np.log2(self.total_angles))))
+        self.reps = int(np.ceil(self.total_angles / self.n_qubits)) + 2
+        self.ansatz = efficient_su2(self.n_qubits, reps=self.reps, entanglement="circular")
+        self.n_params = self.ansatz.num_parameters
+
+        self.current_stage = 1
+        self._cache_initialized = False
+        self._initialize_topology_cache()
+        self.tracker: LandscapeTracker | None = None
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_charges(force_field: str) -> dict[str, float]:
+        common: dict[str, float] = {
+            "OXT": -1.0,
+            "NZ": 1.0, "NH1": 0.5, "NH2": 0.5,
+            "OD1": -0.5, "OD2": -0.5, "OE1": -0.5, "OE2": -0.5,
+            "ND2": 0.5, "NE2": 0.5,
+            "SG": -0.1, "SD": -0.1,
+            "HE2": 0.4, "ND1": -0.4,
+        }
+        charmm: dict[str, float] = {
+            "N": -0.47, "H": 0.31, "CA": 0.07, "C": 0.51, "O": -0.51,
+            "OG": -0.4, "HG": 0.4, "OG1": -0.4, "HG1": 0.4, "OH": -0.4, "HH": 0.4,
+            "NE1": -0.3, "HE1": 0.3,
+        }
+        amber: dict[str, float] = {
+            "N": -0.42, "H": 0.27, "CA": 0.00, "C": 0.60, "O": -0.57,
+            "OG": -0.6, "HG": 0.4, "OG1": -0.6, "HG1": 0.4, "OH": -0.5, "HH": 0.4,
+            "NE1": -0.4, "HE1": 0.3,
+        }
+        opls: dict[str, float] = {
+            "N": -0.50, "H": 0.30, "CA": 0.14, "C": 0.50, "O": -0.50,
+            "OG": -0.7, "HG": 0.4, "OG1": -0.7, "HG1": 0.4, "OH": -0.7, "HH": 0.4,
+            "NE1": -0.4, "HE1": 0.35,
+        }
+        charges = common.copy()
+        if force_field == "amber":
+            charges.update(amber)
+        elif force_field == "opls":
+            charges.update(opls)
+        else:
+            if force_field not in ("charmm",):
+                logger.warning("Unknown force field '%s'. Defaulting to CHARMM.", force_field)
+            charges.update(charmm)
+        return charges
+
+    def _get_angles(self, params: np.ndarray) -> np.ndarray:
+        """Map circuit parameters to torsion angles via statevector phases."""
+        param_dict = dict(zip(self.ansatz.parameters, params))
+        bound_circuit = self.ansatz.assign_parameters(param_dict)
+        psi = Statevector(bound_circuit).data
+        return np.angle(psi)[: self.total_angles]
+
+    @staticmethod
+    def _nerf_step(
+        a: np.ndarray, b: np.ndarray, c: np.ndarray,
+        bond_len: float, bond_angle: float, torsion: float,
+    ) -> np.ndarray:
+        """Natural Extension Reference Frame (NERF) atom placement."""
+        bc = c - b
+        bc_u = bc / (np.linalg.norm(bc) + 1e-9)
+        ab = b - a
+        n = np.cross(ab, bc_u)
+        n_u = n / (np.linalg.norm(n) + 1e-9)
+        bx_n = np.cross(n_u, bc_u)
+        M = np.column_stack((bc_u, bx_n, n_u))
+        theta_supp = np.pi - bond_angle
+        d = np.array([
+            bond_len * np.cos(theta_supp),
+            bond_len * np.cos(torsion) * np.sin(theta_supp),
+            bond_len * np.sin(torsion) * np.sin(theta_supp),
+        ])
+        return c + (M @ d)
+
+    def build_full_structure(
+        self, angle_vector: np.ndarray
+    ) -> tuple[np.ndarray, list, list]:
+        """Build 3-D Cartesian coordinates from a torsion-angle vector.
+
+        Returns
+        -------
+        coords : ndarray, shape (N_atoms, 3)
+        labels : list of (res_id, atom_name, element)
+        bonds  : list of (atom_idx_a, atom_idx_b)
+        """
+        coords: list[np.ndarray] = []
+        labels: list[tuple] = []
+        bonds: list[tuple] = []
+
+        angle_dict = {f"{x['res']}_{x['type']}": val for x, val in zip(self.dof_map, angle_vector)}
+
+        # Seed backbone frame
+        coords.extend([
+            np.array([0, 0, 0]),
+            np.array([1.46, 0, 0]),
+            np.array([1.46 + 1.51 * np.cos(1.9), 1.51 * np.sin(1.9), 0]),
+        ])
+        labels.extend([(0, "N", "N"), (0, "CA", "C"), (0, "C", "C")])
+        bonds.extend([(0, 1), (1, 2)])
+
+        for i in range(self.n_residues):
+
+            def get_idx(r: int, n: str) -> int:
+                for k in range(len(labels) - 1, -1, -1):
+                    if labels[k][0] == r and labels[k][1] == n:
+                        return k
+                return -1
+
+            idx_N = get_idx(i, "N")
+            idx_CA = get_idx(i, "CA")
+            idx_C = get_idx(i, "C")
+
+            # Side chain
+            topo = self.SIDE_CHAIN_TOPO.get(self.sequence[i], self.SIDE_CHAIN_TOPO["DEFAULT"])
+            sc_map: dict[str, int] = {}
+            for atom_def in topo:
+                name, elem, b_len, b_ang, tor_def = atom_def
+                if isinstance(tor_def, str) and "chi" in tor_def:
+                    t_val = angle_dict.get(f"{i}_{tor_def.replace('_branch', '')}", 0.0)
+                    if "branch" in tor_def:
+                        t_val += 2.09
+                else:
+                    t_val = float(tor_def)
+
+                if name == "CB":
+                    u_nc = coords[idx_N] - coords[idx_CA]
+                    u_cc = coords[idx_C] - coords[idx_CA]
+                    n_plane = np.cross(u_nc, u_cc)
+                    n_plane /= np.linalg.norm(n_plane) + 1e-9
+                    u_mid = -(u_nc + u_cc)
+                    u_mid /= np.linalg.norm(u_mid) + 1e-9
+                    p_CB = coords[idx_CA] + b_len * (np.cos(0.9) * u_mid + np.sin(0.9) * n_plane)
+                    coords.append(p_CB)
+                    labels.append((i, name, elem))
+                    bonds.append((idx_CA, len(coords) - 1))
+                    sc_map["CB"] = len(coords) - 1
+                else:
+                    p_name = "CB"
+                    if name.startswith("CD"):
+                        p_name = "CG"
+                    if name.startswith("CE"):
+                        p_name = "CD"
+                    if name.startswith("CZ"):
+                        p_name = "CE"
+                    if name.startswith("NZ"):
+                        p_name = "CE"
+                    if name.startswith("OE") or name.startswith("OD"):
+                        p_name = "CD" if name.startswith("OE") else "CG"
+                    if name.startswith("SG"):
+                        p_name = "CB"
+                    if name.startswith("CG"):
+                        p_name = "CB"
+                    if name.startswith("CD") and self.sequence[i] == "L":
+                        p_name = "CG"
+                    if name.startswith("HG") and name != "HG1":
+                        p_name = "OG"
+                    if name == "HG1":
+                        p_name = "OG1"
+                    if name == "HH":
+                        p_name = "OH"
+                    if name == "HE1":
+                        p_name = "NE1"
+                    if name == "HE2":
+                        p_name = "NE2"
+
+                    idx_c = sc_map.get(p_name, -1)
+                    if idx_c == -1:
+                        idx_c = len(coords) - 1
+                    c = coords[idx_c]
+
+                    grandp = "CA" if p_name == "CB" else "CB"
+                    if p_name == "OG":
+                        grandp = "CB"
+                    if p_name == "OG1":
+                        grandp = "CB"
+                    if p_name == "OH":
+                        grandp = "CZ"
+                    if p_name == "NE1":
+                        grandp = "CD1"
+                    if p_name == "NE2":
+                        grandp = "CD2"
+
+                    if grandp == "CA":
+                        b = coords[idx_CA]
+                        a = coords[idx_N]
+                    else:
+                        b = coords[sc_map.get(grandp, idx_c - 1)]
+                        a = coords[idx_CA]
+
+                    new_pos = self._nerf_step(a, b, c, b_len, b_ang, t_val)
+                    coords.append(new_pos)
+                    labels.append((i, name, elem))
+                    bonds.append((idx_c, len(coords) - 1))
+                    sc_map[name] = len(coords) - 1
+
+            # Carbonyl oxygen
+            p_O = self._nerf_step(coords[idx_N], coords[idx_CA], coords[idx_C], 1.23, 2.1, np.pi)
+            coords.append(p_O)
+            labels.append((i, "O", "O"))
+            bonds.append((idx_C, len(coords) - 1))
+
+            # Next residue backbone
+            if i < self.n_residues - 1:
+                psi = angle_dict.get(f"{i}_psi", -0.5)
+                p_next_N = self._nerf_step(coords[idx_N], coords[idx_CA], coords[idx_C], 1.33, 2.0, psi)
+                coords.append(p_next_N)
+                labels.append((i + 1, "N", "N"))
+                bonds.append((idx_C, len(coords) - 1))
+
+                omega = np.pi
+                p_next_CA = self._nerf_step(coords[idx_CA], coords[idx_C], p_next_N, 1.46, 2.1, omega)
+                coords.append(p_next_CA)
+                labels.append((i + 1, "CA", "C"))
+                bonds.append((len(coords) - 2, len(coords) - 1))
+
+                phi = angle_dict.get(f"{i + 1}_phi", -1.0)
+                p_next_C = self._nerf_step(coords[idx_C], p_next_N, p_next_CA, 1.51, 1.9, phi)
+                coords.append(p_next_C)
+                labels.append((i + 1, "C", "C"))
+                bonds.append((len(coords) - 2, len(coords) - 1))
+
+        return np.array(coords), labels, bonds
+
+    def _initialize_topology_cache(self) -> None:
+        """Pre-compute static atom properties for vectorised energy evaluation."""
+        dummy_coords, self.static_labels, _ = self.build_full_structure(np.zeros(self.total_angles))
+        n_atoms = len(dummy_coords)
+
+        self.atom_to_res = np.array([x[0] for x in self.static_labels], dtype=int)
+        self.atom_names = np.array([x[1] for x in self.static_labels])
+        self.atom_elems = np.array([x[2] for x in self.static_labels])
+
+        self.q_vector = np.zeros(n_atoms)
+        for k, (rid, name, _) in enumerate(self.static_labels):
+            q = self.CHARGES.get(name, 0.0)
+            res_name = self.sequence[rid]
+            if res_name == "H":
+                if name == "NE2":
+                    q = -0.4
+                if name == "ND1":
+                    q = -0.4
+            if rid == 0 or rid == self.n_residues - 1:
+                if name in {"N", "CA", "C", "O", "OXT", "H1", "H2", "H3", "H"}:
+                    q = 0.0
+            self.q_vector[k] = q
+
+        self.vdw_radii_vector = np.array([self.VDW_RADII.get(x[2], 1.7) for x in self.static_labels])
+        self.mask_heavy = np.array([not x.startswith("H") for x in self.atom_names], dtype=bool)
+
+        hydro_res_set = {"ALA", "VAL", "LEU", "ILE", "MET", "PHE", "TRP", "PRO", "CYS"}
+        self.mask_hydrophobic = np.zeros(n_atoms, dtype=bool)
+        for k, (rid, name, _) in enumerate(self.static_labels):
+            if self.sequence[rid] in hydro_res_set and name.startswith("C"):
+                self.mask_hydrophobic[k] = True
+
+        res_diff_matrix = np.abs(self.atom_to_res[:, None] - self.atom_to_res[None, :])
+        self.mask_non_bonded = res_diff_matrix >= 2
+
+        self.idx_N_atoms = np.where(self.atom_names == "N")[0]
+        self.idx_O_atoms = np.where(self.atom_names == "O")[0]
+        self.idx_SG_atoms = np.where(self.atom_names == "SG")[0]
+        self._cache_initialized = True
+
+    # ------------------------------------------------------------------
+    # Energy function
+    # ------------------------------------------------------------------
+
+    def energy_function(self, params: np.ndarray) -> float:
+        """Evaluate physical energy of the structure encoded by *params*."""
+        if not self._cache_initialized:
+            self._initialize_topology_cache()
+
+        gamma = 15.0
+        constraint_strength = 50.0
+        if self.current_stage == 3:
+            gamma = 5.0
+            constraint_strength = 5.0
+
+        angle_vec = self._get_angles(params)
+        coords, _, _ = self.build_full_structure(angle_vec)
+        total_energy = 0.0
+
+        diffs = coords[:, None, :] - coords[None, :, :]
+        D = np.sqrt(np.sum(diffs ** 2, axis=-1)) + 1e-9
+
+        # End-to-end bias
+        ca_indices = [i for i, lbl in enumerate(self.static_labels) if lbl[1] == "CA"]
+        if len(ca_indices) >= 2:
+            dist_ends = np.linalg.norm(coords[ca_indices[0]] - coords[ca_indices[-1]])
+            total_energy += constraint_strength * (dist_ends - 5.5) ** 2
+
+        # Implicit solvent (SASA)
+        hydro_dists = D[self.mask_hydrophobic, :]
+        weights = 1.0 / (1.0 + np.exp(1.0 * (hydro_dists - 6.0)))
+        neighbor_counts = np.sum(weights, axis=1) - 1.0
+        burial_fractions = np.clip(neighbor_counts / 15.0, 0.0, 1.0)
+        total_energy += np.sum(gamma * 30.0 * (1.0 - burial_fractions))
+
+        # H-bonding
+        e_hbond = 0.0
+        for i_n in self.idx_N_atoms:
+            res_d = self.atom_to_res[i_n]
+            idx_ca = i_n + 1
+            idx_prev_c = i_n - 2
+            if idx_prev_c < 0 or self.atom_names[idx_prev_c] != "C":
+                pos_h = coords[i_n] + np.array([0, 0, 1.0])
+                pos_n = coords[i_n]
+            else:
+                p_c = coords[idx_prev_c]
+                p_n = coords[i_n]
+                p_ca = coords[idx_ca]
+                v_nc = p_c - p_n
+                v_nc /= np.linalg.norm(v_nc)
+                v_nca = p_ca - p_n
+                v_nca /= np.linalg.norm(v_nca)
+                v_h = -(v_nc + v_nca)
+                v_h /= np.linalg.norm(v_h)
+                pos_h = p_n + v_h * 1.01
+                pos_n = p_n
+            o_coords = coords[self.idx_O_atoms]
+            o_res = self.atom_to_res[self.idx_O_atoms]
+            valid_mask = np.abs(o_res - res_d) >= 2
+            if not np.any(valid_mask):
+                continue
+            valid_o_coords = o_coords[valid_mask]
+            d_ho = np.linalg.norm(valid_o_coords - pos_h, axis=1)
+            close_mask = d_ho < 3.5
+            if not np.any(close_mask):
+                continue
+            final_d_ho = d_ho[close_mask]
+            final_o_coords = valid_o_coords[close_mask]
+            v_hn = pos_n - pos_h
+            v_hn /= np.linalg.norm(v_hn)
+            v_ho = final_o_coords - pos_h
+            v_ho /= np.linalg.norm(v_ho, axis=1)[:, None]
+            angle_cos = np.dot(v_ho, v_hn)
+            ang_mask = angle_cos < -0.4
+            radial_term = np.exp(-(final_d_ho - 2.0) ** 2 / 0.5)
+            angular_term = (np.abs(angle_cos) - 0.4) * 2.0
+            e_hbond += np.sum(-25.0 * radial_term * angular_term * ang_mask)
+        total_energy += e_hbond
+
+        # Electrostatics
+        Q_mat = np.outer(self.q_vector, self.q_vector)
+        elec_mask = np.triu(self.mask_non_bonded, k=1) & (np.abs(Q_mat) > 0.0001)
+        if np.any(elec_mask):
+            r_elec = np.maximum(D[elec_mask], 1.0)
+            total_energy += np.sum(83.0 * Q_mat[elec_mask] / (r_elec ** 2))
+
+        # Disulfide bonds
+        if len(self.idx_SG_atoms) > 1:
+            sg_dists = D[np.ix_(self.idx_SG_atoms, self.idx_SG_atoms)]
+            sg_mask = np.triu(np.ones_like(sg_dists, dtype=bool), k=1)
+            valid_dists = sg_dists[sg_mask]
+            bond_strengths = np.exp(-(valid_dists - 2.05) ** 2 / 0.5)
+            active_bonds = valid_dists < 3.0
+            total_energy -= np.sum(25.0 * bond_strengths * active_bonds)
+            full_strengths = np.exp(-(sg_dists - 2.05) ** 2 / 0.5) * (sg_dists < 3.0)
+            np.fill_diagonal(full_strengths, 0.0)
+            saturation = np.sum(full_strengths, axis=1)
+            overload = saturation - 1.0
+            penalty_mask = overload > 0.1
+            if np.any(penalty_mask):
+                total_energy += np.sum(40.0 * overload[penalty_mask] ** 2)
+
+        # Sterics (softened Lennard-Jones)
+        Sigma_mat = self.vdw_radii_vector[:, None] + self.vdw_radii_vector[None, :]
+        heavy_mat = self.mask_heavy[:, None] & self.mask_heavy[None, :]
+        vdw_mask = np.triu(self.mask_non_bonded & heavy_mat, k=1)
+        if np.any(vdw_mask):
+            r_vdw = D[vdw_mask]
+            s_vdw = Sigma_mat[vdw_mask]
+            collision_mask = r_vdw < s_vdw
+            if np.any(collision_mask):
+                r_col = r_vdw[collision_mask]
+                s_col = s_vdw[collision_mask]
+                term = (s_col / (r_col + 0.1)) ** 12
+                high_e = term > 50.0
+                if np.any(high_e):
+                    term[high_e] = 50.0 + np.log(term[high_e] - 49.0)
+                total_energy += np.sum(0.1 * term)
+
+        # Local terms
+        angle_dict = {f"{x['res']}_{x['type']}": val for x, val in zip(self.dof_map, angle_vec)}
+        total_energy += self._calculate_rotamer_energy(angle_dict)
+        total_energy += self._calculate_aromatic_quadrupole(coords, self.static_labels, self.atom_to_res)
+
+        for i in range(self.n_residues):
+            if f"{i}_phi" in angle_dict and f"{i}_psi" in angle_dict:
+                phi = angle_dict[f"{i}_phi"]
+                psi = angle_dict[f"{i}_psi"]
+                aa = self.sequence[i]
+                d_helix = (phi - (-1.0)) ** 2 + (psi - (-0.8)) ** 2
+                d_sheet = (phi - (-2.3)) ** 2 + (psi - 2.4) ** 2
+                if aa == "G":
+                    d_helix_L = (phi - 1.0) ** 2 + (psi - 0.8) ** 2
+                    d_sheet_L = (phi - 2.3) ** 2 + (psi - (-2.4)) ** 2
+                    total_energy += -3.0 * np.exp(-min(d_helix, d_sheet, d_helix_L, d_sheet_L) / 0.6)
+                else:
+                    d_forbidden = (phi - (-2.0)) ** 2 + (psi - 1.0) ** 2
+                    total_energy += -3.0 * np.exp(-d_helix / 0.6) - 3.0 * np.exp(-d_sheet / 0.6) + 5.0 * np.exp(-d_forbidden / 1.0)
+
+        total_energy += self._calculate_geometry_integrity(coords, self.static_labels, self.atom_to_res)
+
+        if self.tracker is not None:
+            self.tracker.log(total_energy)
+
+        return total_energy
+
+    def _calculate_rotamer_energy(self, angle_dict: dict) -> float:
+        energy = 0.0
+        for i in range(self.n_residues):
+            res_name = self.sequence[i]
+            key = f"{i}_chi1"
+            if key in angle_dict:
+                chi = angle_dict[key]
+                if res_name in ("VAL", "ILE", "THR"):
+                    energy += -3.0 * (np.exp(-(chi - np.pi) ** 2 / 0.5) + np.exp(-(chi - (-1.047)) ** 2 / 0.5))
+                elif res_name == "PRO":
+                    energy += 10.0 * min((chi - (-0.5)) ** 2, (chi - 0.5) ** 2)
+                elif res_name in ("TRP", "PHE", "TYR", "HIS"):
+                    energy += -2.0 * (np.exp(-(chi - np.pi) ** 2 / 0.5) + np.exp(-(chi - (-1.047)) ** 2 / 0.5))
+                else:
+                    energy += 1.0 * (1.0 + np.cos(3.0 * chi))
+        return energy
+
+    def _calculate_aromatic_quadrupole(
+        self, coords: np.ndarray, labels: list, atom_to_res_idx: np.ndarray
+    ) -> float:
+        aromatics: list[tuple] = []
+        for r_idx in np.unique(atom_to_res_idx):
+            if self.sequence[r_idx] in ("PHE", "TYR", "TRP"):
+                mask = atom_to_res_idx == r_idx
+                r_coords = coords[mask]
+                r_names = self.atom_names[mask]
+                ring_mask = np.isin(r_names, ["CG", "CD1", "CD2", "CE1", "CE2", "CZ"])
+                ring_atoms = r_coords[ring_mask]
+                if len(ring_atoms) > 2:
+                    centroid = np.mean(ring_atoms, axis=0)
+                    v1 = ring_atoms[1] - ring_atoms[0]
+                    v2 = ring_atoms[2] - ring_atoms[0]
+                    normal = np.cross(v1, v2)
+                    normal /= np.linalg.norm(normal) + 1e-9
+                    aromatics.append((centroid, normal))
+        energy_pi = 0.0
+        for i in range(len(aromatics)):
+            for j in range(i + 1, len(aromatics)):
+                c1, n1 = aromatics[i]
+                c2, n2 = aromatics[j]
+                dist = np.linalg.norm(c1 - c2)
+                if dist > 7.0:
+                    continue
+                alignment = abs(np.dot(n1, n2))
+                if alignment < 0.3 and 4.5 < dist < 6.0:
+                    energy_pi -= 4.0 * np.exp(-(dist - 5.0) ** 2)
+                elif alignment > 0.8 and 3.4 < dist < 4.5:
+                    energy_pi -= 5.0 * np.exp(-(dist - 3.8) ** 2)
+        return energy_pi
+
+    def _calculate_geometry_integrity(
+        self, coords: np.ndarray, labels: list, atom_to_res_idx: np.ndarray
+    ) -> float:
+        energy = 0.0
+        res_map: dict[int, dict[str, int]] = {}
+        for k, lbl in enumerate(labels):
+            r, atom = lbl[0], lbl[1]
+            if r not in res_map:
+                res_map[r] = {}
+            res_map[r][atom] = k
+        for r in range(self.n_residues):
+            atoms = res_map.get(r, {})
+            res_name = self.sequence[r]
+            if res_name == "PRO" and "CD" in atoms and "N" in atoms:
+                d = np.linalg.norm(coords[atoms["CD"]] - coords[atoms["N"]])
+                if abs(d - 1.47) > 0.1:
+                    energy += 50.0 * (d - 1.47) ** 2
+            if all(k in atoms for k in ("CA", "N", "C", "CB")):
+                ca = coords[atoms["CA"]]
+                n = coords[atoms["N"]]
+                c = coords[atoms["C"]]
+                cb = coords[atoms["CB"]]
+                volume = np.dot(np.cross(n - ca, c - ca), cb - ca)
+                if volume < 1.0:
+                    energy += 50.0 * (1.0 - volume) ** 2
+            if r < self.n_residues - 1:
+                next_atoms = res_map.get(r + 1, {})
+                if all(k in atoms for k in ("C", "CA")) and all(k in next_atoms for k in ("N", "CA")):
+                    p1, p2 = coords[atoms["CA"]], coords[atoms["C"]]
+                    p3, p4 = coords[next_atoms["N"]], coords[next_atoms["CA"]]
+                    b1, b2, b3 = p2 - p1, p3 - p2, p4 - p3
+                    n1 = np.cross(b1, b2)
+                    n1 /= np.linalg.norm(n1)
+                    n2 = np.cross(b2, b3)
+                    n2 /= np.linalg.norm(n2)
+                    parallelism = np.dot(n1, n2)
+                    twist = (1.0 + parallelism) if self.sequence[r + 1] == "PRO" else (1.0 - parallelism)
+                    if twist > 0.05:
+                        energy += 20.0 * twist
+        return energy
+
+    # ------------------------------------------------------------------
+    # Initialisation helpers
+    # ------------------------------------------------------------------
+
+    def get_smart_initialization(self, n_attempts: int = 20, seed: int | None = None) -> np.ndarray:
+        """Sample random parameter sets and return the one with the lowest energy.
+
+        Parameters
+        ----------
+        n_attempts:
+            Number of random samples to evaluate.
+        seed:
+            Random seed.  When ``None`` a deterministic seed is derived from
+            the protein sequence so results are reproducible per sequence.
+        """
+        if seed is None:
+            seed = int(hashlib.sha256(self.sequence.encode()).hexdigest(), 16) % (2 ** 32)
+
+        rng = np.random.default_rng(seed)
+        logger.debug("Scouting %d starting points (seed=%d)", n_attempts, seed)
+
+        best_params: np.ndarray | None = None
+        best_energy = float("inf")
+        for _ in range(n_attempts):
+            trial_params = rng.uniform(-0.8, 0.8, self.n_params)
+            e = self.energy_function(trial_params)
+            if e < best_energy:
+                best_energy = e
+                best_params = trial_params
+
+        logger.debug("Best start found: energy=%.2f", best_energy)
+        assert best_params is not None
+        return best_params
+
+    # ------------------------------------------------------------------
+    # Folding
+    # ------------------------------------------------------------------
+
+    def fold(
+        self,
+        max_iter: int = 2000,
+        initial_params: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, list, list, LandscapeTracker, np.ndarray, float]:
+        """Run the three-stage optimisation curriculum.
+
+        Returns
+        -------
+        coords, labels, bonds, tracker, final_params, final_energy
+        """
+        logger.info("Starting quantum folding (max_iter=%d)", max_iter)
+        self.tracker = LandscapeTracker()
+
+        if initial_params is None:
+            init_params = self.get_smart_initialization(n_attempts=max_iter)
+        else:
+            init_params = initial_params
+
+        logger.info("Stage 1: Mechanical Collapse (high force)…")
+        self.tracker.mark_stage("Stage1")
+        self.current_stage = 1
+        res_1 = minimize(self.energy_function, init_params, method="COBYLA",
+                         options={"maxiter": max_iter, "rhobeg": 1.0})
+        logger.info("  Collapse energy: %.2f", res_1.fun)
+
+        logger.info("Stage 2: Physics Refinement (high force)…")
+        self.tracker.mark_stage("Stage2")
+        self.current_stage = 2
+        res_2 = minimize(self.energy_function, res_1.x, method="SLSQP",
+                         tol=1e-6, options={"maxiter": max_iter, "disp": False})
+        logger.info("  Refinement energy: %.2f", res_2.fun)
+
+        logger.info("Stage 3: Natural Relaxation (releasing constraints)…")
+        self.tracker.mark_stage("Stage3")
+        self.current_stage = 3
+        res_3 = minimize(self.energy_function, res_2.x, method="SLSQP",
+                         tol=1e-6, options={"maxiter": max_iter, "disp": False})
+        logger.info("  Final energy: %.2f", res_3.fun)
+
+        coords, labels, bonds = self.build_full_structure(self._get_angles(res_3.x))
+        return coords, labels, bonds, self.tracker, res_3.x, res_3.fun
