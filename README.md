@@ -58,39 +58,39 @@ The quantum circuit acts as a **generative model** (the "Actor"), while a physic
 
 ```
 
-                     QUANTUM ACTOR                               │
-                                                                 │
-  θ (parameters)  ──►  EfficientSU2 circuit  ──►  |ψ⟩           │
-                           (⌈log₂ N⌉ qubits)                    │
-                                  │                              │
-                    Extract phases of amplitudes                 │
-                                  │                              │
-                    φ₀, ψ₀, χ₁⁰, φ₁, ψ₁, …  (torsion angles)  │
+                       QUANTUM ACTOR
+
+    θ (parameters)  ──►  EfficientSU2 circuit  ──►  |ψ⟩
+                     (⌈log₂ N⌉ qubits)
+                             │
+                Extract phases of amplitudes
+                             │
+                    φ₀, ψ₀, χ₁⁰, φ₁, ψ₁, …  (torsion angles)
 
                              │
                              ▼
 
-                     NERF GEOMETRY BUILDER                       │
-                                                                 │
-  Torsion angles  ──►  3-D Cartesian coordinates (all atoms)     │
-                        N, Cα, C, O + full side chains           │
+                   NERF GEOMETRY BUILDER
+
+  Torsion angles  ──►  3-D Cartesian coordinates (all atoms)
+               N, Cα, C, O + full side chains
 
                              │
                              ▼
 
-                    CLASSICAL CRITIC (Energy)                    │
-                                                                 │
-  Solvation · H-bonds · Electrostatics · Sterics · Disulfide    │
-  Ramachandran · Rotamers · π–π stacking · Geometry integrity   │
+                  CLASSICAL CRITIC (Energy)
+
+  Solvation · H-bonds · Electrostatics · Sterics · Disulfide
+  Ramachandran · Rotamers · π–π stacking · Geometry integrity
 
                              │
                              ▼
 
-               CLASSICAL OPTIMISER (COBYLA / SLSQP)             │
-                                                                 │
-  Stage 1 – Collapse   (COBYLA,  high constraint)               │
-  Stage 2 – Refine     (SLSQP,  high constraint)                │
-  Stage 3 – Relax      (SLSQP,  low constraint)                 │
+            CLASSICAL OPTIMISER (COBYLA / SLSQP)
+
+  Stage 1 – Collapse   (COBYLA,  high constraint)
+  Stage 2 – Refine     (SLSQP,  high constraint)
+  Stage 3 – Relax      (SLSQP,  low constraint)
 
 ```
 
