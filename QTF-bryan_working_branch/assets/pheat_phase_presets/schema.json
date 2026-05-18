@@ -1,0 +1,181 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qtf.local/schemas/pheat-phase-presets.schema.json",
+  "title": "QTF PHEAT Phase Presets",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["presets"],
+  "properties": {
+    "presets": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "$ref": "#/$defs/preset"
+      }
+    }
+  },
+  "$defs": {
+    "nullableString": {
+      "type": ["string", "null"]
+    },
+    "nullablePositiveInteger": {
+      "type": ["integer", "null"],
+      "minimum": 1
+    },
+    "nullableNumber": {
+      "type": ["number", "null"]
+    },
+    "backend": {
+      "type": ["string", "null"],
+      "minLength": 1
+    },
+    "scoreModel": {
+      "type": "string",
+      "minLength": 1
+    },
+    "preset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result", "scouting", "phases"],
+      "properties": {
+        "result": {
+          "$ref": "#/$defs/result"
+        },
+        "scouting": {
+          "$ref": "#/$defs/scouting"
+        },
+        "basis_circuit_batching": {
+          "type": "string",
+          "enum": ["auto", "on", "off"],
+          "default": "auto"
+        },
+        "phases": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/phase"
+          }
+        },
+        "readouts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/readout"
+          },
+          "default": []
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["primary", "score_model"],
+      "properties": {
+        "primary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "score_model": {
+          "$ref": "#/$defs/scoreModel"
+        }
+      }
+    },
+    "scouting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["score_model"],
+      "properties": {
+        "score_model": {
+          "$ref": "#/$defs/scoreModel"
+        },
+        "backend": {
+          "$ref": "#/$defs/backend",
+          "default": "inherit"
+        },
+        "shots": {
+          "$ref": "#/$defs/nullablePositiveInteger"
+        },
+        "attempts": {
+          "$ref": "#/$defs/nullablePositiveInteger"
+        }
+      }
+    },
+    "phase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "optimizer", "score_model"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "label": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "optimizer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "score_model": {
+          "$ref": "#/$defs/scoreModel"
+        },
+        "optimizer_backend": {
+          "$ref": "#/$defs/backend",
+          "default": "inherit"
+        },
+        "readout_backend": {
+          "$ref": "#/$defs/backend",
+          "default": "inherit"
+        },
+        "shots": {
+          "$ref": "#/$defs/nullablePositiveInteger"
+        },
+        "optimizer_shots": {
+          "$ref": "#/$defs/nullablePositiveInteger"
+        },
+        "readout_shots": {
+          "$ref": "#/$defs/nullablePositiveInteger"
+        },
+        "maxiter": {
+          "$ref": "#/$defs/nullablePositiveInteger"
+        },
+        "tol": {
+          "$ref": "#/$defs/nullableNumber"
+        },
+        "options": {
+          "type": ["object", "null"],
+          "additionalProperties": true
+        }
+      }
+    },
+    "readout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "type": "string",
+          "enum": ["optimized_params"],
+          "default": "optimized_params"
+        },
+        "backend": {
+          "$ref": "#/$defs/backend",
+          "default": "inherit"
+        },
+        "shots": {
+          "$ref": "#/$defs/nullablePositiveInteger"
+        },
+        "score_model": {
+          "$ref": "#/$defs/scoreModel"
+        },
+        "primary": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    }
+  }
+}

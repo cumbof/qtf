@@ -1,0 +1,45 @@
+presets:
+  pheat-phased:
+    basis_circuit_batching: auto
+    result:
+      primary: last_phase_structure
+      score_model: pheat-goap
+    scouting:
+      score_model: generic
+      backend: inherit
+      shots: null
+      attempts: 50
+    phases:
+      - name: collapse
+        label: Coarse collapse
+        optimizer: COBYLA
+        score_model: pheat-dfire
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        options:
+          rhobeg: 1.0
+      - name: refine
+        label: Orientation refinement
+        optimizer: SLSQP
+        score_model: pheat-goap
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        tol: 1.0e-6
+        options:
+          disp: true
+      - name: relax
+        label: Heavy-atom relaxation
+        optimizer: SLSQP
+        score_model: heavy-mm
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        tol: 1.0e-6
+        options:
+          disp: true
+    readouts: []
