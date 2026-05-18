@@ -1,0 +1,61 @@
+============================================
+Job ID       : 5496668
+Array Task   : 395
+Replica ID   : 395
+Node         : lri039
+Start time   : Mon Apr 27 14:21:12 EDT 2026
+============================================
+[REPLICA 395] Starting...
+  Sequence     : YYDPETGTWY
+  Forcefield   : amber
+  Backend      : aer
+  Max iter     : 2000
+  Skip Stage 2 : True
+--- INITIALIZING QUANTUM BIOPHYSICS FOLDER (HARDWARE) ---
+--- FORCE FIELD: AMBER ---
+[REPLICA 395] Ground truth loaded — 10 CA atoms
+--- SCOUTING: Checking 50 starting points ---
+ > Deterministic Seed: 313297162 (Derived from Sequence)
+ > Best Start Found: Energy 251.65
+[REPLICA 395] Init strategy: random, seed: 313297162
+--- STARTING QUANTUM FOLDING (HYBRID PIPELINE) ---
+Stage 1: Mechanical Collapse (COBYLA, statevector)...
+ > Collapse Energy : 186.95
+ > Stage 1 RMSD    : 3.0140 Å
+Stage 2: SKIPPED
+Stage 3: Natural Relaxation (SLSQP, statevector)...
+Optimization terminated successfully    (Exit mode 0)
+            Current function value: 4.205205753658275
+            Iterations: 226
+            Function evaluations: 12117
+            Gradient evaluations: 226
+ > Relaxation Energy : 4.21
+ > Stage 3 RMSD      : 3.3624 Å
+
+── RMSD Progress ──────────────────────────
+  Stage 1 : 3.0140 Å
+  Stage 2 : skipped
+  Stage 3 : 3.3624 Å  ↑ worse
+──────────────────────────────────────────
+
+[EXTRACTION] Mode: sampler → backend='aer_simulator', shots=4096
+  Submitting 3 circuits (Z / X / Y bases)...
+  Done. Angles extracted from measurement statistics.
+
+[RESULT] Final energy: 4.2052
+[REPLICA 395] Tracker saved → outputs/Skip1/slurm_YYDPETGTWY_amber/replica_395/replica_395_tracker.json
+[SAVED] outputs/Skip1/slurm_YYDPETGTWY_amber/replica_395/replica_395_landscape.png
+[REPLICA 395] Final RMSD: 3.775 Å
+
+[REPLICA 395] ✓ Done!
+  Energy       : 4.2052
+  RMSD final   : 3.775 Å
+  RMSD stage1  : 3.014 Å
+  RMSD stage2  : skipped
+  RMSD stage3  : 3.362 Å
+  Runtime      : 149.3s
+  Saved to     : outputs/Skip1/slurm_YYDPETGTWY_amber/replica_395/replica_395_result.json
+============================================
+End time     : Mon Apr 27 14:23:42 EDT 2026
+Exit code    : 0
+============================================

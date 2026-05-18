@@ -1,0 +1,68 @@
+============================================
+Job ID       : 5505367
+Array Task   : 74
+Replica ID   : 74
+Node         : lri046
+Start time   : Tue Apr 28 09:36:00 EDT 2026
+============================================
+[REPLICA 74] Starting...
+  Sequence     : YYDPETGTWY
+  Forcefield   : amber
+  Backend      : aer
+  Max iter     : 2000
+  Skip Stage 2 : False
+--- INITIALIZING QUANTUM BIOPHYSICS FOLDER (HARDWARE) ---
+--- FORCE FIELD: AMBER ---
+[REPLICA 74] Ground truth loaded — 10 CA atoms
+--- SCOUTING: Checking 50 starting points ---
+ > Deterministic Seed: 313296841 (Derived from Sequence)
+ > Best Start Found: Energy 411.37
+[REPLICA 74] Init strategy: random, seed: 313296841
+--- STARTING QUANTUM FOLDING (HYBRID PIPELINE) ---
+Stage 1: Mechanical Collapse (COBYLA, statevector)...
+ > Collapse Energy : 487.22
+ > Stage 1 RMSD    : 3.7099 Å
+Stage 2: Physics Refinement (SLSQP, statevector)...
+Optimization terminated successfully    (Exit mode 0)
+            Current function value: 208.24498325508347
+            Iterations: 237
+            Function evaluations: 12597
+            Gradient evaluations: 237
+ > Refinement Energy : 208.24
+ > Stage 2 RMSD      : 2.7157 Å
+Stage 3: Natural Relaxation (SLSQP, statevector)...
+Optimization terminated successfully    (Exit mode 0)
+            Current function value: -67.57073163231134
+            Iterations: 149
+            Function evaluations: 8162
+            Gradient evaluations: 149
+ > Relaxation Energy : -67.57
+ > Stage 3 RMSD      : 3.7540 Å
+
+── RMSD Progress ──────────────────────────
+  Stage 1 : 3.7099 Å
+  Stage 2 : 2.7157 Å  ↓ better
+  Stage 3 : 3.7540 Å  ↑ worse
+──────────────────────────────────────────
+
+[EXTRACTION] Mode: sampler → backend='aer_simulator', shots=4096
+  Submitting 3 circuits (Z / X / Y bases)...
+  Done. Angles extracted from measurement statistics.
+
+[RESULT] Final energy: -67.5707
+[REPLICA 74] Tracker saved → outputs/no_skip1/slurm_YYDPETGTWY_amber/replica_74/replica_74_tracker.json
+[SAVED] outputs/no_skip1/slurm_YYDPETGTWY_amber/replica_74/replica_74_landscape.png
+[REPLICA 74] Final RMSD: 4.408 Å
+
+[REPLICA 74] ✓ Done!
+  Energy       : -67.5707
+  RMSD final   : 4.408 Å
+  RMSD stage1  : 3.710 Å
+  RMSD stage2  : 2.716 Å
+  RMSD stage3  : 3.754 Å
+  Runtime      : 261.0s
+  Saved to     : outputs/no_skip1/slurm_YYDPETGTWY_amber/replica_74/replica_74_result.json
+============================================
+End time     : Tue Apr 28 09:40:30 EDT 2026
+Exit code    : 0
+============================================

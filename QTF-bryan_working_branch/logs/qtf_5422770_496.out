@@ -1,0 +1,51 @@
+============================================
+Job ID       : 5423497
+Array Task   : 496
+Replica ID   : 496
+Node         : lri055
+Start time   : Tue Apr 14 17:13:58 EDT 2026
+============================================
+[REPLICA 496] Starting...
+  Sequence   : YYDPETGTWY
+  Forcefield : amber
+  Backend    : aer
+  Max iter   : 2000
+--- INITIALIZING QUANTUM BIOPHYSICS FOLDER (HARDWARE) ---
+--- FORCE FIELD: AMBER ---
+--- SCOUTING: Checking 50 starting points ---
+ > Deterministic Seed: 313297263 (Derived from Sequence)
+ > Best Start Found: Energy 397.60
+[REPLICA 496] Init strategy: random, seed: 313297263
+--- STARTING QUANTUM FOLDING (HYBRID PIPELINE) ---
+Stage 1: Mechanical Collapse (COBYLA, statevector)...
+ > Collapse Energy: 363.65
+Stage 2: Physics Refinement (SLSQP, statevector)...
+Optimization terminated successfully    (Exit mode 0)
+            Current function value: -32.95917456219709
+            Iterations: 430
+            Function evaluations: 49195
+            Gradient evaluations: 430
+ > Refinement Energy: -32.96
+Stage 3: Natural Relaxation (SLSQP, statevector)...
+Optimization terminated successfully    (Exit mode 0)
+            Current function value: -69.28105534321801
+            Iterations: 272
+            Function evaluations: 31502
+            Gradient evaluations: 272
+ > Relaxation Energy: -69.28
+
+[EXTRACTION] Mode: sampler → backend='aer_simulator', shots=4096
+  Submitting 3 circuits (Z / X / Y bases)...
+  Done. Angles extracted from measurement statistics.
+
+[RESULT] Final energy: -69.2811
+[REPLICA 496] RMSD: 6.255 Å
+[REPLICA 496] Done!
+  Energy     : -69.2811
+  RMSD       : 6.255 Å
+  Runtime    : 1417.0s
+  Saved to   : outputs/probability_vectors/slurm_YYDPETGTWY_amber/replica_496/replica_496_result.json
+============================================
+End time     : Tue Apr 14 17:37:36 EDT 2026
+Exit code    : 0
+============================================

@@ -1,0 +1,61 @@
+============================================
+Job ID       : 5496278
+Array Task   : 7
+Replica ID   : 7
+Node         : lri018
+Start time   : Mon Apr 27 14:18:35 EDT 2026
+============================================
+[REPLICA 7] Starting...
+  Sequence     : YYDPETGTWY
+  Forcefield   : amber
+  Backend      : aer
+  Max iter     : 2000
+  Skip Stage 2 : True
+--- INITIALIZING QUANTUM BIOPHYSICS FOLDER (HARDWARE) ---
+--- FORCE FIELD: AMBER ---
+[REPLICA 7] Ground truth loaded — 10 CA atoms
+--- SCOUTING: Checking 50 starting points ---
+ > Deterministic Seed: 313296774 (Derived from Sequence)
+ > Best Start Found: Energy 314.04
+[REPLICA 7] Init strategy: random, seed: 313296774
+--- STARTING QUANTUM FOLDING (HYBRID PIPELINE) ---
+Stage 1: Mechanical Collapse (COBYLA, statevector)...
+ > Collapse Energy : 740.74
+ > Stage 1 RMSD    : 3.8586 Å
+Stage 2: SKIPPED
+Stage 3: Natural Relaxation (SLSQP, statevector)...
+Optimization terminated successfully    (Exit mode 0)
+            Current function value: -9.045536423214386
+            Iterations: 221
+            Function evaluations: 11697
+            Gradient evaluations: 221
+ > Relaxation Energy : -9.05
+ > Stage 3 RMSD      : 2.6216 Å
+
+── RMSD Progress ──────────────────────────
+  Stage 1 : 3.8586 Å
+  Stage 2 : skipped
+  Stage 3 : 2.6216 Å  ↓ better
+──────────────────────────────────────────
+
+[EXTRACTION] Mode: sampler → backend='aer_simulator', shots=4096
+  Submitting 3 circuits (Z / X / Y bases)...
+  Done. Angles extracted from measurement statistics.
+
+[RESULT] Final energy: -9.0455
+[REPLICA 7] Tracker saved → outputs/Skip1/slurm_YYDPETGTWY_amber/replica_7/replica_7_tracker.json
+[SAVED] outputs/Skip1/slurm_YYDPETGTWY_amber/replica_7/replica_7_landscape.png
+[REPLICA 7] Final RMSD: 6.308 Å
+
+[REPLICA 7] ✓ Done!
+  Energy       : -9.0455
+  RMSD final   : 6.308 Å
+  RMSD stage1  : 3.859 Å
+  RMSD stage2  : skipped
+  RMSD stage3  : 2.622 Å
+  Runtime      : 155.1s
+  Saved to     : outputs/Skip1/slurm_YYDPETGTWY_amber/replica_7/replica_7_result.json
+============================================
+End time     : Mon Apr 27 14:21:15 EDT 2026
+Exit code    : 0
+============================================

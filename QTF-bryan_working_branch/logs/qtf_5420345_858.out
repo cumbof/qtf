@@ -1,0 +1,50 @@
+============================================
+Job ID       : 5422613
+Array Task   : 858
+Replica ID   : 858
+Node         : lri042
+Start time   : Tue Apr 14 11:13:33 EDT 2026
+============================================
+[REPLICA 858] Starting...
+  Sequence   : YYDPETGTWY
+  Forcefield : amber
+  Backend    : aer
+  Max iter   : 2000
+--- INITIALIZING QUANTUM BIOPHYSICS FOLDER (HARDWARE) ---
+--- FORCE FIELD: AMBER ---
+--- PRIMING CIRCUIT FOR HELIX ---
+ > Priming Error: 12.1473
+[REPLICA 858] Init strategy: helix, seed: 313297625
+--- STARTING QUANTUM FOLDING (HYBRID PIPELINE) ---
+Stage 1: Mechanical Collapse (COBYLA, statevector)...
+ > Collapse Energy: 389.76
+Stage 2: Physics Refinement (SLSQP, statevector)...
+Optimization terminated successfully    (Exit mode 0)
+            Current function value: -10.187797956046378
+            Iterations: 307
+            Function evaluations: 35524
+            Gradient evaluations: 307
+ > Refinement Energy: -10.19
+Stage 3: Natural Relaxation (SLSQP, statevector)...
+Optimization terminated successfully    (Exit mode 0)
+            Current function value: -111.73084446002211
+            Iterations: 289
+            Function evaluations: 33235
+            Gradient evaluations: 289
+ > Relaxation Energy: -111.73
+
+[EXTRACTION] Mode: sampler → backend='aer_simulator', shots=4096
+  Submitting 3 circuits (Z / X / Y bases)...
+  Done. Angles extracted from measurement statistics.
+
+[RESULT] Final energy: -111.7308
+[REPLICA 858] RMSD: 5.562 Å
+[REPLICA 858] Done!
+  Energy     : -111.7308
+  RMSD       : 5.562 Å
+  Runtime    : 1205.0s
+  Saved to   : outputs/slurm_YYDPETGTWY_amber/replica_858/replica_858_result.json
+============================================
+End time     : Tue Apr 14 11:33:39 EDT 2026
+Exit code    : 0
+============================================

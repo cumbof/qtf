@@ -1,0 +1,61 @@
+============================================
+Job ID       : 5496593
+Array Task   : 320
+Replica ID   : 320
+Node         : lri036
+Start time   : Mon Apr 27 14:20:46 EDT 2026
+============================================
+[REPLICA 320] Starting...
+  Sequence     : YYDPETGTWY
+  Forcefield   : amber
+  Backend      : aer
+  Max iter     : 2000
+  Skip Stage 2 : True
+--- INITIALIZING QUANTUM BIOPHYSICS FOLDER (HARDWARE) ---
+--- FORCE FIELD: AMBER ---
+[REPLICA 320] Ground truth loaded — 10 CA atoms
+--- SCOUTING: Checking 50 starting points ---
+ > Deterministic Seed: 313297087 (Derived from Sequence)
+ > Best Start Found: Energy 459.02
+[REPLICA 320] Init strategy: random, seed: 313297087
+--- STARTING QUANTUM FOLDING (HYBRID PIPELINE) ---
+Stage 1: Mechanical Collapse (COBYLA, statevector)...
+ > Collapse Energy : 807.82
+ > Stage 1 RMSD    : 2.9387 Å
+Stage 2: SKIPPED
+Stage 3: Natural Relaxation (SLSQP, statevector)...
+Optimization terminated successfully    (Exit mode 0)
+            Current function value: 107.8995856677301
+            Iterations: 403
+            Function evaluations: 21062
+            Gradient evaluations: 403
+ > Relaxation Energy : 107.90
+ > Stage 3 RMSD      : 3.1199 Å
+
+── RMSD Progress ──────────────────────────
+  Stage 1 : 2.9387 Å
+  Stage 2 : skipped
+  Stage 3 : 3.1199 Å  ↑ worse
+──────────────────────────────────────────
+
+[EXTRACTION] Mode: sampler → backend='aer_simulator', shots=4096
+  Submitting 3 circuits (Z / X / Y bases)...
+  Done. Angles extracted from measurement statistics.
+
+[RESULT] Final energy: 107.8996
+[REPLICA 320] Tracker saved → outputs/Skip1/slurm_YYDPETGTWY_amber/replica_320/replica_320_tracker.json
+[SAVED] outputs/Skip1/slurm_YYDPETGTWY_amber/replica_320/replica_320_landscape.png
+[REPLICA 320] Final RMSD: 6.516 Å
+
+[REPLICA 320] ✓ Done!
+  Energy       : 107.8996
+  RMSD final   : 6.516 Å
+  RMSD stage1  : 2.939 Å
+  RMSD stage2  : skipped
+  RMSD stage3  : 3.120 Å
+  Runtime      : 240.6s
+  Saved to     : outputs/Skip1/slurm_YYDPETGTWY_amber/replica_320/replica_320_result.json
+============================================
+End time     : Mon Apr 27 14:24:47 EDT 2026
+Exit code    : 0
+============================================

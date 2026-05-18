@@ -1,0 +1,50 @@
+============================================
+Job ID       : 5421661
+Array Task   : 409
+Replica ID   : 409
+Node         : lri046
+Start time   : Tue Apr 14 06:15:15 EDT 2026
+============================================
+[REPLICA 409] Starting...
+  Sequence   : YYDPETGTWY
+  Forcefield : amber
+  Backend    : aer
+  Max iter   : 2000
+--- INITIALIZING QUANTUM BIOPHYSICS FOLDER (HARDWARE) ---
+--- FORCE FIELD: AMBER ---
+--- PRIMING CIRCUIT FOR SHEET ---
+ > Priming Error: 13.4648
+[REPLICA 409] Init strategy: sheet, seed: 313297176
+--- STARTING QUANTUM FOLDING (HYBRID PIPELINE) ---
+Stage 1: Mechanical Collapse (COBYLA, statevector)...
+ > Collapse Energy: 701.75
+Stage 2: Physics Refinement (SLSQP, statevector)...
+Optimization terminated successfully    (Exit mode 0)
+            Current function value: -58.18976775316247
+            Iterations: 396
+            Function evaluations: 45341
+            Gradient evaluations: 396
+ > Refinement Energy: -58.19
+Stage 3: Natural Relaxation (SLSQP, statevector)...
+Optimization terminated successfully    (Exit mode 0)
+            Current function value: -53.17181160053448
+            Iterations: 403
+            Function evaluations: 46209
+            Gradient evaluations: 403
+ > Relaxation Energy: -53.17
+
+[EXTRACTION] Mode: sampler → backend='aer_simulator', shots=4096
+  Submitting 3 circuits (Z / X / Y bases)...
+  Done. Angles extracted from measurement statistics.
+
+[RESULT] Final energy: -53.1718
+[REPLICA 409] RMSD: 4.306 Å
+[REPLICA 409] Done!
+  Energy     : -53.1718
+  RMSD       : 4.306 Å
+  Runtime    : 1618.9s
+  Saved to   : outputs/slurm_YYDPETGTWY_amber/replica_409/replica_409_result.json
+============================================
+End time     : Tue Apr 14 06:42:15 EDT 2026
+Exit code    : 0
+============================================

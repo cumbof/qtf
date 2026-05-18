@@ -1,0 +1,51 @@
+============================================
+Job ID       : 5440303
+Array Task   : 240
+Replica ID   : 240
+Node         : lri015
+Start time   : Fri Apr 17 13:14:45 EDT 2026
+============================================
+[REPLICA 240] Starting...
+  Sequence   : DAYAQWLKDGGPSSGRPPPS
+  Forcefield : amber
+  Backend    : aer
+  Max iter   : 2000
+--- INITIALIZING QUANTUM BIOPHYSICS FOLDER (HARDWARE) ---
+--- FORCE FIELD: AMBER ---
+--- SCOUTING: Checking 50 starting points ---
+ > Deterministic Seed: 2158523625 (Derived from Sequence)
+ > Best Start Found: Energy 596.83
+[REPLICA 240] Init strategy: random, seed: 2158523625
+--- STARTING QUANTUM FOLDING (HYBRID PIPELINE) ---
+Stage 1: Mechanical Collapse (COBYLA, statevector)...
+ > Collapse Energy: 318.46
+Stage 2: Physics Refinement (SLSQP, statevector)...
+Optimization terminated successfully    (Exit mode 0)
+            Current function value: -63.53473798299945
+            Iterations: 407
+            Function evaluations: 31322
+            Gradient evaluations: 407
+ > Refinement Energy: -63.53
+Stage 3: Natural Relaxation (SLSQP, statevector)...
+Optimization terminated successfully    (Exit mode 0)
+            Current function value: -74.9743733723629
+            Iterations: 194
+            Function evaluations: 15322
+            Gradient evaluations: 194
+ > Relaxation Energy: -74.97
+
+[EXTRACTION] Mode: sampler → backend='aer_simulator', shots=4096
+  Submitting 3 circuits (Z / X / Y bases)...
+  Done. Angles extracted from measurement statistics.
+
+[RESULT] Final energy: -74.9744
+[REPLICA 240] RMSD: 7.467 Å
+[REPLICA 240] Done!
+  Energy     : -74.9744
+  RMSD       : 7.467 Å
+  Runtime    : 872.2s
+  Saved to   : outputs/reps_Brickwork_entanglement1/slurm_DAYAQWLKDGGPSSGRPPPS_amber/replica_240/replica_240_result.json
+============================================
+End time     : Fri Apr 17 13:29:19 EDT 2026
+Exit code    : 0
+============================================

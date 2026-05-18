@@ -1,0 +1,61 @@
+============================================
+Job ID       : 5496664
+Array Task   : 391
+Replica ID   : 391
+Node         : lri044
+Start time   : Mon Apr 27 14:21:12 EDT 2026
+============================================
+[REPLICA 391] Starting...
+  Sequence     : YYDPETGTWY
+  Forcefield   : amber
+  Backend      : aer
+  Max iter     : 2000
+  Skip Stage 2 : True
+--- INITIALIZING QUANTUM BIOPHYSICS FOLDER (HARDWARE) ---
+--- FORCE FIELD: AMBER ---
+[REPLICA 391] Ground truth loaded — 10 CA atoms
+--- SCOUTING: Checking 50 starting points ---
+ > Deterministic Seed: 313297158 (Derived from Sequence)
+ > Best Start Found: Energy 353.44
+[REPLICA 391] Init strategy: random, seed: 313297158
+--- STARTING QUANTUM FOLDING (HYBRID PIPELINE) ---
+Stage 1: Mechanical Collapse (COBYLA, statevector)...
+ > Collapse Energy : 333.10
+ > Stage 1 RMSD    : 2.4490 Å
+Stage 2: SKIPPED
+Stage 3: Natural Relaxation (SLSQP, statevector)...
+Optimization terminated successfully    (Exit mode 0)
+            Current function value: -72.6135847011274
+            Iterations: 185
+            Function evaluations: 10004
+            Gradient evaluations: 185
+ > Relaxation Energy : -72.61
+ > Stage 3 RMSD      : 2.2486 Å
+
+── RMSD Progress ──────────────────────────
+  Stage 1 : 2.4490 Å
+  Stage 2 : skipped
+  Stage 3 : 2.2486 Å  ↓ better
+──────────────────────────────────────────
+
+[EXTRACTION] Mode: sampler → backend='aer_simulator', shots=4096
+  Submitting 3 circuits (Z / X / Y bases)...
+  Done. Angles extracted from measurement statistics.
+
+[RESULT] Final energy: -72.6136
+[REPLICA 391] Tracker saved → outputs/Skip1/slurm_YYDPETGTWY_amber/replica_391/replica_391_tracker.json
+[SAVED] outputs/Skip1/slurm_YYDPETGTWY_amber/replica_391/replica_391_landscape.png
+[REPLICA 391] Final RMSD: 6.677 Å
+
+[REPLICA 391] ✓ Done!
+  Energy       : -72.6136
+  RMSD final   : 6.677 Å
+  RMSD stage1  : 2.449 Å
+  RMSD stage2  : skipped
+  RMSD stage3  : 2.249 Å
+  Runtime      : 127.2s
+  Saved to     : outputs/Skip1/slurm_YYDPETGTWY_amber/replica_391/replica_391_result.json
+============================================
+End time     : Mon Apr 27 14:23:20 EDT 2026
+Exit code    : 0
+============================================

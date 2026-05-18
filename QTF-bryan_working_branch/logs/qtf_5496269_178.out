@@ -1,0 +1,61 @@
+============================================
+Job ID       : 5496451
+Array Task   : 178
+Replica ID   : 178
+Node         : lri035
+Start time   : Mon Apr 27 14:18:56 EDT 2026
+============================================
+[REPLICA 178] Starting...
+  Sequence     : YYDPETGTWY
+  Forcefield   : amber
+  Backend      : aer
+  Max iter     : 2000
+  Skip Stage 2 : True
+--- INITIALIZING QUANTUM BIOPHYSICS FOLDER (HARDWARE) ---
+--- FORCE FIELD: AMBER ---
+[REPLICA 178] Ground truth loaded — 10 CA atoms
+--- SCOUTING: Checking 50 starting points ---
+ > Deterministic Seed: 313296945 (Derived from Sequence)
+ > Best Start Found: Energy 364.49
+[REPLICA 178] Init strategy: random, seed: 313296945
+--- STARTING QUANTUM FOLDING (HYBRID PIPELINE) ---
+Stage 1: Mechanical Collapse (COBYLA, statevector)...
+ > Collapse Energy : 288.79
+ > Stage 1 RMSD    : 3.2191 Å
+Stage 2: SKIPPED
+Stage 3: Natural Relaxation (SLSQP, statevector)...
+Optimization terminated successfully    (Exit mode 0)
+            Current function value: -30.71432428703504
+            Iterations: 156
+            Function evaluations: 8487
+            Gradient evaluations: 156
+ > Relaxation Energy : -30.71
+ > Stage 3 RMSD      : 3.8053 Å
+
+── RMSD Progress ──────────────────────────
+  Stage 1 : 3.2191 Å
+  Stage 2 : skipped
+  Stage 3 : 3.8053 Å  ↑ worse
+──────────────────────────────────────────
+
+[EXTRACTION] Mode: sampler → backend='aer_simulator', shots=4096
+  Submitting 3 circuits (Z / X / Y bases)...
+  Done. Angles extracted from measurement statistics.
+
+[RESULT] Final energy: -30.7143
+[REPLICA 178] Tracker saved → outputs/Skip1/slurm_YYDPETGTWY_amber/replica_178/replica_178_tracker.json
+[SAVED] outputs/Skip1/slurm_YYDPETGTWY_amber/replica_178/replica_178_landscape.png
+[REPLICA 178] Final RMSD: 6.731 Å
+
+[REPLICA 178] ✓ Done!
+  Energy       : -30.7143
+  RMSD final   : 6.731 Å
+  RMSD stage1  : 3.219 Å
+  RMSD stage2  : skipped
+  RMSD stage3  : 3.805 Å
+  Runtime      : 109.5s
+  Saved to     : outputs/Skip1/slurm_YYDPETGTWY_amber/replica_178/replica_178_result.json
+============================================
+End time     : Mon Apr 27 14:20:47 EDT 2026
+Exit code    : 0
+============================================

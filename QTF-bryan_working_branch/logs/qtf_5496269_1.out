@@ -1,0 +1,61 @@
+============================================
+Job ID       : 5496272
+Array Task   : 1
+Replica ID   : 1
+Node         : lri000
+Start time   : Mon Apr 27 14:18:31 EDT 2026
+============================================
+[REPLICA 1] Starting...
+  Sequence     : YYDPETGTWY
+  Forcefield   : amber
+  Backend      : aer
+  Max iter     : 2000
+  Skip Stage 2 : True
+--- INITIALIZING QUANTUM BIOPHYSICS FOLDER (HARDWARE) ---
+--- FORCE FIELD: AMBER ---
+[REPLICA 1] Ground truth loaded — 10 CA atoms
+--- SCOUTING: Checking 50 starting points ---
+ > Deterministic Seed: 313296768 (Derived from Sequence)
+ > Best Start Found: Energy 410.74
+[REPLICA 1] Init strategy: random, seed: 313296768
+--- STARTING QUANTUM FOLDING (HYBRID PIPELINE) ---
+Stage 1: Mechanical Collapse (COBYLA, statevector)...
+ > Collapse Energy : 240.84
+ > Stage 1 RMSD    : 2.8627 Å
+Stage 2: SKIPPED
+Stage 3: Natural Relaxation (SLSQP, statevector)...
+Optimization terminated successfully    (Exit mode 0)
+            Current function value: -4.287877743900144
+            Iterations: 188
+            Function evaluations: 10086
+            Gradient evaluations: 188
+ > Relaxation Energy : -4.29
+ > Stage 3 RMSD      : 3.1527 Å
+
+── RMSD Progress ──────────────────────────
+  Stage 1 : 2.8627 Å
+  Stage 2 : skipped
+  Stage 3 : 3.1527 Å  ↑ worse
+──────────────────────────────────────────
+
+[EXTRACTION] Mode: sampler → backend='aer_simulator', shots=4096
+  Submitting 3 circuits (Z / X / Y bases)...
+  Done. Angles extracted from measurement statistics.
+
+[RESULT] Final energy: -4.2879
+[REPLICA 1] Tracker saved → outputs/Skip1/slurm_YYDPETGTWY_amber/replica_1/replica_1_tracker.json
+[SAVED] outputs/Skip1/slurm_YYDPETGTWY_amber/replica_1/replica_1_landscape.png
+[REPLICA 1] Final RMSD: 5.766 Å
+
+[REPLICA 1] ✓ Done!
+  Energy       : -4.2879
+  RMSD final   : 5.766 Å
+  RMSD stage1  : 2.863 Å
+  RMSD stage2  : skipped
+  RMSD stage3  : 3.153 Å
+  Runtime      : 129.7s
+  Saved to     : outputs/Skip1/slurm_YYDPETGTWY_amber/replica_1/replica_1_result.json
+============================================
+End time     : Mon Apr 27 14:20:42 EDT 2026
+Exit code    : 0
+============================================

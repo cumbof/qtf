@@ -1,0 +1,61 @@
+============================================
+Job ID       : 5496324
+Array Task   : 53
+Replica ID   : 53
+Node         : lri043
+Start time   : Mon Apr 27 14:18:31 EDT 2026
+============================================
+[REPLICA 53] Starting...
+  Sequence     : YYDPETGTWY
+  Forcefield   : amber
+  Backend      : aer
+  Max iter     : 2000
+  Skip Stage 2 : True
+--- INITIALIZING QUANTUM BIOPHYSICS FOLDER (HARDWARE) ---
+--- FORCE FIELD: AMBER ---
+[REPLICA 53] Ground truth loaded — 10 CA atoms
+--- SCOUTING: Checking 50 starting points ---
+ > Deterministic Seed: 313296820 (Derived from Sequence)
+ > Best Start Found: Energy 370.53
+[REPLICA 53] Init strategy: random, seed: 313296820
+--- STARTING QUANTUM FOLDING (HYBRID PIPELINE) ---
+Stage 1: Mechanical Collapse (COBYLA, statevector)...
+ > Collapse Energy : 508.70
+ > Stage 1 RMSD    : 3.6544 Å
+Stage 2: SKIPPED
+Stage 3: Natural Relaxation (SLSQP, statevector)...
+Optimization terminated successfully    (Exit mode 0)
+            Current function value: 6.717457462704471
+            Iterations: 128
+            Function evaluations: 6997
+            Gradient evaluations: 128
+ > Relaxation Energy : 6.72
+ > Stage 3 RMSD      : 3.8264 Å
+
+── RMSD Progress ──────────────────────────
+  Stage 1 : 3.6544 Å
+  Stage 2 : skipped
+  Stage 3 : 3.8264 Å  ↑ worse
+──────────────────────────────────────────
+
+[EXTRACTION] Mode: sampler → backend='aer_simulator', shots=4096
+  Submitting 3 circuits (Z / X / Y bases)...
+  Done. Angles extracted from measurement statistics.
+
+[RESULT] Final energy: 6.7175
+[REPLICA 53] Tracker saved → outputs/Skip1/slurm_YYDPETGTWY_amber/replica_53/replica_53_tracker.json
+[SAVED] outputs/Skip1/slurm_YYDPETGTWY_amber/replica_53/replica_53_landscape.png
+[REPLICA 53] Final RMSD: 6.526 Å
+
+[REPLICA 53] ✓ Done!
+  Energy       : 6.7175
+  RMSD final   : 6.526 Å
+  RMSD stage1  : 3.654 Å
+  RMSD stage2  : skipped
+  RMSD stage3  : 3.826 Å
+  Runtime      : 98.0s
+  Saved to     : outputs/Skip1/slurm_YYDPETGTWY_amber/replica_53/replica_53_result.json
+============================================
+End time     : Mon Apr 27 14:20:14 EDT 2026
+Exit code    : 0
+============================================

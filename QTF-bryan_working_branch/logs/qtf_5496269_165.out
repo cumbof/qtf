@@ -1,0 +1,61 @@
+============================================
+Job ID       : 5496438
+Array Task   : 165
+Replica ID   : 165
+Node         : lri033
+Start time   : Mon Apr 27 14:18:56 EDT 2026
+============================================
+[REPLICA 165] Starting...
+  Sequence     : YYDPETGTWY
+  Forcefield   : amber
+  Backend      : aer
+  Max iter     : 2000
+  Skip Stage 2 : True
+--- INITIALIZING QUANTUM BIOPHYSICS FOLDER (HARDWARE) ---
+--- FORCE FIELD: AMBER ---
+[REPLICA 165] Ground truth loaded — 10 CA atoms
+--- SCOUTING: Checking 50 starting points ---
+ > Deterministic Seed: 313296932 (Derived from Sequence)
+ > Best Start Found: Energy 482.94
+[REPLICA 165] Init strategy: random, seed: 313296932
+--- STARTING QUANTUM FOLDING (HYBRID PIPELINE) ---
+Stage 1: Mechanical Collapse (COBYLA, statevector)...
+ > Collapse Energy : 545.59
+ > Stage 1 RMSD    : 3.7871 Å
+Stage 2: SKIPPED
+Stage 3: Natural Relaxation (SLSQP, statevector)...
+Optimization terminated successfully    (Exit mode 0)
+            Current function value: -43.6227383006763
+            Iterations: 121
+            Function evaluations: 6705
+            Gradient evaluations: 121
+ > Relaxation Energy : -43.62
+ > Stage 3 RMSD      : 4.6838 Å
+
+── RMSD Progress ──────────────────────────
+  Stage 1 : 3.7871 Å
+  Stage 2 : skipped
+  Stage 3 : 4.6838 Å  ↑ worse
+──────────────────────────────────────────
+
+[EXTRACTION] Mode: sampler → backend='aer_simulator', shots=4096
+  Submitting 3 circuits (Z / X / Y bases)...
+  Done. Angles extracted from measurement statistics.
+
+[RESULT] Final energy: -43.6227
+[REPLICA 165] Tracker saved → outputs/Skip1/slurm_YYDPETGTWY_amber/replica_165/replica_165_tracker.json
+[SAVED] outputs/Skip1/slurm_YYDPETGTWY_amber/replica_165/replica_165_landscape.png
+[REPLICA 165] Final RMSD: 5.600 Å
+
+[REPLICA 165] ✓ Done!
+  Energy       : -43.6227
+  RMSD final   : 5.600 Å
+  RMSD stage1  : 3.787 Å
+  RMSD stage2  : skipped
+  RMSD stage3  : 4.684 Å
+  Runtime      : 92.9s
+  Saved to     : outputs/Skip1/slurm_YYDPETGTWY_amber/replica_165/replica_165_result.json
+============================================
+End time     : Mon Apr 27 14:20:31 EDT 2026
+Exit code    : 0
+============================================

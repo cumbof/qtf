@@ -1,0 +1,61 @@
+============================================
+Job ID       : 5496341
+Array Task   : 70
+Replica ID   : 70
+Node         : lri065
+Start time   : Mon Apr 27 14:18:54 EDT 2026
+============================================
+[REPLICA 70] Starting...
+  Sequence     : YYDPETGTWY
+  Forcefield   : amber
+  Backend      : aer
+  Max iter     : 2000
+  Skip Stage 2 : True
+--- INITIALIZING QUANTUM BIOPHYSICS FOLDER (HARDWARE) ---
+--- FORCE FIELD: AMBER ---
+[REPLICA 70] Ground truth loaded — 10 CA atoms
+--- SCOUTING: Checking 50 starting points ---
+ > Deterministic Seed: 313296837 (Derived from Sequence)
+ > Best Start Found: Energy 310.13
+[REPLICA 70] Init strategy: random, seed: 313296837
+--- STARTING QUANTUM FOLDING (HYBRID PIPELINE) ---
+Stage 1: Mechanical Collapse (COBYLA, statevector)...
+ > Collapse Energy : 639.07
+ > Stage 1 RMSD    : 2.7764 Å
+Stage 2: SKIPPED
+Stage 3: Natural Relaxation (SLSQP, statevector)...
+Optimization terminated successfully    (Exit mode 0)
+            Current function value: 72.35670470882783
+            Iterations: 356
+            Function evaluations: 18696
+            Gradient evaluations: 356
+ > Relaxation Energy : 72.36
+ > Stage 3 RMSD      : 3.4724 Å
+
+── RMSD Progress ──────────────────────────
+  Stage 1 : 2.7764 Å
+  Stage 2 : skipped
+  Stage 3 : 3.4724 Å  ↑ worse
+──────────────────────────────────────────
+
+[EXTRACTION] Mode: sampler → backend='aer_simulator', shots=4096
+  Submitting 3 circuits (Z / X / Y bases)...
+  Done. Angles extracted from measurement statistics.
+
+[RESULT] Final energy: 72.3567
+[REPLICA 70] Tracker saved → outputs/Skip1/slurm_YYDPETGTWY_amber/replica_70/replica_70_tracker.json
+[SAVED] outputs/Skip1/slurm_YYDPETGTWY_amber/replica_70/replica_70_landscape.png
+[REPLICA 70] Final RMSD: 6.231 Å
+
+[REPLICA 70] ✓ Done!
+  Energy       : 72.3567
+  RMSD final   : 6.231 Å
+  RMSD stage1  : 2.776 Å
+  RMSD stage2  : skipped
+  RMSD stage3  : 3.472 Å
+  Runtime      : 233.2s
+  Saved to     : outputs/Skip1/slurm_YYDPETGTWY_amber/replica_70/replica_70_result.json
+============================================
+End time     : Mon Apr 27 14:22:49 EDT 2026
+Exit code    : 0
+============================================

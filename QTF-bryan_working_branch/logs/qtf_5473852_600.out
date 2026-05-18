@@ -1,0 +1,52 @@
+============================================
+Job ID       : 5474773
+Array Task   : 600
+Replica ID   : 600
+Node         : lri010
+Start time   : Wed Apr 22 18:00:31 EDT 2026
+============================================
+[REPLICA 600] Starting...
+  Sequence   : YYDPETGTWY
+  Forcefield : amber
+  Backend    : aer
+  Max iter   : 2000
+--- INITIALIZING QUANTUM BIOPHYSICS FOLDER (HARDWARE) ---
+--- FORCE FIELD: AMBER ---
+--- SCOUTING: Checking 50 starting points ---
+ > Deterministic Seed: 313297367 (Derived from Sequence)
+ > Best Start Found: Energy 251.46
+[REPLICA 600] Init strategy: random, seed: 313297367
+--- STARTING QUANTUM FOLDING (HYBRID PIPELINE) ---
+Stage 1: Mechanical Collapse (COBYLA, statevector)...
+ > Collapse Energy: 606.17
+Stage 2: Physics Refinement (SLSQP, statevector)...
+Optimization terminated successfully    (Exit mode 0)
+            Current function value: 276.6314755288787
+            Iterations: 213
+            Function evaluations: 11372
+            Gradient evaluations: 213
+ > Refinement Energy: 276.63
+Stage 3: Natural Relaxation (SLSQP, statevector)...
+Optimization terminated successfully    (Exit mode 0)
+            Current function value: 46.68589022142525
+            Iterations: 405
+            Function evaluations: 21037
+            Gradient evaluations: 405
+ > Relaxation Energy: 46.69
+
+[EXTRACTION] Mode: sampler → backend='aer_simulator', shots=4096
+  Submitting 3 circuits (Z / X / Y bases)...
+  Done. Angles extracted from measurement statistics.
+
+[RESULT] Final energy: 46.6859
+[SAVED] outputs/reps_Brickwork_entanglement/slurm_YYDPETGTWY_amber/replica_600/replica_600_landscape.png
+[REPLICA 600] RMSD: 5.630 Å
+[REPLICA 600] Done!
+  Energy     : 46.6859
+  RMSD       : 5.630 Å
+  Runtime    : 396.0s
+  Saved to   : outputs/reps_Brickwork_entanglement/slurm_YYDPETGTWY_amber/replica_600/replica_600_result.json
+============================================
+End time     : Wed Apr 22 18:07:08 EDT 2026
+Exit code    : 0
+============================================

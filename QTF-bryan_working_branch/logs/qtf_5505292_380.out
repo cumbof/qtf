@@ -1,0 +1,68 @@
+============================================
+Job ID       : 5505679
+Array Task   : 380
+Replica ID   : 380
+Node         : lri052
+Start time   : Tue Apr 28 09:41:40 EDT 2026
+============================================
+[REPLICA 380] Starting...
+  Sequence     : YYDPETGTWY
+  Forcefield   : amber
+  Backend      : aer
+  Max iter     : 2000
+  Skip Stage 2 : False
+--- INITIALIZING QUANTUM BIOPHYSICS FOLDER (HARDWARE) ---
+--- FORCE FIELD: AMBER ---
+[REPLICA 380] Ground truth loaded — 10 CA atoms
+--- SCOUTING: Checking 50 starting points ---
+ > Deterministic Seed: 313297147 (Derived from Sequence)
+ > Best Start Found: Energy 278.74
+[REPLICA 380] Init strategy: random, seed: 313297147
+--- STARTING QUANTUM FOLDING (HYBRID PIPELINE) ---
+Stage 1: Mechanical Collapse (COBYLA, statevector)...
+ > Collapse Energy : 681.72
+ > Stage 1 RMSD    : 3.1586 Å
+Stage 2: Physics Refinement (SLSQP, statevector)...
+Optimization terminated successfully    (Exit mode 0)
+            Current function value: 30.243373424196015
+            Iterations: 359
+            Function evaluations: 18833
+            Gradient evaluations: 359
+ > Refinement Energy : 30.24
+ > Stage 2 RMSD      : 1.7158 Å
+Stage 3: Natural Relaxation (SLSQP, statevector)...
+Optimization terminated successfully    (Exit mode 0)
+            Current function value: 34.042300494986215
+            Iterations: 240
+            Function evaluations: 12770
+            Gradient evaluations: 240
+ > Relaxation Energy : 34.04
+ > Stage 3 RMSD      : 4.0319 Å
+
+── RMSD Progress ──────────────────────────
+  Stage 1 : 3.1586 Å
+  Stage 2 : 1.7158 Å  ↓ better
+  Stage 3 : 4.0319 Å  ↑ worse
+──────────────────────────────────────────
+
+[EXTRACTION] Mode: sampler → backend='aer_simulator', shots=4096
+  Submitting 3 circuits (Z / X / Y bases)...
+  Done. Angles extracted from measurement statistics.
+
+[RESULT] Final energy: 34.0423
+[REPLICA 380] Tracker saved → outputs/no_skip1/slurm_YYDPETGTWY_amber/replica_380/replica_380_tracker.json
+[SAVED] outputs/no_skip1/slurm_YYDPETGTWY_amber/replica_380/replica_380_landscape.png
+[REPLICA 380] Final RMSD: 6.628 Å
+
+[REPLICA 380] ✓ Done!
+  Energy       : 34.0423
+  RMSD final   : 6.628 Å
+  RMSD stage1  : 3.159 Å
+  RMSD stage2  : 1.716 Å
+  RMSD stage3  : 4.032 Å
+  Runtime      : 372.8s
+  Saved to     : outputs/no_skip1/slurm_YYDPETGTWY_amber/replica_380/replica_380_result.json
+============================================
+End time     : Tue Apr 28 09:47:54 EDT 2026
+Exit code    : 0
+============================================

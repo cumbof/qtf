@@ -1,0 +1,61 @@
+============================================
+Job ID       : 5496359
+Array Task   : 88
+Replica ID   : 88
+Node         : lri067
+Start time   : Mon Apr 27 14:18:54 EDT 2026
+============================================
+[REPLICA 88] Starting...
+  Sequence     : YYDPETGTWY
+  Forcefield   : amber
+  Backend      : aer
+  Max iter     : 2000
+  Skip Stage 2 : True
+--- INITIALIZING QUANTUM BIOPHYSICS FOLDER (HARDWARE) ---
+--- FORCE FIELD: AMBER ---
+[REPLICA 88] Ground truth loaded — 10 CA atoms
+--- SCOUTING: Checking 50 starting points ---
+ > Deterministic Seed: 313296855 (Derived from Sequence)
+ > Best Start Found: Energy 489.36
+[REPLICA 88] Init strategy: random, seed: 313296855
+--- STARTING QUANTUM FOLDING (HYBRID PIPELINE) ---
+Stage 1: Mechanical Collapse (COBYLA, statevector)...
+ > Collapse Energy : 385.37
+ > Stage 1 RMSD    : 2.7396 Å
+Stage 2: SKIPPED
+Stage 3: Natural Relaxation (SLSQP, statevector)...
+Optimization terminated successfully    (Exit mode 0)
+            Current function value: -19.498911729192095
+            Iterations: 118
+            Function evaluations: 6511
+            Gradient evaluations: 118
+ > Relaxation Energy : -19.50
+ > Stage 3 RMSD      : 3.1674 Å
+
+── RMSD Progress ──────────────────────────
+  Stage 1 : 2.7396 Å
+  Stage 2 : skipped
+  Stage 3 : 3.1674 Å  ↑ worse
+──────────────────────────────────────────
+
+[EXTRACTION] Mode: sampler → backend='aer_simulator', shots=4096
+  Submitting 3 circuits (Z / X / Y bases)...
+  Done. Angles extracted from measurement statistics.
+
+[RESULT] Final energy: -19.4989
+[REPLICA 88] Tracker saved → outputs/Skip1/slurm_YYDPETGTWY_amber/replica_88/replica_88_tracker.json
+[SAVED] outputs/Skip1/slurm_YYDPETGTWY_amber/replica_88/replica_88_landscape.png
+[REPLICA 88] Final RMSD: 6.259 Å
+
+[REPLICA 88] ✓ Done!
+  Energy       : -19.4989
+  RMSD final   : 6.259 Å
+  RMSD stage1  : 2.740 Å
+  RMSD stage2  : skipped
+  RMSD stage3  : 3.167 Å
+  Runtime      : 100.8s
+  Saved to     : outputs/Skip1/slurm_YYDPETGTWY_amber/replica_88/replica_88_result.json
+============================================
+End time     : Mon Apr 27 14:20:37 EDT 2026
+Exit code    : 0
+============================================

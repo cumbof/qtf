@@ -1,0 +1,52 @@
+============================================
+Job ID       : 5479181
+Array Task   : 265
+Replica ID   : 265
+Node         : lri007
+Start time   : Thu Apr 23 10:04:28 EDT 2026
+============================================
+[REPLICA 265] Starting...
+  Sequence   : YYDPETGTWY
+  Forcefield : amber
+  Backend    : aer
+  Max iter   : 2000
+--- INITIALIZING QUANTUM BIOPHYSICS FOLDER (HARDWARE) ---
+--- FORCE FIELD: AMBER ---
+--- SCOUTING: Checking 50 starting points ---
+ > Deterministic Seed: 313297032 (Derived from Sequence)
+ > Best Start Found: Energy 407.05
+[REPLICA 265] Init strategy: random, seed: 313297032
+--- STARTING QUANTUM FOLDING (HYBRID PIPELINE) ---
+Stage 1: Mechanical Collapse (COBYLA, statevector)...
+ > Collapse Energy: 321.76
+Stage 2: Physics Refinement (SLSQP, statevector)...
+Optimization terminated successfully    (Exit mode 0)
+            Current function value: 307.2623011988938
+            Iterations: 570
+            Function evaluations: 29336
+            Gradient evaluations: 570
+ > Refinement Energy: 307.26
+Stage 3: Natural Relaxation (SLSQP, statevector)...
+Optimization terminated successfully    (Exit mode 0)
+            Current function value: -132.56123862735922
+            Iterations: 233
+            Function evaluations: 12303
+            Gradient evaluations: 233
+ > Relaxation Energy: -132.56
+
+[EXTRACTION] Mode: sampler → backend='aer_simulator', shots=4096
+  Submitting 3 circuits (Z / X / Y bases)...
+  Done. Angles extracted from measurement statistics.
+
+[RESULT] Final energy: -132.5612
+[SAVED] outputs/energy_reps_Brickwork_entanglement/slurm_YYDPETGTWY_amber/replica_265/replica_265_landscape.png
+[REPLICA 265] RMSD: 4.946 Å
+[REPLICA 265] Done!
+  Energy     : -132.5612
+  RMSD       : 4.946 Å
+  Runtime    : 504.3s
+  Saved to   : outputs/energy_reps_Brickwork_entanglement/slurm_YYDPETGTWY_amber/replica_265/replica_265_result.json
+============================================
+End time     : Thu Apr 23 10:12:53 EDT 2026
+Exit code    : 0
+============================================
