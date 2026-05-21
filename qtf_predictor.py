@@ -8,6 +8,8 @@ from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 import os, time, json, argparse
 from datetime import datetime
 
+import qtf_gromacs
+
 ### qtf imports
 import QTF.evaluator as evaluator
 import QTF.runner as runner
@@ -45,6 +47,104 @@ def core_ca_range_metadata(n_residues: int) -> dict:
         "rmsd_ca_start_residue_1indexed": 2 if use_core else 1,
         "rmsd_ca_end_residue_1indexed": (n_residues - 1) if use_core else n_residues,
         "rmsd_ca_n_aligned": (n_residues - 2) if use_core else n_residues,
+    }
+
+
+def adjacent_heavy_clash_metrics(coords, labels, min_allowed_A: float = 1.35, threshold_frac: float = 0.55):
+    """Detect the closest heavy-atom contact between adjacent residues."""
+    coords = np.asarray(coords, dtype=float)
+    res_ids = np.array([int(r) for r, _, _ in labels], dtype=int)
+    atom_names = [str(atom) for _, atom, _ in labels]
+    heavy_mask = np.array([str(elem).upper() != "H" and not str(atom).upper().startswith("H") for _, atom, elem in labels], dtype=bool)
+
+    elem_radii = {"C": 1.70, "N": 1.55, "O": 1.52, "S": 1.80}
+    radii = np.array([elem_radii.get(str(elem).upper()[0], 1.75) for _, _, elem in labels], dtype=float)
+
+    idx = np.where(heavy_mask)[0]
+    if idx.size < 2:
+        return {
+            "local_clash_min_heavy_dist": np.nan,
+            "local_clash_flag": False,
+            "local_clash_pair": "",
+        }
+
+    best_dist = float("inf")
+    best_pair = ""
+    worst_margin = float("inf")
+    worst_pair = ""
+    any_clash = False
+    for ii, i in enumerate(idx[:-1]):
+        ri = res_ids[i]
+        ai = atom_names[i]
+        for j in idx[ii + 1:]:
+            if abs(ri - res_ids[j]) != 1:
+                continue
+            aj = atom_names[j]
+            if ai == "C" and aj == "N":
+                continue
+            d = float(np.linalg.norm(coords[i] - coords[j]))
+            threshold_A = max(min_allowed_A, threshold_frac * (float(radii[i]) + float(radii[j])))
+            if d < best_dist:
+                best_dist = d
+                best_pair = f"{labels[i][0]}:{labels[i][1]}-{labels[j][0]}:{labels[j][1]}"
+            margin = d - threshold_A
+            if margin < worst_margin:
+                worst_margin = margin
+                worst_pair = f"{labels[i][0]}:{labels[i][1]}-{labels[j][0]}:{labels[j][1]}"
+            if d < threshold_A:
+                any_clash = True
+
+    if best_dist == float("inf"):
+        return {
+            "local_clash_min_heavy_dist": np.nan,
+            "local_clash_flag": False,
+            "local_clash_pair": "",
+        }
+
+    return {
+        "local_clash_min_heavy_dist": float(best_dist),
+        "local_clash_flag": bool(any_clash),
+        "local_clash_pair": worst_pair if any_clash else best_pair,
+    }
+
+
+def nonlocal_heavy_clash_metrics(coords, labels, min_allowed_A: float = 1.75):
+    """Detect the closest heavy-atom contact between residues separated by at least 2."""
+    coords = np.asarray(coords, dtype=float)
+    res_ids = np.array([int(r) for r, _, _ in labels], dtype=int)
+    heavy_mask = np.array([str(elem).upper() != "H" and not str(atom).upper().startswith("H") for _, atom, elem in labels], dtype=bool)
+
+    idx = np.where(heavy_mask)[0]
+    if idx.size < 2:
+        return {
+            "clash_min_heavy_dist": np.nan,
+            "clash_flag": False,
+            "clash_pair": "",
+        }
+
+    best_dist = float("inf")
+    best_pair = ""
+    for ii, i in enumerate(idx[:-1]):
+        ri = res_ids[i]
+        for j in idx[ii + 1:]:
+            if abs(ri - res_ids[j]) < 2:
+                continue
+            d = float(np.linalg.norm(coords[i] - coords[j]))
+            if d < best_dist:
+                best_dist = d
+                best_pair = f"{labels[i][0]}:{labels[i][1]}-{labels[j][0]}:{labels[j][1]}"
+
+    if best_dist == float("inf"):
+        return {
+            "clash_min_heavy_dist": np.nan,
+            "clash_flag": False,
+            "clash_pair": "",
+        }
+
+    return {
+        "clash_min_heavy_dist": float(best_dist),
+        "clash_flag": bool(best_dist < float(min_allowed_A)),
+        "clash_pair": best_pair,
     }
 
 
@@ -100,6 +200,17 @@ def __main__():
     parser.add_argument('--rosetta_repack', default=0, type=int)
     parser.add_argument('--rosetta_fa_min', default=0, type=int)
     parser.add_argument('--rosetta_cen_min', default=0, type=int)
+    parser.add_argument('--gromacs_minimize', default=0, type=int,
+                        help='1 to add hydrogens/topology and minimize each saved full PDB with GROMACS')
+    parser.add_argument('--gromacs_forcefield', default='amber99sb-ildn')
+    parser.add_argument('--gromacs_water', default='tip3p')
+    parser.add_argument('--gromacs_nsteps', default=5000, type=int,
+                        help='maximum GROMACS minimization steps; minimization may stop earlier at --gromacs_emtol')
+    parser.add_argument('--gromacs_emtol', default=100.0, type=float,
+                        help='GROMACS steepest-descent force tolerance in kJ/mol/nm')
+    parser.add_argument('--gromacs_maxwarn', default=2, type=int)
+    parser.add_argument('--gromacs_rerank', default=1, type=int,
+                        help='1 to rerank final minimized outputs by GROMACS potential energy when available')
 
     args = parser.parse_args()
 
@@ -182,12 +293,50 @@ def __main__():
         model_rows = []
         for rank, res in enumerate(selected_results, start=1):
             coords = res['coords']
-            pred_ca = np.array([coords[i] for i, lbl in enumerate(folder.static_labels) if lbl[1] == 'CA'])
-            sidechain_centroids = folder.compute_sidechain_centroids(coords, folder.static_labels)
+            labels = res.get('labels') or folder.static_labels
+            pred_ca = np.array([coords[i] for i, lbl in enumerate(labels) if lbl[1] == 'CA'])
+            sidechain_centroids = folder.compute_sidechain_centroids(coords, labels)
+            nonlocal_clash_metrics = nonlocal_heavy_clash_metrics(coords, labels)
+            local_clash_metrics = adjacent_heavy_clash_metrics(coords, labels)
+            ring_penetration_metrics = qtf_gromacs.ring_penetration_metrics(coords, labels)
             ca_pdb_path = os.path.join(job_output_dir, f"model_{rank}_ca.pdb")
             ca_centroid_pdb_path = os.path.join(job_output_dir, f"model_{rank}_ca_centroid.pdb")
+            full_pdb_path = os.path.join(job_output_dir, f"model_{rank}_full.pdb")
             folder.save_reduced_pdb(pred_ca, filename=ca_pdb_path, sidechain_centroids=None, energy=res['energy'])
             folder.save_reduced_pdb(pred_ca, filename=ca_centroid_pdb_path, sidechain_centroids=sidechain_centroids, energy=res['energy'])
+            folder.save_pdb(
+                coords,
+                labels,
+                filename=full_pdb_path,
+                energy=res['energy'],
+                remarks=["QTF heavy-atom rebuilt structure from optimized ensemble model"],
+                include_hydrogens=False,
+            )
+
+            gromacs_info = {}
+            if bool(args.gromacs_minimize):
+                gmx_dir = os.path.join(job_output_dir, "gromacs", f"model_{rank}")
+                gromacs_info = qtf_gromacs.minimize_pdb_with_gromacs(
+                    full_pdb_path,
+                    gmx_dir,
+                    forcefield=args.gromacs_forcefield,
+                    water=args.gromacs_water,
+                    nsteps=args.gromacs_nsteps,
+                    emtol=args.gromacs_emtol,
+                    maxwarn=args.gromacs_maxwarn,
+                )
+                if gromacs_info.get("gromacs_status") == "ok":
+                    min_coords, min_labels = qtf_gromacs.parse_pdb_atoms(
+                        str(gromacs_info["gromacs_minimized_full_pdb_path"])
+                    )
+                    min_ca = qtf_gromacs.ca_coords(min_coords, min_labels)
+                    if len(min_ca) == len(pred_ca):
+                        coords = min_coords
+                        labels = min_labels
+                        pred_ca = min_ca
+                        nonlocal_clash_metrics = nonlocal_heavy_clash_metrics(coords, labels)
+                        local_clash_metrics = adjacent_heavy_clash_metrics(coords, labels)
+                        ring_penetration_metrics = qtf_gromacs.ring_penetration_metrics(coords, labels)
             p_e2e, p_rg = evaluator.calculate_physics_metrics(pred_ca)
             if true_ca is not None:
                 n = min(len(pred_ca), len(true_ca))
@@ -220,10 +369,39 @@ def __main__():
                 "ref_rg_A": float(t_rg) if not np.isnan(t_rg) else np.nan,
                 "rebuilt_ca_pdb_path": ca_pdb_path,
                 "rebuilt_ca_centroid_pdb_path": ca_centroid_pdb_path,
+                "rebuilt_full_pdb_path": full_pdb_path,
+                **gromacs_info,
+                **nonlocal_clash_metrics,
+                **local_clash_metrics,
+                **ring_penetration_metrics,
                 **flat_terms,
             })
 
         df_models = pd.DataFrame(model_rows).sort_values(["energy"]).reset_index(drop=True)
+        if "clash_flag" in df_models.columns:
+            clean_df = df_models.loc[~df_models["clash_flag"]].copy()
+            if len(clean_df) > 0:
+                df_models = clean_df
+            else:
+                print("[predictor][warn] all ranked candidates triggered the nonlocal clash filter; keeping unfiltered set")
+        if "local_clash_flag" in df_models.columns:
+            clean_df = df_models.loc[~df_models["local_clash_flag"]].copy()
+            if len(clean_df) > 0:
+                df_models = clean_df
+            else:
+                print("[predictor][warn] all ranked candidates triggered the local backbone clash filter; keeping unfiltered set")
+        if "ring_penetration_flag" in df_models.columns:
+            clean_df = df_models.loc[~df_models["ring_penetration_flag"]].copy()
+            if len(clean_df) > 0:
+                df_models = clean_df
+            else:
+                print("[predictor][warn] all ranked candidates triggered the ring penetration filter; keeping unfiltered set")
+
+        if bool(args.gromacs_minimize) and bool(args.gromacs_rerank) and "gromacs_potential_kj_mol" in df_models.columns:
+            df_models = df_models.sort_values(["gromacs_potential_kj_mol", "energy"], na_position="last").reset_index(drop=True)
+            df_models["gromacs_energy_rank"] = np.arange(1, len(df_models) + 1)
+        else:
+            df_models = df_models.sort_values(["energy"]).reset_index(drop=True)
 
         # Save ranked ensemble table
         ensemble_csv_path = os.path.join(job_output_dir, "ensemble_ranked.csv")

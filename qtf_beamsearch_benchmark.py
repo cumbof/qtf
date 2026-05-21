@@ -31,6 +31,7 @@ import mdtraj as md
 import numpy as np
 import pandas as pd
 
+import qtf_gromacs
 import QTF.runner as runner
 
 
@@ -116,7 +117,7 @@ def get_tuning_settings():
     return {
         "hbond_scale": float(os.getenv("QTF_HBOND_SCALE", "0.75")),
         "sasa_scale": float(os.getenv("QTF_SASA_SCALE", "0.7")),
-        "vdw_rep_scale": float(os.getenv("QTF_VDW_REP_SCALE", "0.1")),
+        "vdw_rep_scale": float(os.getenv("QTF_VDW_REP_SCALE", "0.01")),
         "vdw_attr_scale": float(os.getenv("QTF_VDW_ATTR_SCALE", "0.1")),
         "rotamer_scale": float(os.getenv("QTF_ROTAMER_SCALE", "1.0")),
         "pi_stack_scale": float(os.getenv("QTF_PI_STACK_SCALE", "1.0")),
@@ -168,6 +169,7 @@ def residue_assignments(
     dof_entries: List[Dict[str, Any]],
     backbone_pairs: List[Tuple[float, float]],
     chi_rotamer_map: Dict[str, List[float]],
+    omega_values: Optional[List[float]] = None,
     max_options_per_residue: Optional[int] = None,
     rng: Optional[np.random.Generator] = None,
 ) -> List[np.ndarray]:
@@ -193,6 +195,7 @@ def residue_assignments(
     types = [d["type"] for d in dof_entries]
     has_phi = "phi" in types
     has_psi = "psi" in types
+    has_omega = "omega" in types
 
     if has_phi and has_psi:
         backbone_assigns = [{"phi": float(phi), "psi": float(psi)} for phi, psi in backbone_pairs]
@@ -203,13 +206,15 @@ def residue_assignments(
     else:
         backbone_assigns = [{}]
 
+    omega_assigns = [{"omega": float(v)} for v in (omega_values or [np.pi])] if has_omega else [{}]
+
     chi_types = sorted(
         [t for t in types if t.startswith("chi")],
         key=lambda x: int(x.replace("chi", ""))
     )
     chi_values = [list(map(float, chi_rotamer_map.get(t, [0.0]))) for t in chi_types]
 
-    axes = [backbone_assigns] + chi_values
+    axes = [backbone_assigns, omega_assigns] + chi_values
     axis_lengths = [len(ax) for ax in axes]
     total = int(np.prod(axis_lengths, dtype=np.int64)) if axis_lengths else 1
 
@@ -229,7 +234,8 @@ def residue_assignments(
         per_axis = list(reversed(per_axis))
 
         assign = dict(backbone_assigns[per_axis[0]])
-        for chi_t, vals, axis_i in zip(chi_types, chi_values, per_axis[1:]):
+        assign.update(omega_assigns[per_axis[1]])
+        for chi_t, vals, axis_i in zip(chi_types, chi_values, per_axis[2:]):
             assign[chi_t] = float(vals[axis_i])
 
         return np.array([assign.get(d["type"], 0.0) for d in dof_entries], dtype=float)
@@ -309,7 +315,7 @@ def backbone_signature(folder: runner.QuantumBiophysicsFolder, angle_vec: np.nda
     """
     sig = []
     for dof, ang in zip(folder.dof_map, angle_vec):
-        if dof["type"] in ("phi", "psi"):
+        if dof["type"] in ("phi", "psi", "omega"):
             degv = np.rad2deg(ang)
             sig.append((int(dof["res"]), dof["type"], int(np.round(degv / round_deg))))
     return tuple(sig)
@@ -331,6 +337,115 @@ def dedup_states_by_backbone(
     return out
 
 
+def nonlocal_heavy_clash_metrics(coords: np.ndarray, labels: List[Tuple[int, str, str]], min_allowed_A: float = 1.75):
+    """
+    Find the closest heavy-atom contact between residues separated by at least 2.
+
+    This is a cheap post-filter for beam ranking. It removes obvious steric
+    overlaps that would show up as fake bonds in viewers even when the score is
+    otherwise low.
+    """
+    coords = np.asarray(coords, dtype=float)
+    res_ids = np.array([int(r) for r, _, _ in labels], dtype=int)
+    heavy_mask = np.array([str(elem).upper() != "H" and not str(atom).upper().startswith("H") for _, atom, elem in labels], dtype=bool)
+
+    idx = np.where(heavy_mask)[0]
+    if idx.size < 2:
+        return {
+            "clash_min_heavy_dist": np.nan,
+            "clash_flag": False,
+            "clash_pair": "",
+        }
+
+    best_dist = float("inf")
+    best_pair = ""
+    for ii, i in enumerate(idx[:-1]):
+        ri = res_ids[i]
+        for j in idx[ii + 1:]:
+            if abs(ri - res_ids[j]) < 2:
+                continue
+            d = float(np.linalg.norm(coords[i] - coords[j]))
+            if d < best_dist:
+                best_dist = d
+                best_pair = f"{labels[i][0]}:{labels[i][1]}-{labels[j][0]}:{labels[j][1]}"
+
+    if best_dist == float("inf"):
+        return {
+            "clash_min_heavy_dist": np.nan,
+            "clash_flag": False,
+            "clash_pair": "",
+        }
+
+    return {
+        "clash_min_heavy_dist": float(best_dist),
+        "clash_flag": bool(best_dist < float(min_allowed_A)),
+        "clash_pair": best_pair,
+    }
+
+
+def adjacent_heavy_clash_metrics(coords: np.ndarray, labels: List[Tuple[int, str, str]], min_allowed_A: float = 1.35, threshold_frac: float = 0.55):
+    """
+    Find the closest heavy-atom contact between adjacent residues.
+
+    This is a narrower post-filter for the local peptide-bond region and is
+    meant to catch false local overlaps that can still survive the score.
+    """
+    coords = np.asarray(coords, dtype=float)
+    res_ids = np.array([int(r) for r, _, _ in labels], dtype=int)
+    atom_names = [str(atom) for _, atom, _ in labels]
+    heavy_mask = np.array([str(elem).upper() != "H" and not str(atom).upper().startswith("H") for _, atom, elem in labels], dtype=bool)
+
+    elem_radii = {"C": 1.70, "N": 1.55, "O": 1.52, "S": 1.80}
+    radii = np.array([elem_radii.get(str(elem).upper()[0], 1.75) for _, _, elem in labels], dtype=float)
+
+    idx = np.where(heavy_mask)[0]
+    if idx.size < 2:
+        return {
+            "local_clash_min_heavy_dist": np.nan,
+            "local_clash_flag": False,
+            "local_clash_pair": "",
+        }
+
+    best_dist = float("inf")
+    best_pair = ""
+    worst_margin = float("inf")
+    worst_pair = ""
+    any_clash = False
+    for ii, i in enumerate(idx[:-1]):
+        ri = res_ids[i]
+        ai = atom_names[i]
+        for j in idx[ii + 1:]:
+            if abs(ri - res_ids[j]) != 1:
+                continue
+            aj = atom_names[j]
+            if ai == "C" and aj == "N":
+                continue
+            d = float(np.linalg.norm(coords[i] - coords[j]))
+            threshold_A = max(min_allowed_A, threshold_frac * (float(radii[i]) + float(radii[j])))
+            if d < best_dist:
+                best_dist = d
+                best_pair = f"{labels[i][0]}:{labels[i][1]}-{labels[j][0]}:{labels[j][1]}"
+            margin = d - threshold_A
+            if margin < worst_margin:
+                worst_margin = margin
+                worst_pair = f"{labels[i][0]}:{labels[i][1]}-{labels[j][0]}:{labels[j][1]}"
+            if d < threshold_A:
+                any_clash = True
+
+    if best_dist == float("inf"):
+        return {
+            "local_clash_min_heavy_dist": np.nan,
+            "local_clash_flag": False,
+            "local_clash_pair": "",
+        }
+
+    return {
+        "local_clash_min_heavy_dist": float(best_dist),
+        "local_clash_flag": bool(any_clash),
+        "local_clash_pair": worst_pair if any_clash else best_pair,
+    }
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sequence", required=True)
@@ -339,6 +454,8 @@ def main():
     ap.add_argument("--beam_width", type=int, default=1000)
     ap.add_argument("--window_deg", type=int, default=15)
     ap.add_argument("--step_deg", type=int, default=15)
+    ap.add_argument("--omega_step_deg", type=int, default=10,
+                    help="Step size for bounded omega sampling in the fixed 170-190 degree band.")
     ap.add_argument("--top_k", type=int, default=200, help="save top_k ranked conformers (post-search)")
     ap.add_argument("--reference_pdb", default=None, help="optional PDB path/id for RMSD comparison")
     ap.add_argument("--average_reference_backbone", action="store_true")
@@ -357,6 +474,17 @@ def main():
     ap.add_argument("--rosetta_repack", type=int, default=0)
     ap.add_argument("--rosetta_fa_min", type=int, default=0)
     ap.add_argument("--rosetta_cen_min", type=int, default=0)
+    ap.add_argument("--gromacs_minimize", type=int, default=0,
+                    help="1 to add hydrogens/topology and minimize each saved full PDB with GROMACS")
+    ap.add_argument("--gromacs_forcefield", default="amber99sb-ildn")
+    ap.add_argument("--gromacs_water", default="tip3p")
+    ap.add_argument("--gromacs_nsteps", type=int, default=5000,
+                    help="maximum GROMACS minimization steps; minimization may stop earlier at --gromacs_emtol")
+    ap.add_argument("--gromacs_emtol", type=float, default=100.0,
+                    help="GROMACS steepest-descent force tolerance in kJ/mol/nm")
+    ap.add_argument("--gromacs_maxwarn", type=int, default=2)
+    ap.add_argument("--gromacs_rerank", type=int, default=1,
+                    help="1 to rerank final minimized outputs by GROMACS potential energy when available")
     ap.add_argument("--random_seed", type=int, default=123)
     args = ap.parse_args()
 
@@ -388,6 +516,9 @@ def main():
     # 6 basin centers (deg): alpha, beta, PPII, turn/loop, left-handed, canonical hairpin-ish
     basin_centers = [(-60, -45), (-135, 135), (-75, 145), (-60, 120), (60, 45), (-90, 90)]
     backbone_pairs = make_backbone_pairs(args.window_deg, args.step_deg, basin_centers)
+    omega_values = deg(list(range(170, 191, max(1, int(args.omega_step_deg)))))
+    if not omega_values or abs(np.rad2deg(omega_values[-1]) - 190.0) > 1e-6:
+        omega_values.append(np.deg2rad(190.0))
 
     chi_rotamer_map = {
         "chi1": deg([-60, 60, 180]),
@@ -435,6 +566,7 @@ def main():
             dofs_by_res.get(r, []),
             backbone_pairs,
             chi_rotamer_map,
+            omega_values=omega_values,
             max_options_per_residue=args.max_sidechain_opts_per_residue,
             rng=rng,
         )
@@ -536,11 +668,50 @@ def main():
         coords_full, labels_full, _ = build_full_coords(full_folder, angle_full)
         ca = np.array([coords_full[j] for j, lbl in enumerate(labels_full) if lbl[1] == "CA"])
         sidechain_centroids = full_folder.compute_sidechain_centroids(coords_full, labels_full)
+        clash_metrics = nonlocal_heavy_clash_metrics(coords_full, labels_full)
+        local_clash_metrics = adjacent_heavy_clash_metrics(coords_full, labels_full)
+        ring_penetration_metrics = qtf_gromacs.ring_penetration_metrics(coords_full, labels_full)
 
         ca_pdb_path = os.path.join(pdb_dir, f"rank_{i:04d}_ca.pdb")
         ca_centroid_pdb_path = os.path.join(pdb_dir, f"rank_{i:04d}_ca_centroid.pdb")
+        full_pdb_path = os.path.join(pdb_dir, f"rank_{i:04d}_full.pdb")
         full_folder.save_reduced_pdb(ca, filename=ca_pdb_path, sidechain_centroids=None, energy=E)
         full_folder.save_reduced_pdb(ca, filename=ca_centroid_pdb_path, sidechain_centroids=sidechain_centroids, energy=E)
+        full_folder.save_pdb(
+            coords_full,
+            labels_full,
+            filename=full_pdb_path,
+            energy=E,
+            chain_id="A",
+            remarks=["QTF heavy-atom rebuilt structure from beam-search torsions"],
+            include_hydrogens=False,
+        )
+
+        gromacs_info = {}
+        if bool(args.gromacs_minimize):
+            gmx_dir = os.path.join(args.outdir, "gromacs", f"rank_{i:04d}")
+            gromacs_info = qtf_gromacs.minimize_pdb_with_gromacs(
+                full_pdb_path,
+                gmx_dir,
+                forcefield=args.gromacs_forcefield,
+                water=args.gromacs_water,
+                nsteps=args.gromacs_nsteps,
+                emtol=args.gromacs_emtol,
+                maxwarn=args.gromacs_maxwarn,
+            )
+            if gromacs_info.get("gromacs_status") == "ok":
+                min_coords, min_labels = qtf_gromacs.parse_pdb_atoms(
+                    str(gromacs_info["gromacs_minimized_full_pdb_path"])
+                )
+                min_ca = qtf_gromacs.ca_coords(min_coords, min_labels)
+                if len(min_ca) == len(ca):
+                    coords_full = min_coords
+                    labels_full = min_labels
+                    ca = min_ca
+                    sidechain_centroids = full_folder.compute_sidechain_centroids(coords_full, labels_full)
+                    clash_metrics = nonlocal_heavy_clash_metrics(coords_full, labels_full)
+                    local_clash_metrics = adjacent_heavy_clash_metrics(coords_full, labels_full)
+                    ring_penetration_metrics = qtf_gromacs.ring_penetration_metrics(coords_full, labels_full)
 
         row = {
             "protein_name": protein_name,
@@ -562,6 +733,11 @@ def main():
             "angles_deg_json": json.dumps([float(np.rad2deg(a)) for a in angle_full]),
             "rebuilt_ca_pdb_path": ca_pdb_path,
             "rebuilt_ca_centroid_pdb_path": ca_centroid_pdb_path,
+            "rebuilt_full_pdb_path": full_pdb_path,
+            **gromacs_info,
+            **clash_metrics,
+            **local_clash_metrics,
+            **ring_penetration_metrics,
         }
         for k, v in terms.items():
             row[f"term_{k}"] = float(v)
@@ -592,7 +768,29 @@ def main():
         rows.append(row)
 
     df = pd.DataFrame(rows)
-    df = df.sort_values("energy").reset_index(drop=True)
+    if "clash_flag" in df.columns:
+        clean_df = df.loc[~df["clash_flag"]].copy()
+        if len(clean_df) > 0:
+            df = clean_df
+        else:
+            print("[beam][warn] all ranked candidates triggered the clash filter; keeping unfiltered set")
+    if "local_clash_flag" in df.columns:
+        clean_df = df.loc[~df["local_clash_flag"]].copy()
+        if len(clean_df) > 0:
+            df = clean_df
+        else:
+            print("[beam][warn] all ranked candidates triggered the local backbone clash filter; keeping prior set")
+    if "ring_penetration_flag" in df.columns:
+        clean_df = df.loc[~df["ring_penetration_flag"]].copy()
+        if len(clean_df) > 0:
+            df = clean_df
+        else:
+            print("[beam][warn] all ranked candidates triggered the ring penetration filter; keeping prior set")
+    if bool(args.gromacs_minimize) and bool(args.gromacs_rerank) and "gromacs_potential_kj_mol" in df.columns:
+        df = df.sort_values(["gromacs_potential_kj_mol", "energy"], na_position="last").reset_index(drop=True)
+        df["gromacs_energy_rank"] = np.arange(1, len(df) + 1)
+    else:
+        df = df.sort_values("energy").reset_index(drop=True)
 
     df_out = df.head(args.top_k).copy()
 

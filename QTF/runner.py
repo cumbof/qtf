@@ -267,6 +267,18 @@ class QuantumBiophysicsFolder:
             'S_sulfur':   {'radius': 2.00, 'epsilon': 0.2500},
             'X':          {'radius': 1.75, 'epsilon': 0.1000},
         }
+
+        # Empirical peptide backbone geometry. The previous rough 1.9/2.0/2.1
+        # radian angles noticeably compressed compact loops and created false
+        # terminal contacts in rebuilt full-atom PDBs.
+        self.BB_ANGLE_N_CA_C = np.deg2rad(111.4)
+        self.BB_ANGLE_CA_C_N = np.deg2rad(118.3)
+        self.BB_ANGLE_C_N_CA = np.deg2rad(122.8)
+        self.OMEGA_CENTER = np.pi
+        self.OMEGA_MIN = np.deg2rad(170.0)
+        self.OMEGA_MAX = np.deg2rad(190.0)
+        self.OMEGA_HALF_WIDTH = 0.5 * (self.OMEGA_MAX - self.OMEGA_MIN)
+        self.fixed_omegas = np.full(max(0, self.n_residues - 1), np.pi, dtype=float)
         
         # 4. SIDE CHAIN TOPOLOGY
         # Ref: Engh, R. A., & Huber, R. (1991). Acta Cryst. A47, 392-400.
@@ -275,63 +287,63 @@ class QuantumBiophysicsFolder:
             'A': [('CB', 'CA', 1.53, 1.91, 2.1)],
             
             # Hydrophobic
-            'V': [('CB', 'CA', 1.53, 1.91, 'chi1'), 
-                  ('CG1', 'CB', 1.52, 1.91, 'chi2'), ('CG2', 'CB', 1.52, 1.91, 'chi2_branch')],
-            'L': [('CB', 'CA', 1.53, 1.91, 'chi1'), 
-                  ('CG', 'CB', 1.52, 1.91, 'chi2'), 
-                  ('CD1', 'CG', 1.52, 1.91, 'chi3'), ('CD2', 'CG', 1.52, 1.91, 'chi3_branch')],
-            'I': [('CB', 'CA', 1.53, 1.91, 'chi1'), 
-                  ('CG1', 'CB', 1.54, 1.91, 'chi2'), ('CD1', 'CG1', 1.52, 1.91, 'chi3'),
-                  ('CG2', 'CB', 1.54, 1.91, 'chi2_branch')],
-            'M': [('CB', 'CA', 1.53, 1.91, 'chi1'), ('CG', 'CB', 1.52, 1.91, 'chi2'),
-                  ('SD', 'CG', 1.81, 1.91, 'chi3'), ('CE', 'SD', 1.79, 1.76, 'chi4')],
-            'P': [('CB', 'CA', 1.53, 1.80, 'chi1'), ('CG', 'CB', 1.50, 1.82, 'chi2'),
-                  ('CD', 'CG', 1.52, 1.83, 'chi3')], 
+            'V': [('CB', 'CA', 1.53, 1.91, 2.1),
+                  ('CG1', 'CB', 1.52, 1.91, 'chi1'), ('CG2', 'CB', 1.52, 1.91, 'chi1_branch')],
+            'L': [('CB', 'CA', 1.53, 1.91, 2.1),
+                  ('CG', 'CB', 1.52, 1.91, 'chi1'),
+                  ('CD1', 'CG', 1.52, 1.91, 'chi2'), ('CD2', 'CG', 1.52, 1.91, 'chi2_branch')],
+            'I': [('CB', 'CA', 1.53, 1.91, 2.1),
+                  ('CG1', 'CB', 1.54, 1.91, 'chi1'), ('CD1', 'CG1', 1.52, 1.91, 'chi2'),
+                  ('CG2', 'CB', 1.54, 1.91, 'chi1_branch')],
+            'M': [('CB', 'CA', 1.53, 1.91, 2.1), ('CG', 'CB', 1.52, 1.91, 'chi1'),
+                  ('SD', 'CG', 1.81, 1.91, 'chi2'), ('CE', 'SD', 1.79, 1.76, 'chi3')],
+            'P': [('CB', 'CA', 1.53, 1.80, 2.1), ('CG', 'CB', 1.50, 1.82, 'chi1'),
+                  ('CD', 'CG', 1.52, 1.83, 'chi2')],
 
             # Aromatic
-            'F': [('CB', 'CA', 1.53, 1.91, 'chi1'), ('CG', 'CB', 1.50, 1.91, 'chi2'),
-                  ('CD1', 'CG', 1.39, 2.09, 1.57), ('CD2', 'CG', 1.39, 2.09, -1.57),
+            'F': [('CB', 'CA', 1.53, 1.91, 2.1), ('CG', 'CB', 1.50, 1.91, 'chi1'),
+                  ('CD1', 'CG', 1.39, 2.09, 'chi2'), ('CD2', 'CG', 1.39, 2.09, -1.57),
                   ('CE1', 'CD1', 1.39, 2.09, 3.14), ('CE2', 'CD2', 1.39, 2.09, 3.14),
                   ('CZ', 'CE1', 1.39, 2.09, 0.0)],
-            'Y': [('CB', 'CA', 1.53, 1.91, 'chi1'), ('CG', 'CB', 1.50, 1.91, 'chi2'),
-                  ('CD1', 'CG', 1.39, 2.09, 1.57), ('CD2', 'CG', 1.39, 2.09, -1.57),
+            'Y': [('CB', 'CA', 1.53, 1.91, 2.1), ('CG', 'CB', 1.50, 1.91, 'chi1'),
+                  ('CD1', 'CG', 1.39, 2.09, 'chi2'), ('CD2', 'CG', 1.39, 2.09, -1.57),
                   ('CE1', 'CD1', 1.39, 2.09, 3.14), ('CE2', 'CD2', 1.39, 2.09, 3.14),
                   ('CZ', 'CE1', 1.39, 2.09, 0.0), 
-                  ('OH', 'CZ', 1.37, 2.09, 3.14), ('HH', 'OH', 0.96, 1.83, 'chi3')], 
-            'W': [('CB', 'CA', 1.53, 1.91, 'chi1'), ('CG', 'CB', 1.50, 1.91, 'chi2'),
-                  ('CD1', 'CG', 1.37, 2.15, 1.0), ('CD2', 'CG', 1.43, 2.15, -1.0),
+                  ('OH', 'CZ', 1.37, 2.09, 3.14), ('HH', 'OH', 0.96, 1.83, 0.0)],
+            'W': [('CB', 'CA', 1.53, 1.91, 2.1), ('CG', 'CB', 1.50, 1.91, 'chi1'),
+                  ('CD1', 'CG', 1.37, 2.15, 'chi2'), ('CD2', 'CG', 1.43, 2.15, -1.0),
                   ('NE1', 'CD1', 1.38, 1.90, 3.14), ('HE1', 'NE1', 1.01, 2.09, 0.0), 
                   ('CE2', 'CD2', 1.40, 1.90, 0.0), ('CE3', 'CD2', 1.40, 2.30, 3.14), 
                   ('CZ2', 'CE2', 1.40, 2.10, 0.0), ('CZ3', 'CE3', 1.40, 2.10, 0.0), 
                   ('CH2', 'CZ2', 1.40, 2.10, 0.0)], 
 
             # Polar / Charged
-            'S': [('CB', 'CA', 1.53, 1.91, 'chi1'), ('OG', 'CB', 1.42, 1.91, 'chi2'),
-                  ('HG', 'OG', 0.96, 1.83, 'chi3')], 
-            'T': [('CB', 'CA', 1.53, 1.91, 'chi1'), 
-                  ('OG1', 'CB', 1.43, 1.91, 'chi2'), ('HG1', 'OG1', 0.96, 1.83, 'chi3'), 
-                  ('CG2', 'CB', 1.53, 1.91, 'chi2_branch')],
-            'C': [('CB', 'CA', 1.53, 1.91, 'chi1'), ('SG', 'CB', 1.81, 1.91, 'chi2')],
-            'D': [('CB', 'CA', 1.53, 1.91, 'chi1'), ('CG', 'CB', 1.52, 1.91, 'chi2'),
-                  ('OD1', 'CG', 1.25, 2.0, 1.0), ('OD2', 'CG', 1.25, 2.0, -1.0)],
-            'N': [('CB', 'CA', 1.53, 1.91, 'chi1'), ('CG', 'CB', 1.52, 1.91, 'chi2'),
-                  ('OD1', 'CG', 1.23, 2.09, 0.0), ('ND2', 'CG', 1.32, 2.09, 3.14)],
-            'E': [('CB', 'CA', 1.53, 1.91, 'chi1'), ('CG', 'CB', 1.52, 1.91, 'chi2'),
-                  ('CD', 'CG', 1.52, 1.91, 'chi3'), ('OE1', 'CD', 1.25, 2.0, 1.0), ('OE2', 'CD', 1.25, 2.0, -1.0)],
-            'Q': [('CB', 'CA', 1.53, 1.91, 'chi1'), ('CG', 'CB', 1.52, 1.91, 'chi2'),
-                  ('CD', 'CG', 1.52, 1.91, 'chi3'), ('OE1', 'CD', 1.23, 2.09, 0.0), ('NE2', 'CD', 1.32, 2.09, 3.14)],
-            'K': [('CB', 'CA', 1.53, 1.91, 'chi1'), ('CG', 'CB', 1.52, 1.91, 'chi2'),
-                  ('CD', 'CG', 1.52, 1.91, 'chi3'), ('CE', 'CD', 1.52, 1.91, 'chi4'),
-                  ('NZ', 'CE', 1.49, 1.91, 'chi5')],
-            'R': [('CB', 'CA', 1.53, 1.91, 'chi1'), ('CG', 'CB', 1.52, 1.91, 'chi2'),
-                  ('CD', 'CG', 1.52, 1.91, 'chi3'), ('NE', 'CD', 1.46, 1.91, 'chi4'),
-                  ('CZ', 'NE', 1.33, 2.15, 'chi5'), ('NH1', 'CZ', 1.33, 2.10, 0.0), ('NH2', 'CZ', 1.33, 2.10, 3.14)],
-            'H': [('CB', 'CA', 1.53, 1.91, 'chi1'), ('CG', 'CB', 1.50, 1.91, 'chi2'),
-                  ('ND1', 'CG', 1.38, 2.15, 1.0), ('CD2', 'CG', 1.36, 2.15, -1.0),
+            'S': [('CB', 'CA', 1.53, 1.91, 2.1), ('OG', 'CB', 1.42, 1.91, 'chi1'),
+                  ('HG', 'OG', 0.96, 1.83, 0.0)],
+            'T': [('CB', 'CA', 1.53, 1.91, 2.1),
+                  ('OG1', 'CB', 1.43, 1.91, 'chi1'), ('HG1', 'OG1', 0.96, 1.83, 0.0),
+                  ('CG2', 'CB', 1.53, 1.91, 'chi1_branch')],
+            'C': [('CB', 'CA', 1.53, 1.91, 2.1), ('SG', 'CB', 1.81, 1.91, 'chi1')],
+            'D': [('CB', 'CA', 1.53, 1.91, 2.1), ('CG', 'CB', 1.52, 1.91, 'chi1'),
+                  ('OD1', 'CG', 1.25, 2.0, 'chi2'), ('OD2', 'CG', 1.25, 2.0, 'chi2_branch')],
+            'N': [('CB', 'CA', 1.53, 1.91, 2.1), ('CG', 'CB', 1.52, 1.91, 'chi1'),
+                  ('OD1', 'CG', 1.23, 2.09, 'chi2'), ('ND2', 'CG', 1.32, 2.09, 'chi2_branch')],
+            'E': [('CB', 'CA', 1.53, 1.91, 2.1), ('CG', 'CB', 1.52, 1.91, 'chi1'),
+                  ('CD', 'CG', 1.52, 1.91, 'chi2'), ('OE1', 'CD', 1.25, 2.0, 'chi3'), ('OE2', 'CD', 1.25, 2.0, 'chi3_branch')],
+            'Q': [('CB', 'CA', 1.53, 1.91, 2.1), ('CG', 'CB', 1.52, 1.91, 'chi1'),
+                  ('CD', 'CG', 1.52, 1.91, 'chi2'), ('OE1', 'CD', 1.23, 2.09, 'chi3'), ('NE2', 'CD', 1.32, 2.09, 'chi3_branch')],
+            'K': [('CB', 'CA', 1.53, 1.91, 2.1), ('CG', 'CB', 1.52, 1.91, 'chi1'),
+                  ('CD', 'CG', 1.52, 1.91, 'chi2'), ('CE', 'CD', 1.52, 1.91, 'chi3'),
+                  ('NZ', 'CE', 1.49, 1.91, 'chi4')],
+            'R': [('CB', 'CA', 1.53, 1.91, 2.1), ('CG', 'CB', 1.52, 1.91, 'chi1'),
+                  ('CD', 'CG', 1.52, 1.91, 'chi2'), ('NE', 'CD', 1.46, 1.91, 'chi3'),
+                  ('CZ', 'NE', 1.33, 2.15, 'chi4'), ('NH1', 'CZ', 1.33, 2.10, 0.0), ('NH2', 'CZ', 1.33, 2.10, 3.14)],
+            'H': [('CB', 'CA', 1.53, 1.91, 2.1), ('CG', 'CB', 1.50, 1.91, 'chi1'),
+                  ('ND1', 'CG', 1.38, 2.15, 'chi2'), ('CD2', 'CG', 1.36, 2.15, -1.0),
                   ('CE1', 'ND1', 1.32, 1.90, 0.0), 
                   ('NE2', 'CD2', 1.32, 1.90, 0.0), ('HE2', 'NE2', 1.01, 2.09, 0.0)], 
             
-            'DEFAULT': [('CB', 'CA', 1.53, 1.91, 'chi1')]
+            'DEFAULT': [('CB', 'CA', 1.53, 1.91, 2.1)]
         }
 
         # --- QUANTUM SETUP ---
@@ -340,10 +352,16 @@ class QuantumBiophysicsFolder:
         for i, aa in enumerate(self.sequence):
             self.dof_map.append({'res': i, 'type': 'phi'})
             self.dof_map.append({'res': i, 'type': 'psi'})
+            if i < self.n_residues - 1:
+                self.dof_map.append({'res': i, 'type': 'omega'})
 
             topo = self.SIDE_CHAIN_TOPO.get(aa, self.SIDE_CHAIN_TOPO['DEFAULT'])
             chis = set()
             for atom in topo:
+                atom_name = str(atom[0])
+                elem = self._infer_element_from_atom_name(atom_name)
+                if elem == 'H' or atom_name.startswith('H'):
+                    continue
                 tor = atom[4]
                 if isinstance(tor, str) and 'chi' in tor:
                     chis.add(tor.replace('_branch', ''))
@@ -448,7 +466,43 @@ class QuantumBiophysicsFolder:
         param_dict = dict(zip(self.ansatz.parameters, params))
         bound_circuit = self.ansatz.assign_parameters(param_dict)
         psi = Statevector(bound_circuit).data
-        return np.angle(psi)[:self.total_angles]
+        angles = np.angle(psi)[:self.total_angles]
+        return self._map_angle_vector_to_physical_ranges(angles)
+
+    def _bounded_omega(self, omega):
+        """Clamp omega to the allowed trans-peptide band."""
+        val = float(omega)
+        if abs(val) < 1e-12:
+            return float(self.OMEGA_CENTER)
+        # MDTraj/PDB torsions are often represented as signed angles near -180.
+        # Convert those to the equivalent positive trans angle before enforcing
+        # the [170, 190] degree band; e.g. -174 deg means 186 deg, not 174 deg.
+        if -self.OMEGA_MAX <= val <= -self.OMEGA_MIN:
+            val = (2.0 * np.pi) + val
+        return float(np.clip(val, self.OMEGA_MIN, self.OMEGA_MAX))
+
+    def _map_angle_vector_to_physical_ranges(self, angle_vector):
+        """
+        Map unconstrained circuit phases into physical torsion ranges.
+
+        Phi/psi/chi remain regular signed torsions. Omega is restricted to the
+        trans band [170, 190] degrees, so quantum sampling cannot produce
+        unphysical peptide twists.
+        """
+        mapped = np.asarray(angle_vector, dtype=float).copy()
+        for j, dof in enumerate(self.dof_map[:len(mapped)]):
+            if str(dof.get("type")) == "omega":
+                raw = float(np.clip(mapped[j], -np.pi, np.pi))
+                mapped[j] = self.OMEGA_CENTER + (raw / np.pi) * self.OMEGA_HALF_WIDTH
+                mapped[j] = self._bounded_omega(mapped[j])
+        return mapped
+
+    def _angle_dict_from_vector(self, angle_vector):
+        angle_dict = {f"{x['res']}_{x['type']}": val for x, val in zip(self.dof_map, angle_vector)}
+        for key, val in list(angle_dict.items()):
+            if key.endswith("_omega"):
+                angle_dict[key] = self._bounded_omega(val)
+        return angle_dict
 
     def _nerf_step(self, a, b, c, bond_len, bond_angle, torsion):
         """
@@ -473,111 +527,363 @@ class QuantumBiophysicsFolder:
         
         return c + (M @ d)
 
+    def _infer_element_from_atom_name(self, atom_name: str) -> str:
+        """Infer a PDB element symbol from a compact protein atom name."""
+        name = str(atom_name).strip()
+        if not name:
+            return "X"
+        # The topology currently only uses C/N/O/S/H-style atom names.
+        first = name[0].upper()
+        if first in {"C", "N", "O", "S", "H"}:
+            return first
+        return "X"
+
     def build_full_structure(self, angle_vector):
         """
-        Constructs the full 3D Cartesian coordinates of the protein 
-        based on the input torsion angles.
+        Constructs the full 3D Cartesian coordinates of the protein from torsions.
+
+        SIDE_CHAIN_TOPO entries are interpreted as:
+            (new_atom_name, parent_atom_name, bond_length_A, bond_angle_rad, torsion_spec)
+
+        This version keeps the explicit-parent NERF rebuild for ordinary atoms,
+        but uses rigid planar templates for aromatic/ring sidechains (F/Y/W/H).
+        The ring template is attached at CB--CG and oriented by the local backbone
+        frame plus the available chi2-like angle. This avoids sequentially walking
+        around rings with NERF, which can accumulate closure errors and produce
+        distorted aromatic bonds/clashes.
         """
-        coords = []; labels = []; bonds = [] 
-        
-        # Map flat angle vector back to semantic names (e.g., '0_phi', '0_psi')
-        angle_dict = {f"{x['res']}_{x['type']}": val for x, val in zip(self.dof_map, angle_vector)}
-        
+        coords = []
+        labels = []
+        bonds = []
+
+        angle_dict = self._angle_dict_from_vector(angle_vector)
+
+        def add_atom(res_id, atom_name, elem, pos, bonded_to=None):
+            idx = len(coords)
+            coords.append(np.asarray(pos, dtype=float))
+            labels.append((int(res_id), str(atom_name), str(elem)))
+            if bonded_to is not None and bonded_to >= 0:
+                bonds.append((int(bonded_to), idx))
+            return idx
+
+        def unit(v):
+            v = np.asarray(v, dtype=float)
+            n = np.linalg.norm(v)
+            if n < 1e-9:
+                return np.zeros_like(v, dtype=float)
+            return v / n
+
+        def rotate_about_axis(v, axis, theta):
+            """Rodrigues rotation of vector v around unit axis by theta radians."""
+            axis = unit(axis)
+            v = np.asarray(v, dtype=float)
+            return (
+                v * np.cos(theta)
+                + np.cross(axis, v) * np.sin(theta)
+                + axis * np.dot(axis, v) * (1.0 - np.cos(theta))
+            )
+
+        def infer_elem(atom_name):
+            return self._infer_element_from_atom_name(atom_name)
+
         # --- 1. INITIALIZE BACKBONE START ---
-        # First 3 atoms (N, CA, C) are placed statically to establish a frame of reference.
-        coords.extend([np.array([0,0,0]), np.array([1.46,0,0]), np.array([1.46 + 1.51*np.cos(1.9), 1.51*np.sin(1.9), 0])])
-        labels.extend([(0, 'N', 'N'), (0, 'CA', 'C'), (0, 'C', 'C')])
-        bonds.extend([(0,1), (1,2)]) 
-        
-        # --- 2. MAIN RESIDUE LOOP ---
+        add_atom(0, 'N', 'N', np.array([0.0, 0.0, 0.0]))
+        add_atom(0, 'CA', 'C', np.array([1.46, 0.0, 0.0]), bonded_to=0)
+        add_atom(
+            0,
+            'C',
+            'C',
+            np.array([
+                1.46 - 1.51 * np.cos(self.BB_ANGLE_N_CA_C),
+                1.51 * np.sin(self.BB_ANGLE_N_CA_C),
+                0.0,
+            ]),
+            bonded_to=1,
+        )
+
+        def place_rigid_aromatic_template(i, aa, atom_idx):
+            """
+            Place aromatic/ring heavy atoms as rigid planar fragments.
+
+            Assumes CB and CG have already been built. Coordinates are template
+            coordinates in a plane, with CG at (0,0) and the ring extending in
+            the +x direction away from CB. The local x-axis is CB->CG. The local
+            y-axis is chosen from the CA-CB-CG plane and optionally rotated about
+            x by the chi2-like torsion so the ring can flip around the CB-CG bond.
+            """
+            if 'CB' not in atom_idx or 'CG' not in atom_idx:
+                return
+
+            idx_CB = atom_idx['CB']
+            idx_CG = atom_idx['CG']
+            idx_CA = atom_idx.get('CA', -1)
+            cg = coords[idx_CG]
+            cb = coords[idx_CB]
+            x_axis = unit(cg - cb)
+            if np.linalg.norm(x_axis) < 1e-9:
+                return
+
+            # Base normal from CA-CB-CG. Fallback to backbone plane if collinear.
+            if idx_CA >= 0:
+                normal0 = unit(np.cross(coords[idx_CA] - cb, cg - cb))
+            else:
+                normal0 = np.zeros(3)
+            if np.linalg.norm(normal0) < 1e-6:
+                idx_N = atom_idx.get('N', -1)
+                idx_C = atom_idx.get('C', -1)
+                if idx_N >= 0 and idx_C >= 0:
+                    normal0 = unit(np.cross(coords[idx_N] - coords[idx_CA], coords[idx_C] - coords[idx_CA]))
+            if np.linalg.norm(normal0) < 1e-6:
+                # Last resort: choose any vector not parallel to x.
+                trial = np.array([0.0, 0.0, 1.0])
+                if abs(np.dot(trial, x_axis)) > 0.9:
+                    trial = np.array([0.0, 1.0, 0.0])
+                normal0 = unit(np.cross(x_axis, trial))
+
+            # Use chi2 as ring rotation around CB-CG when present. This is an
+            # approximate mapping: current QTF topology uses CG placement and ring
+            # orientation differently from standard force-field internal coords,
+            # but this preserves a rotatable aromatic plane without ring walking.
+            chi2 = float(angle_dict.get(f"{i}_chi2", 0.0)) + np.pi
+            normal = unit(rotate_about_axis(normal0, x_axis, chi2))
+            y_axis = unit(np.cross(normal, x_axis))
+            if np.linalg.norm(y_axis) < 1e-6:
+                return
+
+            def xyz(x, y):
+                return cg + float(x) * x_axis + float(y) * y_axis
+
+            def add_template_atom(name, xy, parent):
+                if name in atom_idx:
+                    return atom_idx[name]
+                parent_idx = atom_idx.get(parent, idx_CG)
+                new_idx = add_atom(i, name, infer_elem(name), xyz(*xy), bonded_to=parent_idx)
+                atom_idx[name] = new_idx
+                return new_idx
+
+            # Approximate ideal planar templates. Distances are chosen to preserve
+            # local covalent geometry much better than sequential NERF ring closure.
+            if aa in ('F', 'Y'):
+                b = 1.39
+                h = np.sqrt(3.0) * 0.5 * b
+                template = {
+                    'CD1': (0.5*b,  h),
+                    'CD2': (0.5*b, -h),
+                    'CE1': (1.5*b,  h),
+                    'CE2': (1.5*b, -h),
+                    'CZ':  (2.0*b,  0.0),
+                }
+                parent = {'CD1': 'CG', 'CD2': 'CG', 'CE1': 'CD1', 'CE2': 'CD2', 'CZ': 'CE1'}
+                for name in ('CD1', 'CD2', 'CE1', 'CE2', 'CZ'):
+                    add_template_atom(name, template[name], parent[name])
+                # Add missing CZ-CE2 bond for the ring graph.
+                if 'CZ' in atom_idx and 'CE2' in atom_idx:
+                    bonds.append((atom_idx['CE2'], atom_idx['CZ']))
+                if aa == 'Y':
+                    # Phenolic oxygen extends para from CG through CZ.
+                    idx_OH = add_template_atom('OH', (2.0*b + 1.37, 0.0), 'CZ')
+                    # Optional polar H retained internally, omitted from saved heavy PDBs.
+                    if 'HH' in [d[0] for d in self.SIDE_CHAIN_TOPO.get('Y', [])] and 'HH' not in atom_idx:
+                        atom_idx['HH'] = add_atom(i, 'HH', 'H', xyz(2.0*b + 1.37 + 0.96, 0.0), bonded_to=idx_OH)
+                return
+
+            if aa == 'H':
+                # Rough imidazole template, planar and ring-closed.
+                template = {
+                    'ND1': (0.80,  1.15),
+                    'CE1': (2.10,  0.65),
+                    'NE2': (2.10, -0.65),
+                    'CD2': (0.80, -1.15),
+                }
+                parent = {'ND1': 'CG', 'CE1': 'ND1', 'NE2': 'CE1', 'CD2': 'CG'}
+                for name in ('ND1', 'CE1', 'NE2', 'CD2'):
+                    add_template_atom(name, template[name], parent[name])
+                if 'CD2' in atom_idx and 'NE2' in atom_idx:
+                    bonds.append((atom_idx['CD2'], atom_idx['NE2']))
+                if 'HE2' not in atom_idx:
+                    atom_idx['HE2'] = add_atom(i, 'HE2', 'H', xyz(2.35, -1.15), bonded_to=atom_idx.get('NE2', idx_CG))
+                return
+
+            if aa == 'W':
+                # Approximate ideal indole template: five-member ring fused to
+                # benzene, expressed in the planar CG-attached frame.
+                template = {
+                    'CD1': (0.82,  1.06),
+                    'NE1': (2.13,  0.65),
+                    'CE2': (2.16, -0.73),
+                    'CD2': (0.83, -1.16),
+                    'CE3': (0.61, -2.54),
+                    'CZ3': (1.67, -3.42),
+                    'CH2': (2.99, -2.95),
+                    'CZ2': (3.23, -1.60),
+                }
+                parent = {
+                    'CD1': 'CG', 'NE1': 'CD1', 'CE2': 'NE1', 'CD2': 'CG',
+                    'CE3': 'CD2', 'CZ3': 'CE3', 'CH2': 'CZ3', 'CZ2': 'CH2'
+                }
+                for name in ('CD1', 'CD2', 'NE1', 'CE2', 'CE3', 'CZ3', 'CH2', 'CZ2'):
+                    add_template_atom(name, template[name], parent[name])
+                # Fused-ring closure bonds.
+                for a, bname in (('CD2', 'CE2'), ('CE2', 'CZ2')):
+                    if a in atom_idx and bname in atom_idx:
+                        bonds.append((atom_idx[a], atom_idx[bname]))
+                if 'HE1' not in atom_idx:
+                    atom_idx['HE1'] = add_atom(i, 'HE1', 'H', xyz(2.25, 1.55), bonded_to=atom_idx.get('NE1', idx_CG))
+                return
+
         for i in range(self.n_residues):
-            
-            # Helper to find index of atoms in the 'coords' list
-            def get_idx(r, n):
-                for k in range(len(labels)-1, -1, -1): 
-                    if labels[k][0] == r and labels[k][1] == n: return k
-                return -1
+            # Per-residue atom index map for the atoms that currently exist.
+            atom_idx = {}
+            for k, (rid, aname, _elem) in enumerate(labels):
+                if int(rid) == i:
+                    atom_idx[str(aname)] = k
 
-            idx_N = get_idx(i, 'N'); idx_CA = get_idx(i, 'CA'); idx_C = get_idx(i, 'C')
-            
-            # --- BUILD SIDE CHAIN ---
-            topo = self.SIDE_CHAIN_TOPO.get(self.sequence[i], self.SIDE_CHAIN_TOPO['DEFAULT'])
-            sc_map = {} 
-            for atom_def in topo:
-                name, elem, b_len, b_ang, tor_def = atom_def
-                
-                # Determine Torsion Value
-                t_val = 0.0
-                if isinstance(tor_def, str) and 'chi' in tor_def:
-                    t_val = angle_dict.get(f"{i}_{tor_def.replace('_branch','')}", 0.0)
-                    if 'branch' in tor_def: t_val += 2.09 # Offset for branched chains (Val/Leu)
-                else: t_val = tor_def # Fixed angle
+            idx_N = atom_idx.get('N', -1)
+            idx_CA = atom_idx.get('CA', -1)
+            idx_C = atom_idx.get('C', -1)
 
-                # Special Case: First Sidechain Atom (CB) connects to CA
-                # Requires calculating the bisector of N-CA-C to place it correctly.
-                if name == 'CB': 
-                    u_nc = coords[idx_N] - coords[idx_CA]; u_cc = coords[idx_C] - coords[idx_CA]
-                    n_plane = np.cross(u_nc, u_cc); n_plane /= (np.linalg.norm(n_plane)+1e-9)
-                    u_mid = -(u_nc + u_cc); u_mid /= (np.linalg.norm(u_mid)+1e-9)
-                    p_CB = coords[idx_CA] + (b_len * (np.cos(0.9)*u_mid + np.sin(0.9)*n_plane))
-                    coords.append(p_CB); labels.append((i, name, elem)); bonds.append((idx_CA, len(coords)-1))
-                    sc_map['CB'] = len(coords) - 1
+            aa = self.sequence[i]
+            topo = self.SIDE_CHAIN_TOPO.get(aa, self.SIDE_CHAIN_TOPO['DEFAULT'])
+            parent_map = {str(atom_def[0]): str(atom_def[1]) for atom_def in topo}
+            parent_map.update({'N': None, 'CA': 'N', 'C': 'CA', 'O': 'C'})
+
+            def get_idx(name):
+                return atom_idx.get(str(name), -1)
+
+            def parent_of(name):
+                return parent_map.get(str(name))
+
+            def choose_refs(parent_name):
+                """Return indices (a,b,c) for NERF placement of D attached to C=parent."""
+                c_idx = get_idx(parent_name)
+                if c_idx < 0:
+                    return None
+
+                gp = parent_of(parent_name)
+                if gp is None:
+                    if parent_name == 'N' and idx_CA >= 0 and idx_C >= 0:
+                        return idx_C, idx_CA, c_idx
+                    return None
+
+                b_idx = get_idx(gp)
+                if b_idx < 0:
+                    return None
+
+                ggp = parent_of(gp)
+                if ggp is None:
+                    if gp == 'N' and idx_C >= 0:
+                        a_idx = idx_C
+                    else:
+                        a_idx = idx_N if idx_N >= 0 and idx_N != b_idx else idx_CA
                 else:
-                    # General NERF placement for rest of sidechain
-                    p_name = 'CB'
-                    # Determine Parent (Simple logic for standard topologies)
-                    if name.startswith('CD'): p_name = 'CG'
-                    if name.startswith('CE'): p_name = 'CD'
-                    if name.startswith('CZ'): p_name = 'CE'
-                    if name.startswith('NZ'): p_name = 'CE'
-                    if name.startswith('OE') or name.startswith('OD'): p_name = 'CD' if name.startswith('OE') else 'CG'
-                    if name.startswith('SG'): p_name = 'CB'
-                    if name.startswith('CG'): p_name = 'CB'
-                    if name.startswith('CD') and self.sequence[i] == 'L': p_name = 'CG'
-                    
-                    # New Parent Mappings for Explicit Hydrogens
-                    if name.startswith('HG') and name != 'HG1': p_name = 'OG'
-                    if name == 'HG1': p_name = 'OG1'
-                    if name == 'HH': p_name = 'OH'
-                    if name == 'HE1': p_name = 'NE1'
-                    if name == 'HE2': p_name = 'NE2'
+                    a_idx = get_idx(ggp)
 
-                    idx_c = sc_map.get(p_name, -1)
-                    if idx_c == -1: idx_c = len(coords) - 1
-                    c = coords[idx_c]
-                    
-                    grandp = 'CA' if p_name == 'CB' else 'CB'
-                    # More specific Grandparent mapping for Hydrogens to ensure correct angle
-                    if p_name == 'OG': grandp = 'CB'
-                    if p_name == 'OG1': grandp = 'CB'
-                    if p_name == 'OH': grandp = 'CZ'
-                    if p_name == 'NE1': grandp = 'CD1'
-                    if p_name == 'NE2': grandp = 'CD2' # For His
+                if a_idx is None or a_idx < 0 or a_idx == b_idx or a_idx == c_idx:
+                    if gp == 'CA' and idx_N >= 0:
+                        a_idx = idx_N
+                    elif gp == 'CB' and idx_CA >= 0:
+                        a_idx = idx_CA
+                    elif idx_N >= 0 and idx_N not in (b_idx, c_idx):
+                        a_idx = idx_N
+                    elif idx_CA >= 0 and idx_CA not in (b_idx, c_idx):
+                        a_idx = idx_CA
+                    else:
+                        return None
+                return int(a_idx), int(b_idx), int(c_idx)
 
-                    if grandp == 'CA': b = coords[idx_CA]; a = coords[idx_N]
-                    else: b = coords[sc_map.get(grandp, idx_c-1)]; a = coords[idx_CA]
-                    
-                    new_pos = self._nerf_step(a, b, c, b_len, b_ang, t_val)
-                    coords.append(new_pos); labels.append((i, name, elem)); bonds.append((idx_c, len(coords)-1))
-                    sc_map[name] = len(coords) - 1
+            # --- 2. SIDECHAIN ---
+            aromatic_handled = aa in ('F', 'Y', 'W', 'H')
+            aromatic_core_atoms = {'CD1', 'CD2', 'CE1', 'CE2', 'CE3', 'CZ', 'CZ2', 'CZ3', 'CH2', 'ND1', 'NE1', 'NE2', 'HE1', 'HE2', 'OH', 'HH'}
 
-            # --- BUILD BACKBONE OXYGEN (Carbonyl) ---
-            p_O = self._nerf_step(coords[idx_N], coords[idx_CA], coords[idx_C], 1.23, 2.1, np.pi) 
-            coords.append(p_O); labels.append((i, 'O', 'O')); bonds.append((idx_C, len(coords)-1))
-            
-            # --- BUILD NEXT RESIDUE BACKBONE (N, CA, C) ---
+            for atom_def in topo:
+                name, parent_name, b_len, b_ang, tor_def = atom_def
+                name = str(name)
+                parent_name = str(parent_name)
+                elem = infer_elem(name)
+
+                if name in atom_idx:
+                    continue
+                # For aromatic residues, build only CB/CG by NERF and let the
+                # rigid template place the ring atoms. This avoids ring walking.
+                if aromatic_handled and name in aromatic_core_atoms:
+                    continue
+
+                # Determine torsion value. Branches share the same sampled chi but
+                # use a fixed phase offset so both branches are distinct.
+                if isinstance(tor_def, str) and 'chi' in tor_def:
+                    chi_key = tor_def.replace('_branch', '')
+                    t_val = angle_dict.get(f"{i}_{chi_key}", 0.0)
+                    if 'branch' in tor_def:
+                        t_val += 2.09
+                else:
+                    t_val = float(tor_def)
+
+                # CB placement is tetrahedral from the N-CA-C backbone frame.
+                if name == 'CB' and parent_name == 'CA' and idx_N >= 0 and idx_CA >= 0 and idx_C >= 0:
+                    u_nc = unit(coords[idx_N] - coords[idx_CA])
+                    u_cc = unit(coords[idx_C] - coords[idx_CA])
+                    n_plane = unit(np.cross(u_nc, u_cc))
+                    u_mid = unit(-(u_nc + u_cc))
+                    p_new = coords[idx_CA] + (float(b_len) * (np.cos(0.9)*u_mid + np.sin(0.9)*n_plane))
+                    new_idx = add_atom(i, name, elem, p_new, bonded_to=idx_CA)
+                    atom_idx[name] = new_idx
+                    continue
+
+                refs = choose_refs(parent_name)
+                if refs is None:
+                    c_idx = get_idx(parent_name)
+                    if c_idx < 0:
+                        c_idx = len(coords) - 1
+                    a_idx = idx_N if idx_N >= 0 else max(0, c_idx - 2)
+                    b_idx = idx_CA if idx_CA >= 0 else max(0, c_idx - 1)
+                    refs = (a_idx, b_idx, c_idx)
+
+                a_idx, b_idx, c_idx = refs
+                p_new = self._nerf_step(coords[a_idx], coords[b_idx], coords[c_idx], float(b_len), float(b_ang), float(t_val))
+                new_idx = add_atom(i, name, elem, p_new, bonded_to=c_idx)
+                atom_idx[name] = new_idx
+
+            if aromatic_handled:
+                place_rigid_aromatic_template(i, aa, atom_idx)
+
+            # --- 3. BACKBONE OXYGEN ---
+            # Nonterminal carbonyl oxygens are placed after the next peptide N is
+            # known, so they can sit in the CA-C-N peptide plane. The terminal O
+            # uses the local frame fallback.
+            if i == self.n_residues - 1 and idx_N >= 0 and idx_CA >= 0 and idx_C >= 0 and 'O' not in atom_idx:
+                psi_for_oxygen = angle_dict.get(f"{i}_psi", -0.5)
+                p_O = self._nerf_step(coords[idx_N], coords[idx_CA], coords[idx_C], 1.23, 2.1, psi_for_oxygen + np.pi)
+                add_atom(i, 'O', 'O', p_O, bonded_to=idx_C)
+
+            # --- 4. NEXT RESIDUE BACKBONE ---
             if i < self.n_residues - 1:
+                idx_N = get_idx('N')
+                idx_CA = get_idx('CA')
+                idx_C = get_idx('C')
+
                 psi = angle_dict.get(f"{i}_psi", -0.5)
-                p_next_N = self._nerf_step(coords[idx_N], coords[idx_CA], coords[idx_C], 1.33, 2.0, psi)
-                coords.append(p_next_N); labels.append((i+1, 'N', 'N')); bonds.append((idx_C, len(coords)-1))
-                
-                omega = np.pi # Peptide bond is planar (trans)
-                p_next_CA = self._nerf_step(coords[idx_CA], coords[idx_C], p_next_N, 1.46, 2.1, omega)
-                coords.append(p_next_CA); labels.append((i+1, 'CA', 'C')); bonds.append((len(coords)-2, len(coords)-1))
-                
+                p_next_N = self._nerf_step(coords[idx_N], coords[idx_CA], coords[idx_C], 1.33, self.BB_ANGLE_CA_C_N, psi)
+                idx_next_N = add_atom(i+1, 'N', 'N', p_next_N, bonded_to=idx_C)
+
+                if 'O' not in atom_idx:
+                    u_ca = unit(coords[idx_CA] - coords[idx_C])
+                    u_n = unit(p_next_N - coords[idx_C])
+                    o_dir = unit(-(u_ca + u_n))
+                    if np.linalg.norm(o_dir) < 1e-6:
+                        o_dir = unit(np.cross(unit(coords[idx_CA] - coords[idx_C]), unit(p_next_N - coords[idx_C])))
+                    p_O = coords[idx_C] + 1.23 * o_dir
+                    atom_idx['O'] = add_atom(i, 'O', 'O', p_O, bonded_to=idx_C)
+
+                omega = angle_dict.get(f"{i}_omega", np.pi)
+                if f"{i}_omega" not in angle_dict and hasattr(self, "fixed_omegas") and i < len(self.fixed_omegas):
+                    omega = float(self.fixed_omegas[i])
+                omega = self._bounded_omega(omega)
+                p_next_CA = self._nerf_step(coords[idx_CA], coords[idx_C], p_next_N, 1.46, self.BB_ANGLE_C_N_CA, omega)
+                idx_next_CA = add_atom(i+1, 'CA', 'C', p_next_CA, bonded_to=idx_next_N)
+
                 phi = angle_dict.get(f"{i+1}_phi", -1.0)
-                p_next_C = self._nerf_step(coords[idx_C], p_next_N, p_next_CA, 1.51, 1.9, phi)
-                coords.append(p_next_C); labels.append((i+1, 'C', 'C')); bonds.append((len(coords)-2, len(coords)-1))
+                p_next_C = self._nerf_step(coords[idx_C], p_next_N, p_next_CA, 1.51, self.BB_ANGLE_N_CA_C, phi)
+                add_atom(i+1, 'C', 'C', p_next_C, bonded_to=idx_next_CA)
 
         return np.array(coords), labels, bonds
 
@@ -696,7 +1002,7 @@ class QuantumBiophysicsFolder:
                 frontier = next_frontier
 
         offdiag = ~np.eye(n_atoms, dtype=bool)
-        self.mask_nonbonded_graph = offdiag & (graph_dist > 2)
+        self.mask_nonbonded_graph = offdiag & (graph_dist > 3)
         self.mask_14_pairs = offdiag & (graph_dist == 3)
         
         # 4. Masks
@@ -721,12 +1027,14 @@ class QuantumBiophysicsFolder:
             elif elem == "S":
                 self.mask_hydrophobic[k] = True
                 
-        # Keep a conservative residue-separation mask for electrostatics/H-bonds,
-        # but combine it with the bond-graph mask for VDW.
+        # Keep a conservative residue-separation mask for electrostatics/H-bonds.
+        # VDW must remain graph-based only: same-residue and adjacent-residue
+        # nonbonded sidechain contacts are exactly where many rebuild clashes
+        # show up, so a residue-distance filter would hide them from LJ.
         res_diff_matrix = np.abs(self.atom_to_res[:, None] - self.atom_to_res[None, :])
         self.mask_non_bonded = (res_diff_matrix >= 2)
-        self.mask_non_bonded_vdw = self.mask_non_bonded & self.mask_nonbonded_graph
-        self.mask_non_bonded_vdw_14 = self.mask_non_bonded & self.mask_14_pairs
+        self.mask_non_bonded_vdw = self.mask_nonbonded_graph
+        self.mask_non_bonded_vdw_14 = self.mask_14_pairs
         
         # Identify indices for specific calculations to avoid string parsing in loop
         self.idx_N_atoms = np.where(self.atom_names == 'N')[0]
@@ -754,11 +1062,14 @@ class QuantumBiophysicsFolder:
     def _build_rosetta_pose_from_angles(self, angle_vec):
         self._ensure_rosetta()
         pose = pyrosetta.pose_from_sequence(self.sequence, "fa_standard")
+        angle_dict = self._angle_dict_from_vector(angle_vec)
         for i in range(1, pose.total_residue()):
-            pose.set_omega(i, 180.0)
+            pose.set_omega(i, float(np.rad2deg(angle_dict.get(f"{i-1}_omega", np.pi))))
         for dof, ang in zip(self.dof_map, angle_vec):
             resi = int(dof["res"]) + 1
             t = str(dof["type"])
+            if t == "omega":
+                continue
             deg = float(np.rad2deg(ang))
             try:
                 if t == "phi":
@@ -961,6 +1272,10 @@ class QuantumBiophysicsFolder:
             "pi_stacking": 0.0,
             "rama": 0.0,
             "geometry": 0.0,
+            "omega": 0.0,
+            "adjacent_heavy_sterics": 0.0,
+            "adjacent_backbone_sterics": 0.0,
+            "reference_offset": 0.0,
         }
         total_energy = 0.0
 
@@ -1103,8 +1418,8 @@ class QuantumBiophysicsFolder:
         vdw_14_mask = np.triu(self.mask_non_bonded_vdw_14 & heavy_mat, k=1)
 
         # Tunable scales retained so output tables stay comparable to prior runs.
-        VDW_REP_SCALE = float(os.getenv("QTF_VDW_REP_SCALE", "1.0"))
-        VDW_ATTR_SCALE = float(os.getenv("QTF_VDW_ATTR_SCALE", "1.0"))
+        VDW_REP_SCALE = float(os.getenv("QTF_VDW_REP_SCALE", "0.01"))
+        VDW_ATTR_SCALE = float(os.getenv("QTF_VDW_ATTR_SCALE", "0.1"))
 
         # Internal stabilization defaults for the next diagnostic test.
         LJ_CONTACT_SCALE = 0.95
@@ -1144,7 +1459,7 @@ class QuantumBiophysicsFolder:
         _add_lj_from_mask(vdw_14_mask, LJ_14_SCALE)
 
         # LOCALS
-        angle_dict = {f"{x['res']}_{x['type']}": val for x, val in zip(self.dof_map, angle_vec)}
+        angle_dict = self._angle_dict_from_vector(angle_vec)
 
         ROTAMER_SCALE = float(os.getenv("QTF_ROTAMER_SCALE", "1.0"))
         PI_STACK_SCALE = float(os.getenv("QTF_PI_STACK_SCALE", "1.0"))
@@ -1174,11 +1489,30 @@ class QuantumBiophysicsFolder:
                     e_rama += term
         add_term("rama", e_rama)
 
+        OMEGA_SCALE = float(os.getenv("QTF_OMEGA_SCALE", "1.0"))
+        e_omega = 0.0
+        for i in range(self.n_residues - 1):
+            omega = self._bounded_omega(angle_dict.get(f"{i}_omega", np.pi))
+            delta = omega - self.OMEGA_CENTER
+            # Inside the enforced 170-190 degree band, this is mild: the edge
+            # costs 1.0 * QTF_OMEGA_SCALE per peptide. Values outside the band
+            # are clamped before geometry is built, so they cannot be sampled.
+            e_omega += (delta / self.OMEGA_HALF_WIDTH) ** 2
+        add_term("omega", OMEGA_SCALE * e_omega)
+
+        e_local_sterics, local_steric_terms = self._calculate_adjacent_heavy_sterics(
+            coords, self.static_labels, self.atom_to_res, return_terms=True
+        )
+        add_term("adjacent_heavy_sterics", e_local_sterics)
+        terms["adjacent_backbone_sterics"] = float(e_local_sterics)
+
         e_geom, geom_subterms = self._calculate_geometry_integrity(
         coords, self.static_labels, self.atom_to_res, return_terms=True
         )
         add_term("geometry", e_geom)
 
+        REFERENCE_OFFSET_PER_RESIDUE = float(os.getenv("QTF_REFERENCE_OFFSET_PER_RESIDUE", "-75.0"))
+        add_term("reference_offset", REFERENCE_OFFSET_PER_RESIDUE * self.n_residues)
 
         if self.tracker:
             self.tracker.log(total_energy)
@@ -1190,6 +1524,7 @@ class QuantumBiophysicsFolder:
             "energy_backend_custom": 1.0,
             "energy_backend_rosetta": 0.0,
             "use_e2e_constraint": 1.0 if self.use_e2e_constraint else 0.0,
+            "reference_offset_per_residue": float(REFERENCE_OFFSET_PER_RESIDUE),
 
             # end-to-end diagnostics
             "e2e_distance": float(dist_ends) if len(ca_indices) >= 2 else 0.0,
@@ -1202,6 +1537,8 @@ class QuantumBiophysicsFolder:
             "geom_pro_ring": float(geom_subterms["pro_ring"]),
             "geom_chirality": float(geom_subterms["chirality"]),
             "geom_planarity": float(geom_subterms["planarity"]),
+            "local_adjacent_heavy_sterics": float(local_steric_terms["adjacent_heavy_sterics"]),
+            "local_backbone_sterics": float(local_steric_terms["adjacent_heavy_sterics"]),
 
             # burial diagnostics
             "burial_mean": float(np.mean(burial_fractions)) if np.sum(self.mask_hydrophobic) > 0 else 0.0,
@@ -1346,13 +1683,10 @@ class QuantumBiophysicsFolder:
             atoms = res_map.get(r, {})
             res_name = self.sequence[r]
 
-            # PRO ring closure penalty
+            # PRO ring closure is handled during rebuild in the specific template
+            # path when enabled. The scoring function leaves it neutral.
             if res_name == 'P' and 'CD' in atoms and 'N' in atoms:
-                d = np.linalg.norm(coords[atoms['CD']] - coords[atoms['N']])
-                if abs(d - 1.47) > 0.1:
-                    penalty = 50.0 * (d - 1.47) ** 2
-                    energy += penalty
-                    geom_terms["pro_ring"] += penalty
+                pass
 
             # Chirality check
             if 'CA' in atoms and 'N' in atoms and 'C' in atoms and 'CB' in atoms:
@@ -1402,6 +1736,66 @@ class QuantumBiophysicsFolder:
             return energy, geom_terms
         return energy
 
+    def _calculate_adjacent_heavy_sterics(self, coords, labels, atom_to_res_idx, return_terms=False):
+        """
+        Penalize obvious clashes between heavy atoms on adjacent residues.
+
+        This is intentionally narrower than the full VDW term:
+          - it only looks at residue i and i+1
+          - it only considers heavy atoms
+          - it only activates when atoms are pushed into an unrealistically short range
+
+        The goal is to suppress local backbone overlaps that produce fake bonds in
+        viewers, while still allowing legitimate backbone H-bonding geometry.
+        """
+        coords = np.asarray(coords, dtype=float)
+        labels = list(labels)
+
+        res_map = {}
+        for k, lbl in enumerate(labels):
+            r = int(lbl[0])
+            atom = str(lbl[1])
+            if r not in res_map:
+                res_map[r] = {}
+            res_map[r][atom] = k
+
+        scale = float(os.getenv("QTF_LOCAL_HEAVY_STERIC_SCALE", "10.0"))
+        min_allowed_A = float(os.getenv("QTF_LOCAL_HEAVY_STERIC_MIN_A", "1.35"))
+        threshold_frac = float(os.getenv("QTF_LOCAL_HEAVY_STERIC_FRACTION", "0.55"))
+        overlap_width_A = float(os.getenv("QTF_LOCAL_HEAVY_STERIC_WIDTH_A", "0.50"))
+        overlap_width_A = max(overlap_width_A, 1e-3)
+
+        energy = 0.0
+        terms = {
+            "adjacent_heavy_sterics": 0.0,
+        }
+
+        for r in range(self.n_residues - 1):
+            left = res_map.get(r, {})
+            right = res_map.get(r + 1, {})
+            for a1, i in left.items():
+                if str(labels[i][2]).upper() == "H" or str(labels[i][1]).upper().startswith("H"):
+                    continue
+                for a2, j in right.items():
+                    if str(labels[j][2]).upper() == "H" or str(labels[j][1]).upper().startswith("H"):
+                        continue
+                    if a1 == "C" and a2 == "N":
+                        continue
+                    d = float(np.linalg.norm(coords[i] - coords[j]))
+                    threshold_A = max(min_allowed_A, threshold_frac * (float(self.vdw_radii_vector[i]) + float(self.vdw_radii_vector[j])))
+                    if d >= threshold_A:
+                        continue
+                    shortfall = threshold_A - d
+                    # Quadratic wall with a soft activation range so the penalty
+                    # stays mild near the edge but rises quickly for real overlaps.
+                    penalty = scale * (shortfall / overlap_width_A) ** 2
+                    energy += penalty
+                    terms["adjacent_heavy_sterics"] += penalty
+
+        if return_terms:
+            return energy, terms
+        return energy
+
     def get_smart_initialization(self, n_attempts=20, seed=None):
         """
         Samples random parameters to find a good starting point (Basin Hopping).
@@ -1432,6 +1826,11 @@ class QuantumBiophysicsFolder:
         print(f" > Best Start Found: Energy {best_energy:.2f}")
         return best_params
 
+    def get_random_parameters(self, seed=None):
+        """Return a pure random parameter vector in the ansatz parameter space."""
+        rng = np.random.default_rng(seed)
+        return rng.uniform(-np.pi, np.pi, self.n_params)
+
     def fold(self, max_iter=2000, initial_params=None):
         """
         MAIN EXECUTION LOOP
@@ -1442,10 +1841,17 @@ class QuantumBiophysicsFolder:
 
         # Initialization
         if initial_params is None:
-            init_params = self.get_smart_initialization(n_attempts=max_iter)
+            init_params = self.get_random_parameters()
         else:
             init_params = initial_params
-        
+
+        if int(max_iter) <= 0:
+            self.tracker.mark_stage("Stage3")
+            self.current_stage = 3
+            final_energy = float(self.energy_function(init_params))
+            coords, labels, bonds = self._final_output_structure_from_params(init_params)
+            return coords, labels, bonds, self.tracker, init_params, final_energy
+
         # STAGE 1: COLLAPSE
         # High Gamma (15.0) + Magnet Active
         # Purpose: Force the protein into a ball rapidly.
@@ -1513,7 +1919,7 @@ class QuantumBiophysicsFolder:
             if points
         }
 
-    def save_pdb(self, coords, labels, filename="structure.pdb", energy=0.0, chain_id='A', resseqs=None, resnames=None, remarks=None):
+    def save_pdb(self, coords, labels, filename="structure.pdb", energy=0.0, chain_id='A', resseqs=None, resnames=None, remarks=None, include_hydrogens=True):
         """
         Save arbitrary coordinates/labels to a PDB file viewable in PyMOL or Chimera.
 
@@ -1526,6 +1932,7 @@ class QuantumBiophysicsFolder:
             resseqs: optional list/dict mapping res_id -> residue number
             resnames: optional list/dict mapping res_id -> residue name (3-letter preferred)
             remarks: optional iterable of additional REMARK strings
+            include_hydrogens: if False, omit atoms whose element/name is hydrogen
         """
         outdir = os.path.dirname(filename)
         if outdir:
@@ -1541,7 +1948,10 @@ class QuantumBiophysicsFolder:
                 for idx, remark in enumerate(remarks, start=2):
                     f.write(f"REMARK {idx:3d} {remark}\n")
 
-            for k, (pos, (res_id, atom_name, elem)) in enumerate(zip(coords, labels), start=1):
+            serial = 1
+            for pos, (res_id, atom_name, elem) in zip(coords, labels):
+                if (not include_hydrogens) and (str(elem).upper() == "H" or str(atom_name).upper().startswith("H")):
+                    continue
                 res_id = int(res_id)
                 if resnames is None:
                     aa = self.sequence[res_id] if 0 <= res_id < len(self.sequence) else 'X'
@@ -1559,9 +1969,10 @@ class QuantumBiophysicsFolder:
                     resseq = int(resseqs[res_id])
 
                 f.write(self._format_pdb_atom_line(
-                    k, atom_name, res_name, chain_out, resseq,
+                    serial, atom_name, res_name, chain_out, resseq,
                     float(pos[0]), float(pos[1]), float(pos[2]), str(elem)
                 ))
+                serial += 1
             f.write('END\n')
 
     def save_reduced_pdb(self, ca_coords, filename="structure_ca.pdb", sidechain_centroids=None, energy=0.0,
@@ -1652,17 +2063,17 @@ class EnsembleFoldingManager:
                 
             # Initialization
             if strat == 'random':
-                start_params = self.folder.get_smart_initialization(n_attempts=50, seed=seed+i)
+                start_params = self.folder.get_random_parameters(seed=seed+i)
             else:
                 start_params = self.prime_circuit(target_type=strat, seed=seed+i)
             
             # Execute Fold
-            coords, _, _, tracker, final_params, final_energy = self.folder.fold(max_iter=max_iter, initial_params=start_params)
+            coords, labels, _, tracker, final_params, final_energy = self.folder.fold(max_iter=max_iter, initial_params=start_params)
             
             print(f" >> Replica {i+1} Final Energy: {final_energy:.2f}")
             self.results.append({
                 'id': i, 'seed': seed+i, 'type': strat, 'energy': final_energy,
-                'coords': coords, 'params': final_params, 'tracker': tracker
+                'coords': coords, 'labels': labels, 'params': final_params, 'tracker': tracker
             })
 
     def evaluate_best(self):
@@ -1713,5 +2124,3 @@ class EnsembleFoldingManager:
             k = max(1, min(int(top_k), len(ranked)))
             return ranked[:k]
         return ranked
-
-

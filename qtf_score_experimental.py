@@ -73,7 +73,16 @@ def extract_subset_pdb(
             raise ValueError(f"PDB has multiple protein chains {[c.id for c in protein_chains]}; pass --chain")
         chain_id = protein_chains[0].id
 
-    chain = model[chain_id]
+    if chain_id and chain_id in model:
+        chain = model[chain_id]
+    else:
+        chains = list(model.get_chains())
+        if not chains:
+            raise ValueError("No chains found in PDB")
+        chain = model["A"] if "A" in model else chains[0]
+        chain_id = chain.id
+
+    print(f"[info] using chain: {chain_id}")
 
     seq_chars = []
     pdb_resseqs = []
@@ -140,6 +149,17 @@ def compute_qtf_angle_vector(
             res_idx = topo.atom(int(quad[1])).residue.index
             angle_map[(res_idx, name)] = float(val)
             observed[(res_idx, name)] = float(val)
+
+    omega_quads, omega_values = md.compute_omega(traj)
+    fixed_omegas = np.full(max(0, folder.n_residues - 1), np.pi, dtype=float)
+    if omega_values.size:
+        for quad, val in zip(omega_quads, omega_values[0]):
+            res_idx = topo.atom(int(quad[1])).residue.index
+            if 0 <= res_idx < len(fixed_omegas):
+                fixed_omegas[res_idx] = float(val)
+                angle_map[(res_idx, "omega")] = float(val)
+                observed[(res_idx, "omega")] = float(val)
+    folder.fixed_omegas = fixed_omegas
 
     if chi_mode == "beam":
         for (res_idx, torsion_name) in list(angle_map.keys()):
@@ -209,7 +229,7 @@ def build_full_coords(folder: runner.QuantumBiophysicsFolder, angle_vec: np.ndar
 
 
 
-def make_rebuilt_output_paths(output_dir: Path, spec_name: str, start: Optional[int], end: Optional[int]) -> Tuple[Path, Path]:
+def make_rebuilt_output_paths(output_dir: Path, spec_name: str, start: Optional[int], end: Optional[int]) -> Tuple[Path, Path, Path]:
     safe_name = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in spec_name)
     if start is not None or end is not None:
         start_str = start if start is not None else "NA"
@@ -217,7 +237,11 @@ def make_rebuilt_output_paths(output_dir: Path, spec_name: str, start: Optional[
         stem = f"{safe_name}_{start_str}_{end_str}_rebuilt"
     else:
         stem = f"{safe_name}_rebuilt"
-    return output_dir / f"{stem}_ca.pdb", output_dir / f"{stem}_ca_centroid.pdb"
+    return (
+        output_dir / f"{stem}_ca.pdb",
+        output_dir / f"{stem}_ca_centroid.pdb",
+        output_dir / f"{stem}_full.pdb",
+    )
 
 
 def kabsch_rmsd(P, Q):
@@ -278,7 +302,7 @@ def get_tuning_settings():
     return {
         "hbond_scale": float(os.getenv("QTF_HBOND_SCALE", "0.75")),
         "sasa_scale": float(os.getenv("QTF_SASA_SCALE", "0.7")),
-        "vdw_rep_scale": float(os.getenv("QTF_VDW_REP_SCALE", "0.1")),
+        "vdw_rep_scale": float(os.getenv("QTF_VDW_REP_SCALE", "0.01")),
         "vdw_attr_scale": float(os.getenv("QTF_VDW_ATTR_SCALE", "0.1")),
         "rotamer_scale": float(os.getenv("QTF_ROTAMER_SCALE", "1.0")),
         "pi_stack_scale": float(os.getenv("QTF_PI_STACK_SCALE", "1.0")),
@@ -309,6 +333,7 @@ def score_one(
     rosetta_cen_min: bool = False,
     rebuilt_ca_pdb_path: Optional[str] = None,
     rebuilt_ca_centroid_pdb_path: Optional[str] = None,
+    rebuilt_full_pdb_path: Optional[str] = None,
 ) -> Dict:
     trimmed_pdb, pdb_resseqs, sequence, selected_chain_id = extract_subset_pdb(pdb_path, chain, start, end)
 
@@ -368,6 +393,19 @@ def score_one(
                 resseqs=pdb_resseqs,
             )
 
+        if rebuilt_full_pdb_path is not None:
+            rebuilt_full_pdb_path = str(rebuilt_full_pdb_path)
+            folder.save_pdb(
+                rebuilt_coords,
+                rebuilt_labels,
+                filename=rebuilt_full_pdb_path,
+                energy=total_energy,
+                chain_id=selected_chain_id,
+                resseqs=pdb_resseqs,
+                remarks=["QTF heavy-atom rebuilt structure from native torsions"],
+                include_hydrogens=False,
+            )
+
         native_traj = md.load(trimmed_pdb)
         native_ca_idx = native_traj.topology.select("name CA")
         native_ca = native_traj.xyz[0, native_ca_idx, :] * 10.0
@@ -421,6 +459,7 @@ def score_one(
             "n_qtf_angles": int(folder.total_angles),
             "rebuilt_ca_pdb_path": rebuilt_ca_pdb_path or "",
             "rebuilt_ca_centroid_pdb_path": rebuilt_ca_centroid_pdb_path or "",
+            "rebuilt_full_pdb_path": rebuilt_full_pdb_path or "",
         }
 
         for k, v in terms.items():
@@ -465,6 +504,8 @@ def main():
 
     base_output_dir = Path(args.out_json).parent if args.out_json else Path(args.out_csv).parent
     base_output_dir.mkdir(parents=True, exist_ok=True)
+    pdb_output_dir = base_output_dir / "pdbs"
+    pdb_output_dir.mkdir(parents=True, exist_ok=True)
 
     rows = []
     if args.panel:
@@ -472,7 +513,7 @@ def main():
         for spec in specs:
             start = spec.get("residue_start")
             end = spec.get("residue_end")
-            rebuilt_ca_pdb_path, rebuilt_ca_centroid_pdb_path = make_rebuilt_output_paths(base_output_dir, spec["name"], start, end)
+            rebuilt_ca_pdb_path, rebuilt_ca_centroid_pdb_path, rebuilt_full_pdb_path = make_rebuilt_output_paths(pdb_output_dir, spec["name"], start, end)
             rows.append(
                 score_one(
                     name=spec["name"],
@@ -490,13 +531,14 @@ def main():
                     rosetta_cen_min=bool(args.rosetta_cen_min),
                     rebuilt_ca_pdb_path=str(rebuilt_ca_pdb_path),
                     rebuilt_ca_centroid_pdb_path=str(rebuilt_ca_centroid_pdb_path),
+                    rebuilt_full_pdb_path=str(rebuilt_full_pdb_path),
                 )
             )
     else:
         if not args.name or not args.pdb_path:
             raise SystemExit("single-structure mode requires --name and --pdb_path")
-        rebuilt_ca_pdb_path, rebuilt_ca_centroid_pdb_path = make_rebuilt_output_paths(
-            base_output_dir, args.name, args.residue_start, args.residue_end
+        rebuilt_ca_pdb_path, rebuilt_ca_centroid_pdb_path, rebuilt_full_pdb_path = make_rebuilt_output_paths(
+            pdb_output_dir, args.name, args.residue_start, args.residue_end
         )
         rows.append(
             score_one(
@@ -515,6 +557,7 @@ def main():
                 rosetta_cen_min=bool(args.rosetta_cen_min),
                 rebuilt_ca_pdb_path=str(rebuilt_ca_pdb_path),
                 rebuilt_ca_centroid_pdb_path=str(rebuilt_ca_centroid_pdb_path),
+                rebuilt_full_pdb_path=str(rebuilt_full_pdb_path),
             )
         )
 

@@ -13,7 +13,7 @@ from typing import Dict, Iterable, List
 # User-editable defaults
 # -----------------------------
 DEFAULT_PANEL_CSV = "protein_panel.csv"
-PYTHON = "python"
+PYTHON = os.environ.get("QTF_PYTHON", "python")
 
 BEAM_SCRIPT = "qtf_beamsearch_benchmark.py"
 NATIVE_SCRIPT = "qtf_score_experimental.py"
@@ -31,13 +31,13 @@ ROSETTA_CEN_MIN = 0
 # Grid combinations (fixed for search-space sweep)
 HBOND_SCALE = [0.55]
 SASA_SCALE = [0.85]
-VDW_REP_SCALE = [1.00]
-VDW_ATTR_SCALE = [1.00]
+VDW_REP_SCALE = [0.01]
+VDW_ATTR_SCALE = [0.10]
 ROTAMER_SCALE = [1.00]
 PI_STACK_SCALE = [0.10]
 
 # Optional filters
-ONLY_PROTEINS: list[str] = ["chignolin", "trp_cage", "MBH12", "1513_MSP-1"]
+ONLY_PROTEINS: list[str] = []
 SKIP_EXISTING = True
 
 
@@ -125,7 +125,7 @@ def main() -> None:
 
             seq = row["sequence"].strip().upper()
             pdb_path = str(Path(row["pdb_path"]).resolve())
-            chain = row.get("chain", "A").strip() or "A"
+            chain = row.get("chain", "").strip()
             forcefield = row.get("forcefield", "amber").strip() or "amber"
             chi_mode = row.get("chi_mode", "selective").strip() or "selective"
 
@@ -200,6 +200,7 @@ def main() -> None:
                     "--step_deg", str(args.step_deg),
                     "--chi_mode", chi_mode,
                     "--max_sidechain_opts_per_residue", str(args.max_sidechain_opts_per_residue),
+                    "--save_partial",
                     "--random_seed", str(RANDOM_SEED),
                     "--energy_backend", args.energy_backend,
                     "--use_e2e_constraint", str(args.use_e2e_constraint),
@@ -211,11 +212,10 @@ def main() -> None:
                     "--outdir", str(beam_dir),
                 ], check=True, env=env)
 
-                subprocess.run([
+                native_cmd = [
                     PYTHON, NATIVE_SCRIPT,
                     "--name", name,
                     "--pdb_path", pdb_path,
-                    "--chain", chain,
                     "--forcefield", forcefield,
                     "--chi_mode", chi_mode,
                     "--energy_backend", args.energy_backend,
@@ -226,7 +226,13 @@ def main() -> None:
                     "--rosetta_cen_min", str(args.rosetta_cen_min),
                     "--out_csv", str(native_csv),
                     "--out_json", str(native_dir / f"{name}_native_score.json"),
-                ], check=True, env=env)
+                ]
+
+                # Add chain only if provided
+                if chain:
+                    native_cmd.extend(["--chain", chain])
+
+                subprocess.run(native_cmd, check=True, env=env)
 
                 status = "ok"
                 error = ""
