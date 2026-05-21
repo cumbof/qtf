@@ -15,7 +15,7 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from qtf.analysis.stability import kabsch_rmsd
+from pheat.geometry import kabsch_align
 
 
 # ---------------------------------------------------------------------------
@@ -92,7 +92,10 @@ def plot_structure(
 
         if reference is not None:
             n = min(len(ca), len(reference))
-            _, ca_aligned = kabsch_rmsd(ca[:n], reference[:n])
+            ca_aligned = np.asarray(
+                kabsch_align(reference[:n].tolist(), ca[:n].tolist()),
+                dtype=float,
+            )
         else:
             ca_aligned = ca
 
@@ -280,6 +283,243 @@ def plot_energy_landscape(
         template="plotly_white",
         height=500,
     )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Tracker energy landscape
+# ---------------------------------------------------------------------------
+
+_PHASE_COLOURS = (
+    "#ff6b35",
+    "#4ecdc4",
+    "#a855f7",
+    "#ffd166",
+    "#06d6a0",
+    "#ef476f",
+    "#118ab2",
+    "#f78c6b",
+)
+
+_PHASE_STATUS_COLOURS = {
+    "ok": "#2e7d32",
+    "warning": "#f59e0b",
+    "error": "#d32f2f",
+}
+
+
+def _tracker_markers(tracker) -> list[tuple[int, str]]:
+    markers = getattr(tracker, "phase_markers", None)
+    if markers:
+        return [(int(step), str(name)) for step, name in markers]
+    markers = getattr(tracker, "stage_markers", None) or []
+    return [(int(step), str(name)) for step, name in markers]
+
+
+def _tracker_phase_ranges(markers: list[tuple[int, str]], n_iters: int) -> list[tuple[str, int, int]]:
+    if n_iters <= 0:
+        return [("Optimization", 0, 0)]
+    cleaned = sorted(
+        [(max(0, min(int(step), n_iters - 1)), str(name)) for step, name in markers],
+        key=lambda item: item[0],
+    )
+    if not cleaned:
+        cleaned = [(0, "Optimization")]
+    elif cleaned[0][0] > 0:
+        cleaned.insert(0, (0, "Initialization"))
+
+    ranges = []
+    for idx, (start, name) in enumerate(cleaned):
+        end = cleaned[idx + 1][0] if idx + 1 < len(cleaned) else n_iters
+        if end > start:
+            ranges.append((name, start, end))
+    return ranges or [("Optimization", 0, n_iters)]
+
+
+def _phase_status_category(success, status, message: str | None) -> str:
+    if bool(success):
+        return "ok"
+    status_text = "" if status is None else str(status).strip()
+    message_text = str(message or "").strip().lower()
+    if status_text == "9" or "iteration limit" in message_text:
+        return "warning"
+    if "maximum number of function evaluations" in message_text:
+        return "warning"
+    if "maxiter" in message_text or "maxfun" in message_text:
+        return "warning"
+    return "error"
+
+
+def _phase_metadata_map(phase_results: Optional[list[dict]]) -> tuple[dict, dict]:
+    by_range = {}
+    by_label = {}
+    for phase in phase_results or []:
+        label = str(phase.get("label") or phase.get("name") or "")
+        status = str(
+            phase.get("phase_status")
+            or _phase_status_category(phase.get("success"), phase.get("status"), phase.get("message"))
+        )
+        if status not in _PHASE_STATUS_COLOURS:
+            status = "error"
+        metadata = {
+            "label": label,
+            "optimizer": phase.get("optimizer") or "n/a",
+            "score_model": phase.get("score_model") or "n/a",
+            "status": status,
+            "message": phase.get("phase_status_label") or phase.get("message") or status,
+        }
+        start = phase.get("energy_start_index")
+        end = phase.get("energy_end_index")
+        if start is not None and end is not None:
+            by_range[(int(start), int(end))] = metadata
+        if label:
+            by_label[label] = metadata
+        name = phase.get("name")
+        if name:
+            by_label[str(name)] = metadata
+    return by_range, by_label
+
+
+def _phase_metadata(name: str, start: int, end: int, by_range: dict, by_label: dict) -> dict:
+    return by_range.get((int(start), int(end))) or by_label.get(str(name)) or {
+        "label": str(name),
+        "optimizer": "n/a",
+        "score_model": "n/a",
+        "status": "ok",
+        "message": "ok",
+    }
+
+
+def _needs_signed_log(values: np.ndarray) -> bool:
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return False
+    nonzero = np.abs(finite[finite != 0])
+    if nonzero.size == 0:
+        return False
+    crosses_zero = float(np.min(finite)) < 0 < float(np.max(finite))
+    dynamic_range = float(np.max(nonzero) / max(np.min(nonzero), 1e-12))
+    return crosses_zero or dynamic_range > 1.0e4
+
+
+def _signed_log_transform(values: np.ndarray) -> tuple[np.ndarray, float]:
+    finite = values[np.isfinite(values)]
+    nonzero = np.abs(finite[finite != 0])
+    linthresh = max(1.0, float(np.percentile(nonzero, 10))) if nonzero.size else 1.0
+    return np.sign(values) * np.log10(1.0 + np.abs(values) / linthresh), linthresh
+
+
+def plot_tracker_energy_landscape(
+    tracker,
+    *,
+    sequence: str = "",
+    forcefield: str = "",
+    title: Optional[str] = None,
+    phase_results: Optional[list[dict]] = None,
+    save_path: Optional[str] = None,
+    include_plotlyjs: str | bool = "cdn",
+    full_html: bool = True,
+) -> go.Figure:
+    """Plot a single run's energy trace with phase boundaries.
+
+    This is the per-run companion to :func:`plot_energy_landscape`, which plots
+    ranked ensemble traces.  The tracker may expose either ``phase_markers`` or
+    the package's existing ``stage_markers`` attribute.
+    """
+    history = np.asarray(getattr(tracker, "history", []) or [], dtype=float)
+    markers = _tracker_markers(tracker)
+    phase_ranges = _tracker_phase_ranges(markers, len(history))
+    by_range, by_label = _phase_metadata_map(phase_results)
+
+    fig = go.Figure()
+    if history.size == 0:
+        fig.add_annotation(
+            text="No energy evaluations recorded",
+            xref="paper",
+            yref="paper",
+            x=0.5,
+            y=0.5,
+            showarrow=False,
+        )
+        y_values = history
+        y_title = "Energy (a.u.)"
+    else:
+        if _needs_signed_log(history):
+            y_values, linthresh = _signed_log_transform(history)
+            y_title = f"Signed log energy (linthresh={linthresh:.3g})"
+        else:
+            y_values = history
+            y_title = "Energy (a.u.)"
+
+        for idx, (name, start, end) in enumerate(phase_ranges):
+            meta = _phase_metadata(name, start, end, by_range, by_label)
+            colour = _PHASE_COLOURS[idx % len(_PHASE_COLOURS)]
+            status_colour = _PHASE_STATUS_COLOURS.get(meta["status"], _PHASE_STATUS_COLOURS["error"])
+            x_segment = list(range(start, end))
+            y_segment = y_values[start:end]
+            raw_segment = history[start:end]
+            phase_label = meta.get("label") or name
+            hover = [
+                (
+                    f"<b>{phase_label}</b><br>"
+                    f"Evaluation: {x}<br>"
+                    f"Energy: {raw:.6g}<br>"
+                    f"Optimizer: {meta['optimizer']}<br>"
+                    f"Score: {meta['score_model']}<br>"
+                    f"Status: {meta['message']}"
+                    "<extra></extra>"
+                )
+                for x, raw in zip(x_segment, raw_segment)
+            ]
+            fig.add_trace(
+                go.Scatter(
+                    x=x_segment,
+                    y=y_segment,
+                    mode="lines",
+                    line=dict(color=colour, width=2.5),
+                    name=str(phase_label),
+                    hovertemplate=hover,
+                )
+            )
+            if start > 0:
+                fig.add_vline(x=start, line=dict(color=colour, width=1, dash="dash"))
+            if meta["status"] != "ok":
+                fig.add_vrect(
+                    x0=start,
+                    x1=max(start + 1, end),
+                    fillcolor=status_colour,
+                    opacity=0.08,
+                    line_width=0,
+                )
+                fig.add_annotation(
+                    x=start,
+                    y=y_segment[-1] if len(y_segment) else 0,
+                    text=meta["status"].upper(),
+                    showarrow=True,
+                    arrowcolor=status_colour,
+                    font=dict(color=status_colour),
+                )
+
+    if title is None:
+        parts = ["Optimization Energy Landscape"]
+        if sequence:
+            parts.append(sequence)
+        if forcefield:
+            parts.append(str(forcefield).upper())
+        title = " | ".join(parts)
+
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=16)),
+        xaxis_title="Function Evaluations",
+        yaxis_title=y_title,
+        legend=dict(itemsizing="constant"),
+        template="plotly_white",
+        height=560,
+    )
+    if save_path is not None:
+        import plotly.io as pio
+
+        pio.write_html(fig, file=str(save_path), include_plotlyjs=include_plotlyjs, full_html=full_html)
     return fig
 
 

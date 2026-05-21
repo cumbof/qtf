@@ -81,11 +81,11 @@ QTF/
 │   │   └── tracker.py       # LandscapeTracker
 │   ├── analysis/
 │   │   ├── ranking.py       # EnsembleRanking
-│   │   └── stability.py     # kabsch_rmsd, StabilityAnalyzer
+│   │   └── stability.py     # StabilityAnalyzer (verdict layer; primitives in PHEAT)
 │   ├── visualization/
 │   │   └── plots.py         # plot_structure, plot_energy_landscape, plot_ranking
 │   └── utils/
-│       └── pdb.py           # save_pdb, get_ground_truth_backbone, calculate_physics_metrics
+│       └── __init__.py      # namespace; PDB I/O / RMSD now live in PHEAT
 ├── tests/                   # pytest test suite (116 tests)
 ├── docs/                    # MkDocs documentation source
 ├── .github/

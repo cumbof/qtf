@@ -8,13 +8,15 @@ Quick start
 >>> from qtf import QuantumBiophysicsFolder, EnsembleFoldingManager
 >>> from qtf.analysis import EnsembleRanking
 >>> from qtf.visualization import plot_structure, plot_energy_landscape, plot_ranking
->>> from qtf.utils import get_ground_truth_backbone
+>>> from pheat.pdbio import load_pdb
 >>>
 >>> folder = QuantumBiophysicsFolder("YYDPETGTWY", force_field="amber")
 >>> manager = EnsembleFoldingManager(folder)
 >>> manager.run_ensemble(n_runs=3)
 >>>
->>> true_ca = get_ground_truth_backbone("5AWL")
+>>> import numpy as np
+>>> reference = load_pdb("5AWL.pdb")
+>>> true_ca = np.array([(a.x, a.y, a.z) for a in reference.atoms if a.name.strip() == "CA"])
 >>> ranking = EnsembleRanking.from_ensemble(manager.get_results(), ground_truth_ca=true_ca)
 >>> print(ranking.summary())
 >>>
@@ -33,4 +35,4 @@ __all__ = [
     "LandscapeTracker",
 ]
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"

@@ -53,9 +53,9 @@ Each element is a dictionary with the following schema:
 
 ```python
 from qtf.analysis import EnsembleRanking
-from qtf.utils import get_ground_truth_backbone
+from pheat.pdbio import load_pdb_ca_by_id
 
-true_ca = get_ground_truth_backbone("5AWL")   # optional
+true_ca = load_pdb_ca_by_id("5AWL")   # optional
 
 ranking = EnsembleRanking.from_ensemble(
     results,

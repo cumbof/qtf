@@ -4,7 +4,7 @@ import numpy as np
 import plotly.graph_objects as go
 import pytest
 
-from qtf.visualization import plot_energy_landscape, plot_ranking, plot_structure
+from qtf.visualization import plot_energy_landscape, plot_ranking, plot_structure, plot_tracker_energy_landscape
 
 
 @pytest.fixture(scope="module")
@@ -61,6 +61,73 @@ def test_plot_energy_landscape_has_traces(ranking_for_plots):
 def test_plot_energy_landscape_custom_title(ranking_for_plots):
     fig = plot_energy_landscape(ranking_for_plots, title="Energy Test")
     assert fig.layout.title.text == "Energy Test"
+
+
+# ---------------------------------------------------------------------------
+# plot_tracker_energy_landscape
+# ---------------------------------------------------------------------------
+
+
+def test_plot_tracker_energy_landscape_returns_figure(two_results):
+    fig = plot_tracker_energy_landscape(two_results[0]["tracker"])
+    assert isinstance(fig, go.Figure)
+
+
+def test_plot_tracker_energy_landscape_accepts_phase_markers():
+    class PhaseTracker:
+        history = [3.0, 2.0, 1.0]
+        phase_markers = [(0, "phase-a"), (2, "phase-b")]
+
+    fig = plot_tracker_energy_landscape(PhaseTracker())
+    assert isinstance(fig, go.Figure)
+    assert len(fig.data) == 2
+
+
+def test_plot_tracker_energy_landscape_without_markers():
+    class PlainTracker:
+        history = [3.0, 2.0, 1.0]
+
+    fig = plot_tracker_energy_landscape(PlainTracker())
+    assert isinstance(fig, go.Figure)
+    assert len(fig.data) == 1
+
+
+def test_plot_tracker_energy_landscape_marks_warning_and_error():
+    class PhaseTracker:
+        history = [3.0, 2.0, 1.0, 4.0]
+        phase_markers = [(0, "phase-a"), (2, "phase-b")]
+
+    phase_results = [
+        {
+            "name": "phase-a",
+            "label": "Phase A",
+            "success": False,
+            "status": 9,
+            "message": "Iteration limit reached",
+            "energy_start_index": 0,
+            "energy_end_index": 2,
+        },
+        {
+            "name": "phase-b",
+            "label": "Phase B",
+            "phase_status": "error",
+            "message": "bad optimizer state",
+            "energy_start_index": 2,
+            "energy_end_index": 4,
+        },
+    ]
+    fig = plot_tracker_energy_landscape(PhaseTracker(), phase_results=phase_results)
+    annotations = [annotation.text for annotation in fig.layout.annotations]
+    assert "WARNING" in annotations
+    assert "ERROR" in annotations
+
+
+def test_plot_tracker_energy_landscape_writes_html(tmp_path, two_results):
+    path = tmp_path / "landscape.html"
+    fig = plot_tracker_energy_landscape(two_results[0]["tracker"], save_path=path)
+    assert isinstance(fig, go.Figure)
+    assert path.exists()
+    assert "plotly" in path.read_text(encoding="utf-8").lower()
 
 
 # ---------------------------------------------------------------------------

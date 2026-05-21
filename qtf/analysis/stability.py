@@ -1,90 +1,47 @@
-"""Structural analysis utilities: Kabsch algorithm and convergence metrics."""
+"""Ensemble convergence helpers layered on PHEAT primitives.
+
+Kabsch alignment, pairwise RMSD matrices, and ensemble statistics live in
+PHEAT (see :func:`pheat.geometry.kabsch_rmsd`,
+:func:`pheat.metrics.pairwise_rmsd_matrix`, and
+:func:`pheat.metrics.ensemble_rmsd_stats`).  This module keeps only the
+QTF-specific verdict layer that classifies an ensemble as STABLE/FLEXIBLE/
+UNSTABLE based on protein-Cα RMSD thresholds.
+"""
 
 from __future__ import annotations
 
 import numpy as np
 
-
-def kabsch_rmsd(
-    P: np.ndarray, Q: np.ndarray
-) -> tuple[float, np.ndarray]:
-    """Compute the minimum RMSD between two point sets using the Kabsch algorithm.
-
-    Both *P* and *Q* must have shape ``(N, 3)``.  *P* is rotated to best
-    align with *Q*.
-
-    Parameters
-    ----------
-    P, Q:
-        Coordinate matrices to compare.
-
-    Returns
-    -------
-    rmsd : float
-        Root-mean-square deviation after optimal superposition.
-    P_aligned : ndarray, shape (N, 3)
-        *P* after centering, rotation, and re-translation onto *Q*.
-    """
-    P_c = P - P.mean(axis=0)
-    Q_c = Q - Q.mean(axis=0)
-
-    H = P_c.T @ Q_c
-    V, S, Wt = np.linalg.svd(H)
-
-    # Ensure a proper rotation (det = +1), not a reflection
-    if (np.linalg.det(V) * np.linalg.det(Wt)) < 0.0:
-        S[-1] = -S[-1]
-        V[:, -1] = -V[:, -1]
-
-    R = V @ Wt
-    P_rotated = P_c @ R
-    diff = P_rotated - Q_c
-    rms = float(np.sqrt(np.mean(np.sum(diff ** 2, axis=1))))
-    return rms, P_rotated + Q.mean(axis=0)
+from pheat.metrics import ensemble_rmsd_stats
 
 
 class StabilityAnalyzer:
-    """Tools for structural consistency analysis of folding ensembles."""
-
-    @staticmethod
-    def pairwise_rmsd_matrix(structures: list[np.ndarray]) -> np.ndarray:
-        """Compute the all-vs-all RMSD matrix for a list of CA coordinate arrays.
-
-        Parameters
-        ----------
-        structures:
-            List of ``(N_residues, 3)`` CA coordinate arrays.
-
-        Returns
-        -------
-        matrix : ndarray, shape (M, M)
-            Symmetric pairwise RMSD matrix (diagonal = 0).
-        """
-        n = len(structures)
-        matrix = np.zeros((n, n))
-        for i in range(n):
-            for j in range(i + 1, n):
-                rmsd, _ = kabsch_rmsd(structures[i], structures[j])
-                matrix[i, j] = matrix[j, i] = rmsd
-        return matrix
+    """QTF-specific convergence verdict layered on PHEAT ensemble statistics."""
 
     @staticmethod
     def convergence_summary(rmsd_matrix: np.ndarray) -> dict:
-        """Return convergence statistics derived from a pairwise RMSD matrix.
+        """Return convergence statistics plus a STABLE/FLEXIBLE/UNSTABLE verdict.
+
+        Raw statistics (``avg_pairwise_rmsd``, ``max_pairwise_rmsd``,
+        ``min_nonzero_rmsd``) are produced by
+        :func:`pheat.metrics.ensemble_rmsd_stats`.  This wrapper adds the
+        protein-Cα verdict thresholds (2.0 Å, 4.5 Å) on top.
 
         Returns
         -------
         dict with keys: avg_pairwise_rmsd, max_pairwise_rmsd,
         min_nonzero_rmsd, verdict
         """
-        n = len(rmsd_matrix)
-        if n < 2:
-            return {"avg_pairwise_rmsd": 0.0, "max_pairwise_rmsd": 0.0,
-                    "min_nonzero_rmsd": 0.0, "verdict": "SINGLE_STRUCTURE"}
-        upper = rmsd_matrix[np.triu_indices(n, k=1)]
-        avg = float(np.mean(upper))
-        mx = float(np.max(upper))
-        mn = float(np.min(upper))
+
+        stats = ensemble_rmsd_stats(rmsd_matrix)
+        if stats["ensemble_size"] < 2:
+            return {
+                "avg_pairwise_rmsd": 0.0,
+                "max_pairwise_rmsd": 0.0,
+                "min_nonzero_rmsd": 0.0,
+                "verdict": "SINGLE_STRUCTURE",
+            }
+        avg = stats["avg_pairwise_rmsd"]
         if avg < 2.0:
             verdict = "STABLE"
         elif avg < 4.5:
@@ -93,7 +50,7 @@ class StabilityAnalyzer:
             verdict = "UNSTABLE"
         return {
             "avg_pairwise_rmsd": avg,
-            "max_pairwise_rmsd": mx,
-            "min_nonzero_rmsd": mn,
+            "max_pairwise_rmsd": stats["max_pairwise_rmsd"],
+            "min_nonzero_rmsd": stats["min_nonzero_rmsd"],
             "verdict": verdict,
         }

@@ -19,9 +19,10 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+from pheat.geometry import kabsch_rmsd, radius_of_gyration
+from pheat.metrics import pairwise_rmsd_matrix
 
-from qtf.analysis.stability import StabilityAnalyzer, kabsch_rmsd
-from qtf.utils.pdb import calculate_physics_metrics
+from qtf.analysis.stability import StabilityAnalyzer
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +104,9 @@ class EnsembleRanking:
         # ------------------------------------------------------------------
         rows = []
         for r, ca in zip(results, ca_traces):
-            e2e, rg = calculate_physics_metrics(ca)
+            ca_array = np.asarray(ca, dtype=float)
+            e2e = float(np.linalg.norm(ca_array[0] - ca_array[-1])) if len(ca_array) else 0.0
+            rg = float(radius_of_gyration(ca_array.tolist())) if len(ca_array) else 0.0
             row: dict = {
                 "replica_id": r["id"],
                 "seed": r["seed"],
@@ -114,7 +117,7 @@ class EnsembleRanking:
             }
             if ground_truth_ca is not None:
                 n = min(len(ca), len(ground_truth_ca))
-                rmsd, _ = kabsch_rmsd(ca[:n], ground_truth_ca[:n])
+                rmsd = float(kabsch_rmsd(ground_truth_ca[:n].tolist(), ca[:n].tolist()))
                 row["rmsd_vs_gt"] = rmsd
             rows.append(row)
 
@@ -144,14 +147,17 @@ class EnsembleRanking:
         # ------------------------------------------------------------------
         # Pairwise RMSD between all predicted structures
         # ------------------------------------------------------------------
-        pwrmsd = StabilityAnalyzer.pairwise_rmsd_matrix(ca_traces)
+        pwrmsd = pairwise_rmsd_matrix(ca_traces)
         convergence = StabilityAnalyzer.convergence_summary(pwrmsd)
 
         # Additional aggregate columns derived from pairwise matrix
-        # Mean RMSD of each structure vs all others
+        # Mean RMSD of each structure vs all others.
+        # Map replica_id → positional index in ca_traces/pwrmsd (not the same
+        # thing when replica IDs are non-contiguous or don't start at 0).
         n = len(ca_traces)
-        mean_pairwise = (pwrmsd.sum(axis=1) / max(n - 1, 1))
-        df["mean_rmsd_vs_ensemble"] = mean_pairwise[df["replica_id"].values]
+        mean_pairwise = pwrmsd.sum(axis=1) / max(n - 1, 1)
+        id_to_pos = {r["id"]: i for i, r in enumerate(results)}
+        df["mean_rmsd_vs_ensemble"] = [mean_pairwise[id_to_pos[rid]] for rid in df["replica_id"]]
 
         # Which structure minimises total pairwise distance (ensemble centroid)
         df["is_ensemble_centroid"] = df["mean_rmsd_vs_ensemble"] == df["mean_rmsd_vs_ensemble"].min()

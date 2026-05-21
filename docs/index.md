@@ -73,13 +73,15 @@ are extracted and mapped directly to torsion angles in [−π, π].
 from qtf import QuantumBiophysicsFolder, EnsembleFoldingManager
 from qtf.analysis import EnsembleRanking
 from qtf.visualization import plot_structure, plot_energy_landscape, plot_ranking
-from qtf.utils import get_ground_truth_backbone
+from pheat.pdbio import load_pdb
 
 folder  = QuantumBiophysicsFolder("YYDPETGTWY", force_field="amber")
 manager = EnsembleFoldingManager(folder)
 manager.run_ensemble(n_runs=5, max_iter=2000, scout_attempts=50)
 
-true_ca = get_ground_truth_backbone("5AWL")
+import numpy as np
+from pheat.pdbio import load_pdb_ca_by_id
+true_ca = load_pdb_ca_by_id("5AWL")
 ranking = EnsembleRanking.from_ensemble(manager.get_results(), ground_truth_ca=true_ca)
 print(ranking.summary())
 

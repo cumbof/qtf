@@ -569,28 +569,27 @@ class TestTopologySeedAngle:
 # ---------------------------------------------------------------------------
 
 
-class TestOmegaPreProline:
-    """Verify that ω for residues preceding Pro enters the DOF map and
-    that build_full_structure honours its value."""
+class TestPheatOptionalOmega:
+    """Verify that omega is a configurable PHEAT optional backbone DOF."""
 
-    def test_no_omega_dof_without_proline(self):
-        """A sequence with no Pro must have no omega DOF entries."""
-        f = QuantumBiophysicsFolder("GAVC")
+    def test_no_omega_dof_by_default(self):
+        """Omega is not optimized unless requested through stored_angles."""
+        f = QuantumBiophysicsFolder("GAP")
         omega_dofs = [d for d in f.dof_map if d["type"] == "omega"]
         assert omega_dofs == []
 
-    def test_omega_dof_added_before_proline(self):
-        """Residue preceding P must gain an omega DOF."""
-        f = QuantumBiophysicsFolder("GAP")
-        omega_dofs = [d for d in f.dof_map if d["type"] == "omega"]
-        assert len(omega_dofs) == 1
-        assert omega_dofs[0]["res"] == 1  # residue 1 (A) precedes P at position 2
-
-    def test_omega_dof_count_matches_pre_pro_count(self):
-        """A sequence with two pre-Pro positions gets two omega DOFs."""
-        f = QuantumBiophysicsFolder("GAPGPV")
+    def test_omega_dof_added_when_configured(self):
+        """stored_angles='omega' adds omega for each peptide link."""
+        f = QuantumBiophysicsFolder("GAP", stored_angles="omega")
         omega_dofs = [d for d in f.dof_map if d["type"] == "omega"]
         assert len(omega_dofs) == 2
+        assert [d["res"] for d in omega_dofs] == [0, 1]
+
+    def test_omega_dof_count_matches_peptide_links_when_configured(self):
+        """A sequence of N residues gets N-1 omega DOFs when requested."""
+        f = QuantumBiophysicsFolder("GAPGPV", stored_angles="omega")
+        omega_dofs = [d for d in f.dof_map if d["type"] == "omega"]
+        assert len(omega_dofs) == f.n_residues - 1
 
     def test_omega_default_is_pi_without_dof(self):
         """Without an omega DOF the built structure uses ω = π (trans)."""
@@ -600,8 +599,8 @@ class TestOmegaPreProline:
         assert np.all(np.isfinite(coords_trans))
 
     def test_omega_affects_coordinates(self):
-        """Setting ω to 0 (cis) for a pre-Pro residue must shift CA of Pro."""
-        f = QuantumBiophysicsFolder("GAP")
+        """Setting omega to 0 for a peptide link must shift downstream CA."""
+        f = QuantumBiophysicsFolder("GAP", stored_angles="omega")
         omega_idx = next(
             k for k, d in enumerate(f.dof_map)
             if d["type"] == "omega" and d["res"] == 1
@@ -628,100 +627,181 @@ class TestOmegaPreProline:
         assert not np.allclose(ca_t, ca_c, atol=1e-3), \
             "cis and trans Pro Cα must differ"
 
-    def test_total_angles_includes_omega_dof(self):
-        """total_angles must equal len(dof_map) and include every omega entry.
-
-        For "GAP":
-          G  → phi, psi                        = 2
-          A  → phi, psi  (CB at fixed angle)   = 2
-          P  → phi, psi, chi1, chi2, chi3       = 5
-          ω  → omega DOF for A (pre-Pro)        = 1
-          Total = 10
-        """
-        f = QuantumBiophysicsFolder("GAP")
+    def test_total_angles_includes_configured_omega_dofs(self):
+        """total_angles must equal len(dof_map) and include configured omega entries."""
+        f = QuantumBiophysicsFolder("GAP", stored_angles="omega")
         assert f.total_angles == len(f.dof_map), \
             "total_angles must equal the number of dof_map entries"
         omega_count = sum(1 for d in f.dof_map if d["type"] == "omega")
-        assert omega_count == 1
+        assert omega_count == 2
         assert f.total_angles == 10
 
 
 # ---------------------------------------------------------------------------
-# M-4 – Huber loss in _calculate_geometry_integrity
+# PHEAT angle specs and geometry-integrity scoring
 # ---------------------------------------------------------------------------
 
 
-class TestHuberLoss:
-    """Unit tests for QuantumBiophysicsFolder._huber."""
+class TestPheatAngleSpecs:
+    def test_dof_map_matches_pheat_residue_angle_specs(self):
+        from pheat.residue_geometry import residue_angle_specs
 
-    def test_zero_residual(self):
-        assert QuantumBiophysicsFolder._huber(0.0, 1.0) == 0.0
+        f = QuantumBiophysicsFolder("GAP", stored_angles="omega")
+        expected = [
+            {"res": int(spec["residue_index"]), "type": str(spec["angle_name"])}
+            for spec in residue_angle_specs("GAP", stored_angles="omega")
+        ]
+        assert f.dof_map == expected
 
-    def test_within_delta_is_quadratic(self):
-        # |x| <= delta → x²
-        for x in (0.0, 0.5, 0.99, -0.5, -0.99):
-            assert pytest.approx(QuantumBiophysicsFolder._huber(x, 1.0)) == x ** 2
+    def test_default_chi_selection_keeps_all_pheat_chis(self):
+        f = QuantumBiophysicsFolder("P")
+        assert [dof["type"] for dof in f.dof_map if dof["type"].startswith("chi")] == ["chi1", "chi2"]
 
-    def test_at_transition_continuous(self):
-        # Both branches must agree at |x| = delta
-        delta = 1.0
-        from_below = delta ** 2
-        from_above = 2.0 * delta * delta - delta ** 2  # = delta²
-        assert pytest.approx(from_below) == from_above
+    def test_max_chi_one_keeps_chi1_only(self):
+        f = QuantumBiophysicsFolder("P", max_chi=1)
+        assert [dof["type"] for dof in f.dof_map if dof["type"].startswith("chi")] == ["chi1"]
 
-    def test_above_delta_is_linear(self):
-        # |x| > delta → 2·delta·|x| - delta²
-        delta = 1.0
-        for x in (1.5, 2.0, 5.0, -2.0):
-            expected = 2.0 * delta * abs(x) - delta ** 2
-            assert pytest.approx(QuantumBiophysicsFolder._huber(x, delta)) == expected
+    def test_selective_chi_map_passes_through_to_pheat(self):
+        f = QuantumBiophysicsFolder("P", selective_chi_map={"P": ["chi1"]})
+        assert [dof["type"] for dof in f.dof_map if dof["type"].startswith("chi")] == ["chi1"]
 
-    def test_gradient_bounded_above_delta(self):
-        """d/dx Huber = ±2·delta above the transition — must not exceed 2*delta."""
-        delta = 1.0
-        eps = 1e-6
-        for x in (2.0, 5.0, 100.0):
-            grad = (QuantumBiophysicsFolder._huber(x + eps, delta) -
-                    QuantumBiophysicsFolder._huber(x - eps, delta)) / (2 * eps)
-            assert abs(grad) <= 2.0 * delta + 1e-4
-
-    def test_huber_less_than_quadratic_for_large_residual(self):
-        """Huber penalty must be strictly smaller than the old quadratic for large x."""
-        delta = 1.0
-        for x in (2.0, 3.0, 10.0):
-            assert QuantumBiophysicsFolder._huber(x, delta) < x ** 2
-
-    def test_huber_equals_quadratic_for_small_residual(self):
-        """Below delta, Huber must equal the raw quadratic."""
-        delta = 1.0
-        for x in (0.1, 0.5, 0.9):
-            assert pytest.approx(QuantumBiophysicsFolder._huber(x, delta)) == x ** 2
+    def test_selective_chi_map_intersects_with_max_chi(self):
+        f = QuantumBiophysicsFolder("P", selective_chi_map={"P": ["chi1", "chi2"]}, max_chi=1)
+        assert [dof["type"] for dof in f.dof_map if dof["type"].startswith("chi")] == ["chi1"]
 
 
-class TestGeometryIntegrityHuber:
-    """Verify that _calculate_geometry_integrity uses Huber-capped penalties."""
+class TestPheatBondLengthEncoding:
+    def test_shared_backbone_lengths_use_four_dofs_for_ga(self):
+        f = QuantumBiophysicsFolder("GA", stored_lengths="backbone")
+        assert f.total_angle_dofs == 4
+        assert f.total_length_dofs == 4
+        assert f.total_dofs == 8
+        assert {dof["type"] for dof in f.dof_map if str(dof["type"]).startswith("length:")} == {
+            "length:N-CA",
+            "length:CA-C",
+            "length:C-O",
+            "length:C-N",
+        }
 
-    def test_energy_finite_for_normal_structure(self):
-        """Geometry integrity on a well-folded structure must be finite."""
+    def test_per_residue_backbone_lengths_use_4n_minus_1_dofs(self):
+        f = QuantumBiophysicsFolder("GAP", stored_lengths="backbone", length_encoding_scope="per-residue")
+        assert f.total_length_dofs == 4 * f.n_residues - 1
+        assert f.total_dofs == f.total_angle_dofs + f.total_length_dofs
+
+    def test_shared_lengths_expand_to_exact_pheat_storage(self):
+        f = QuantumBiophysicsFolder("GA", stored_lengths="backbone", backbone_length_span=0.1)
+        values = np.zeros(f.total_dofs)
+        n_ca_idx = next(i for i, dof in enumerate(f.dof_map) if dof["type"] == "length:N-CA")
+        values[n_ca_idx] = np.pi / 2
+        residue_geometry = f.angle_vector_to_residue_geometry(values)
+        assert residue_geometry.residues[0].bond_lengths["N-CA"] == pytest.approx(1.558)
+        assert residue_geometry.residues[1].bond_lengths["N-CA"] == pytest.approx(1.558)
+        assert "C-N" in residue_geometry.residues[0].bond_lengths
+        assert "C-N" not in residue_geometry.residues[1].bond_lengths
+
+    def test_geometry_handoff_zero_controls_preserve_previous_base(self):
+        first = QuantumBiophysicsFolder("GA", stored_lengths=[])
+        first_values = np.full(first.total_dofs, 0.2)
+        base = first.angle_vector_to_residue_geometry(first_values)
+        second = QuantumBiophysicsFolder(
+            "GA",
+            stored_angles="all",
+            stored_lengths="backbone",
+            length_encoding_scope="per-residue",
+        )
+        second.set_base_residue_geometry(base)
+        carried = second.angle_vector_to_residue_geometry(np.zeros(second.total_dofs))
+        assert carried.residues[0].phi == pytest.approx(base.residues[0].phi)
+        assert carried.residues[0].psi == pytest.approx(base.residues[0].psi)
+        assert carried.residues[0].bond_lengths["N-CA"] == pytest.approx(1.458)
+
+
+class TestSamplerTranspileConfig:
+    def test_sampler_transpile_options_are_forwarded(self, monkeypatch):
+        import qtf.core.folder as folder_mod
+
+        calls = []
+
+        class FakeResult:
+            def __init__(self, n_qubits, shots):
+                self.n_qubits = n_qubits
+                self.shots = shots
+
+            def get_counts(self, index=None):
+                return {"0" * self.n_qubits: self.shots}
+
+        class FakeJob:
+            def __init__(self, n_qubits, shots):
+                self.n_qubits = n_qubits
+                self.shots = shots
+
+            def result(self):
+                return FakeResult(self.n_qubits, self.shots)
+
+        class FakeBackend:
+            def __init__(self, n_qubits):
+                self.n_qubits = n_qubits
+
+            def name(self):
+                return "fake_backend"
+
+            def run(self, circuits, shots):
+                return FakeJob(self.n_qubits, shots)
+
+        def fake_transpile(circuits, backend, **kwargs):
+            calls.append(dict(kwargs))
+            return circuits
+
+        monkeypatch.setattr(folder_mod, "transpile", fake_transpile)
+        folder = QuantumBiophysicsFolder("GA")
+        backend = FakeBackend(folder.n_qubits)
+        folder._get_angles(
+            np.zeros(folder.n_params),
+            mode="sampler",
+            backend=backend,
+            shots=8,
+            transpile_optimization_level=2,
+            transpile_seed=17,
+        )
+        assert calls[-1] == {"optimization_level": 2, "seed_transpiler": 17}
+
+        calls.clear()
+        folder._get_angles(np.zeros(folder.n_params), mode="sampler", backend=backend, shots=8)
+        assert calls[-1] == {}
+
+
+class TestGeometryIntegrityScoring:
+    def test_classic_score_includes_pheat_geometry_integrity_terms(self):
+        from qtf.scoring import score_classic_folder
+
         f = QuantumBiophysicsFolder("GAVC")
-        angles = np.full(f.total_angles, 0.1)
-        coords, labels, _ = f.build_full_structure(angles)
-        e = f._calculate_geometry_integrity(coords, labels, f.atom_to_res)
-        assert np.isfinite(e)
+        params = np.zeros(f.n_params)
+        angles = f._get_angles(params)
+        score = score_classic_folder(f, params, angle_vector=angles)
+        assert np.isfinite(score.terms["geometry_integrity"])
+        assert any(key.startswith("geometry_integrity.") for key in score.terms)
 
-    def test_huber_caps_large_deviation(self):
-        """A severe geometry distortion must contribute less than its raw quadratic."""
-        delta = _TOPOLOGY_SEED_ANGLE  # reuse import; actual value is 0.1 (not delta)
-        from qtf.core.folder import _HUBER_DELTA_GEOM, QuantumBiophysicsFolder as QBF
-        large_dev = 5.0  # Å – far beyond any physical bond stretch
-        huber_penalty = 50.0 * QBF._huber(large_dev, _HUBER_DELTA_GEOM)
-        quadratic_penalty = 50.0 * large_dev ** 2
-        assert huber_penalty < quadratic_penalty
+    def test_classic_score_uses_pheat_geometry_integrity_model(self, monkeypatch):
+        import qtf.scoring as scoring
 
-    def test_huber_delta_constant_exported(self):
-        from qtf.core.folder import _HUBER_DELTA_GEOM
-        assert isinstance(_HUBER_DELTA_GEOM, float)
-        assert _HUBER_DELTA_GEOM > 0.0
+        calls = []
+
+        class FakeGeometryScore:
+            total = 3.25
+            terms = {"ca_chirality": 1.25}
+
+        def fake_score_pheat_structure(structure, model, **kwargs):
+            calls.append((structure, model, kwargs))
+            return FakeGeometryScore()
+
+        monkeypatch.setattr(scoring, "score_pheat_structure", fake_score_pheat_structure)
+        f = QuantumBiophysicsFolder("GA")
+        params = np.zeros(f.n_params)
+        score = scoring.score_classic_folder(f, params, angle_vector=f._get_angles(params))
+        assert calls
+        assert calls[0][1] == "pheat-geometry-integrity"
+        assert score.terms["geometry_integrity"] == pytest.approx(3.25)
+        assert score.terms["geometry_integrity.ca_chirality"] == pytest.approx(1.25)
 
 
 # ---------------------------------------------------------------------------

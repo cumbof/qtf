@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.INFO)   # optional — enables progress messag
 from qtf import QuantumBiophysicsFolder, EnsembleFoldingManager
 from qtf.analysis import EnsembleRanking
 from qtf.visualization import plot_structure, plot_energy_landscape, plot_ranking
-from qtf.utils import get_ground_truth_backbone, save_pdb
+from pheat.pdbio import load_pdb, write_pdb
 ```
 
 ---
@@ -65,8 +65,12 @@ See [Core Concepts](concepts.md#three-stage-optimisation) for details.
 ## 4. Fetch the ground-truth structure
 
 ```python
-# Downloads 5AWL.pdb from RCSB on first call; uses the cached file thereafter
-true_ca = get_ground_truth_backbone("5AWL", cache_dir="./pdb_cache")
+# Downloads 5AWL.pdb from RCSB on first call; reuses the cached file thereafter.
+# cache_dir defaults to a process-wide temp directory; pass an explicit path
+# (e.g. "./pdb_cache") if you want a persistent cache in the project.
+from pheat.pdbio import load_pdb_ca_by_id
+
+true_ca = load_pdb_ca_by_id("5AWL")
 print(f"Ground truth: {len(true_ca)} Cα atoms")
 ```
 

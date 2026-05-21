@@ -1,4 +1,4 @@
-from .stability import kabsch_rmsd, StabilityAnalyzer
+from .stability import StabilityAnalyzer
 from .ranking import EnsembleRanking
 
-__all__ = ["kabsch_rmsd", "StabilityAnalyzer", "EnsembleRanking"]
+__all__ = ["StabilityAnalyzer", "EnsembleRanking"]

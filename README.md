@@ -111,7 +111,7 @@ qtf/
 
  analysis/
    ├── __init__.py
-   ├── stability.py             kabsch_rmsd(), StabilityAnalyzer
+   ├── stability.py             StabilityAnalyzer (Cα verdict layer; primitives in PHEAT)
    └── ranking.py              EnsembleRanking — comprehensive statistics & selection
 
  visualization/
@@ -119,9 +119,9 @@ qtf/
    └── plots.py                plot_structure(), plot_energy_landscape(), plot_ranking()
 
  utils/
-    ├── __init__.py
-    └── pdb.py                  save_pdb(), get_ground_truth_backbone(),
-                                calculate_physics_metrics()
+    └── __init__.py             namespace for future helpers — PDB I/O, RMSD, Rg,
+                                and ground-truth fetching now live in PHEAT
+                                (pheat.pdbio, pheat.geometry, pheat.metrics)
 ```
 
 ---
@@ -174,7 +174,7 @@ logging.basicConfig(level=logging.INFO)   # optional — enables progress messag
 from qtf import QuantumBiophysicsFolder, EnsembleFoldingManager
 from qtf.analysis import EnsembleRanking
 from qtf.visualization import plot_structure, plot_energy_landscape, plot_ranking
-from qtf.utils import get_ground_truth_backbone, save_pdb
+from pheat.pdbio import load_pdb, write_pdb
 
 # ── 1. Initialise the folder ─────────────────────────────────────────────────
 folder = QuantumBiophysicsFolder(
@@ -191,7 +191,8 @@ manager.run_ensemble(
 )
 
 # ── 3. (Optional) Fetch experimental ground-truth Cα coordinates ─────────────
-true_ca = get_ground_truth_backbone("5AWL", cache_dir="./pdb_cache")
+from pheat.pdbio import load_pdb_ca_by_id
+true_ca = load_pdb_ca_by_id("5AWL")  # cache_dir defaults to a temp dir
 
 # ── 4. Build the comprehensive ranking ──────────────────────────────────────
 ranking = EnsembleRanking.from_ensemble(
@@ -241,18 +242,18 @@ Standard quantum approaches to protein folding assign one or more qubits per tor
 
 - A circuit of `n_qubits = ⌈log₂ N⌉` qubits produces a statevector with 2^n_qubits complex amplitudes.
 - Each complex amplitude `αⱼ = |αⱼ| · e^{iφⱼ}` carries a **phase** φⱼ ∈ (−π, π].
-- The first N phases are extracted and used directly as the N torsion angles.
+- The first N phases are extracted and used as active geometry controls: angles directly, and bond lengths through bounded physical transforms.
 
-This mapping is **surjective** — every point in (−π, π]^N is reachable by some parameter vector — and **smooth**, enabling gradient-based optimisation via SLSQP.
+This mapping is **surjective** over the raw phase-control vector — every point in (−π, π]^N is reachable by some parameter vector — and smooth. Bond-length controls then map those raw phases into bounded angstrom ranges around an ideal, reference, or previous-phase baseline.
 
 The circuit depth is set as:
 
 ```
-n_qubits = max(2, ceil(log2(total_angles)))
-reps     = ceil(total_angles / n_qubits) + 2
+n_qubits = max(2, ceil(log2(total_dofs)))
+reps     = brickwork_auto_reps(total_dofs, n_qubits)
 ```
 
-The `reps` heuristic ensures the circuit has enough expressibility to cover the target angle space while remaining shallow enough for efficient classical simulation. The ansatz used is Qiskit's `EfficientSU2` with **circular entanglement** — a hardware-efficient parameterised circuit commonly used in VQE experiments. Each layer applies single-qubit SU(2) rotations followed by a ring of CX (CNOT) entangling gates.
+The default QTF brickwork ansatz applies `RY/RZ` rotations and nearest-neighbor CX entanglers. Use `--estimate-gates <heron-r2-backend>` for exact transpiled Heron R2 resources; the table below shows logical pre-transpile counts for the default brickwork circuit.
 
 ### Degrees of Freedom
 
@@ -262,7 +263,32 @@ For a protein of length L, the degrees of freedom are:
 |------|------------------|-------------|
 | φ (phi) | 1 | N–Cα–C–N backbone dihedral angle |
 | ψ (psi) | 1 | Cα–C–N–Cα backbone dihedral angle |
+| ω, τ, θ | optional | peptide dihedral and backbone bond angles from PHEAT `stored_angles` |
 | χ₁–χ₅ | 0–5 (residue-dependent) | Side-chain rotamer angles |
+| Backbone bond lengths | optional | `N-CA`, `CA-C`, `C-O`, plus one non-duplicated `C-N` per peptide link |
+
+Backbone bond lengths are stored exactly in PHEAT as `4L - 1` values. For optimization efficiency, recipes can encode them as either `shared-by-type` controls (4 DOFs total for backbone lengths) or `per-residue` controls (`4L - 1` DOFs).
+
+### Resource Scaling
+
+Assuming the default QTF brickwork circuit and a Heron R2 target:
+
+| Residues | Geometry phase | DOFs | Qubits | Reps | 1Q gates | 2Q gates | >2Q gates |
+|----------|----------------|-----:|-------:|-----:|---------:|---------:|----------:|
+| 10 | coarse φ/ψ only | 20 | 5 | 3 | 40 | 12 | 0 |
+| 10 | all backbone angles + shared lengths | 52 | 6 | 5 | 72 | 25 | 0 |
+| 10 | all backbone angles + exact backbone lengths | 87 | 7 | 6 | 98 | 36 | 0 |
+| 25 | coarse φ/ψ only | 50 | 6 | 5 | 72 | 25 | 0 |
+| 25 | all backbone angles + shared lengths | 127 | 7 | 6 | 98 | 36 | 0 |
+| 25 | all backbone angles + exact backbone lengths | 222 | 8 | 6 | 112 | 42 | 0 |
+| 50 | coarse φ/ψ only | 100 | 7 | 6 | 98 | 36 | 0 |
+| 50 | all backbone angles + shared lengths | 252 | 8 | 6 | 112 | 42 | 0 |
+| 50 | all backbone angles + exact backbone lengths | 447 | 9 | 6 | 126 | 48 | 0 |
+| 100 | coarse φ/ψ only | 200 | 8 | 6 | 112 | 42 | 0 |
+| 100 | all backbone angles + shared lengths | 502 | 9 | 6 | 126 | 48 | 0 |
+| 100 | all backbone angles + exact backbone lengths | 897 | 10 | 6 | 140 | 54 | 0 |
+
+The logical counts above do not include measurement-basis rotations. Transpiled Heron R2 counts depend on the selected backend calibration, coupling, and optimization level and are written into reports when `--estimate-gates` is enabled.
 
 **Side-chain torsion counts by residue:**
 
@@ -666,10 +692,11 @@ P_aligned  = P_c @ R + mean(Q)             # P superimposed on Q
 The reflection correction ensures that **R** is a proper rotation (det = +1) rather than an improper rotation / reflection. This is essential when comparing mirror-image conformations.
 
 ```python
-from qtf.analysis import kabsch_rmsd
+from pheat.geometry import kabsch_rmsd, kabsch_align
 import numpy as np
 
-rmsd, pred_aligned = kabsch_rmsd(pred_ca, true_ca)
+rmsd = kabsch_rmsd(true_ca.tolist(), pred_ca.tolist())
+pred_aligned = np.asarray(kabsch_align(true_ca.tolist(), pred_ca.tolist()), dtype=float)
 print(f"Backbone Cα RMSD: {rmsd:.3f} Å")
 # pred_aligned is pred_ca rotated and translated to best overlap with true_ca
 ```
@@ -770,56 +797,55 @@ fig.show()
 
 ## PDB Utilities
 
+PDB I/O, Kabsch alignment, RMSD, and ground-truth fetching live in PHEAT.
+
 ### Saving a Prediction
 
 ```python
-from qtf.utils import save_pdb
+from pheat.pdbio import write_pdb
+from qtf.structures import qtf_structure_to_pheat
 
-save_pdb(
-    coords   = best_e["coords"],      # all-atom coords, shape (N_atoms, 3)
-    labels   = best_e["labels"],      # [(res_id, atom_name, element), …]
-    sequence = folder.sequence,       # single-letter amino acid string
-    filename = "prediction.pdb",      # output path
-    energy   = best_e["energy"],      # stored in REMARK 1
+structure = qtf_structure_to_pheat(
+    coords=best_e["coords"],          # all-atom coords, shape (N_atoms, 3)
+    labels=best_e["labels"],          # [(res_id, atom_name, element), …]
+    sequence=folder.sequence,
 )
+write_pdb(structure, "prediction.pdb", remarks=[f"ENERGY: {best_e['energy']:.3f}"])
 ```
 
 The output is a valid **PDB ATOM record file** with:
 - Chain A
 - Occupancy 1.00, B-factor 0.00
-- Energy stored in `REMARK   1 ENERGY: {value:.3f}`
+- Energy stored in `REMARK   1 ENERGY: {value:.3f}` (via PHEAT's `remarks=` parameter)
 
 The file is directly viewable in PyMOL, UCSF Chimera/ChimeraX, VMD, Mol*, or any PDB-compatible structure viewer.
 
 ### Loading Ground-Truth Coordinates
 
 ```python
-from qtf.utils import get_ground_truth_backbone
+from pheat.pdbio import load_pdb_ca_by_id
 
-# Downloads 5AWL.pdb from RCSB on first call; cached thereafter
-true_ca = get_ground_truth_backbone("5AWL", cache_dir="./pdb_cache")
-# Returns ndarray, shape (N_residues, 3) — Cα atoms only, first MODEL
+true_ca = load_pdb_ca_by_id("5AWL")  # cache_dir defaults to a temp dir
+# shape (N_residues, 3) — Cα atoms only, first MODEL
+
+# Lower-level alternative if you also want the full HeavyAtomStructure:
+#   from pheat.pdbio import load_pdb_by_id
+#   structure = load_pdb_by_id("5AWL", "./pdb_cache")  # explicit cache_dir
 ```
 
-**Behaviour:**
-1. Constructs the filename `{cache_dir}/{PDB_ID}.pdb`.
-2. If the file does not exist, downloads it from `https://files.rcsb.org/download/{PDB_ID}.pdb`.
-3. Parses only lines starting with `ATOM` where columns 12–15 contain `CA`.
-4. Stops at the first `ENDMDL` record (picks the first NMR model or the single X-ray model).
-5. Returns the Cα coordinates as a float64 ndarray.
-
-**Tip:** For NMR ensembles with many models, this always returns Model 1. For proper NMR ensemble analysis, download the file manually and parse the model you need.
+**Tip:** For NMR ensembles with many models, the underlying parser returns Model 1 by default. Pass `model=N` (or `model=None` to keep all atoms) via `load_pdb_by_id(..., model=N)` for other selections.
 
 When aligning predictions against a ground truth, note that the sequence lengths may differ (e.g., if the experimental structure has additional residues). Both `EnsembleRanking.from_ensemble` and `plot_structure` truncate to the shorter of the two before computing RMSD or alignment.
 
 ### Computing Structural Metrics
 
 ```python
-from qtf.utils import calculate_physics_metrics
+from pheat.geometry import radius_of_gyration
 import numpy as np
 
 ca_coords = np.array(...)   # shape (N_residues, 3)
-end_to_end, rg = calculate_physics_metrics(ca_coords)
+end_to_end = float(np.linalg.norm(ca_coords[0] - ca_coords[-1]))
+rg = float(radius_of_gyration(ca_coords.tolist()))
 print(f"End-to-end distance : {end_to_end:.2f} Å")
 print(f"Radius of gyration  : {rg:.2f} Å")
 ```
@@ -957,13 +983,16 @@ EnsembleRanking.from_ensemble(
 
 ### `kabsch_rmsd`
 
-```python
-from qtf.analysis import kabsch_rmsd
+Lives in PHEAT — see `pheat.geometry.kabsch_rmsd`.
 
-rmsd, P_aligned = kabsch_rmsd(P: ndarray, Q: ndarray)
+```python
+from pheat.geometry import kabsch_rmsd, kabsch_align
+
+rmsd = kabsch_rmsd(reference, target)        # float, both inputs (N,3) sequences
+aligned = kabsch_align(reference, target)    # target rotated/translated onto reference
 ```
 
-Both `P` and `Q` must have shape `(N, 3)`. Returns `(rmsd: float, P_aligned: ndarray)` where `P_aligned` is `P` optimally rotated and translated to minimise RMSD with `Q`.
+Note: PHEAT's signature is `(reference, target)` (not QTF's old `(P, Q)`), and `kabsch_rmsd` returns just the float. Use `kabsch_align` when you also need the aligned coordinates.
 
 ---
 
@@ -972,12 +1001,19 @@ Both `P` and `Q` must have shape `(N, 3)`. Returns `(rmsd: float, P_aligned: nda
 ```python
 from qtf.analysis import StabilityAnalyzer
 
-matrix = StabilityAnalyzer.pairwise_rmsd_matrix(structures: list[ndarray]) -> ndarray
 summary = StabilityAnalyzer.convergence_summary(rmsd_matrix: ndarray) -> dict
 ```
 
-- `pairwise_rmsd_matrix`: all-vs-all Kabsch RMSD matrix, shape `(M, M)`, diagonal = 0.
-- `convergence_summary`: returns `{"avg_pairwise_rmsd", "max_pairwise_rmsd", "min_nonzero_rmsd", "verdict"}`.
+`convergence_summary` wraps `pheat.metrics.ensemble_rmsd_stats` and adds the QTF protein-Cα verdict (STABLE/FLEXIBLE/UNSTABLE). It returns `{"avg_pairwise_rmsd", "max_pairwise_rmsd", "min_nonzero_rmsd", "verdict"}`.
+
+For the underlying pairwise RMSD matrix and raw stats, use PHEAT directly:
+
+```python
+from pheat.metrics import pairwise_rmsd_matrix, ensemble_rmsd_stats
+
+matrix = pairwise_rmsd_matrix(structures, atom_set="ca")  # (M, M) symmetric
+stats = ensemble_rmsd_stats(matrix)                       # avg/max/min_nonzero/ensemble_size
+```
 
 ---
 
@@ -1027,39 +1063,54 @@ fig = plot_ranking(
 
 ### `save_pdb`
 
-```python
-from qtf.utils import save_pdb
+Lives in PHEAT — see `pheat.pdbio.write_pdb`.
 
-save_pdb(
-    coords: ndarray,
-    labels: list,
-    sequence: str,
-    filename: str = "structure.pdb",
-    energy: float = 0.0,
-) -> None
+```python
+from pheat.pdbio import write_pdb
+from qtf.structures import qtf_structure_to_pheat
+
+write_pdb(
+    qtf_structure_to_pheat(coords, labels, sequence),
+    "structure.pdb",
+    remarks=[f"ENERGY: {energy:.3f}"],   # arbitrary REMARK 1 lines
+)
 ```
 
 ---
 
 ### `get_ground_truth_backbone`
 
-```python
-from qtf.utils import get_ground_truth_backbone
+Use `pheat.pdbio.load_pdb_ca_by_id` (the previous QTF helper has been removed). The PHEAT API exposes three layered functions: a one-liner Cα convenience, a structure-returning loader, and a low-level path-returning fetcher.
 
-true_ca = get_ground_truth_backbone(
-    pdb_id: str,
-    cache_dir: str = ".",
-) -> ndarray  # shape (N_residues, 3)
+```python
+from pheat.pdbio import load_pdb_ca_by_id, load_pdb_by_id, fetch_pdb
+
+# Easiest: one-liner returning a (N, 3) numpy array of Cα coordinates.
+true_ca = load_pdb_ca_by_id("5AWL")          # temp cache (auto)
+true_ca = load_pdb_ca_by_id("5AWL", "./pdb_cache")  # explicit cache
+
+# Return the full HeavyAtomStructure instead:
+structure = load_pdb_by_id("5AWL")
+
+# Or just the path (e.g., to hand to another tool):
+path = fetch_pdb("5AWL")                       # PDB format
+path = fetch_pdb("5AWL", format="cif")         # mmCIF format
 ```
+
+When `cache_dir` is omitted, PHEAT lazily creates a process-wide temp directory and reuses it across calls.
 
 ---
 
 ### `calculate_physics_metrics`
 
-```python
-from qtf.utils import calculate_physics_metrics
+Use PHEAT primitives directly:
 
-end_to_end, rg = calculate_physics_metrics(coords: ndarray) -> tuple[float, float]
+```python
+import numpy as np
+from pheat.geometry import radius_of_gyration
+
+end_to_end = float(np.linalg.norm(coords[0] - coords[-1]))
+rg = float(radius_of_gyration(coords.tolist()))
 ```
 
 ---

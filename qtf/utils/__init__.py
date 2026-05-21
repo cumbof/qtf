@@ -1,3 +1,8 @@
-from .pdb import save_pdb, get_ground_truth_backbone, calculate_physics_metrics
+"""QTF utilities (kept as a namespace for future helpers).
 
-__all__ = ["save_pdb", "get_ground_truth_backbone", "calculate_physics_metrics"]
+PDB I/O, Kabsch alignment, RMSD, radius of gyration, and ground-truth
+fetching now live in PHEAT. See ``pheat.pdbio``, ``pheat.geometry``, and
+``pheat.metrics``.
+"""
+
+__all__: list[str] = []
