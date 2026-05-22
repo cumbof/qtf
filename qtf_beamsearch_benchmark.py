@@ -286,7 +286,8 @@ def build_ca_coords(folder: runner.QuantumBiophysicsFolder, angle_vec: np.ndarra
         folder._get_angles = lambda _params: angle_vec
         dummy_params = np.zeros(folder.n_params, dtype=float)
         angle_vec2 = folder._get_angles(dummy_params)
-        coords, _, _ = folder.build_full_structure(angle_vec2)
+        builder = getattr(folder, "build_output_structure", folder.build_full_structure)
+        coords, _, _ = builder(angle_vec2)
         ca = np.array([coords[i] for i, lbl in enumerate(folder.static_labels) if lbl[1] == "CA"])
         return ca
     finally:
@@ -299,7 +300,8 @@ def build_full_coords(folder: runner.QuantumBiophysicsFolder, angle_vec: np.ndar
         folder._get_angles = lambda _params: angle_vec
         dummy_params = np.zeros(folder.n_params, dtype=float)
         angle_vec2 = folder._get_angles(dummy_params)
-        coords, labels, bonds = folder.build_full_structure(angle_vec2)
+        builder = getattr(folder, "build_output_structure", folder.build_full_structure)
+        coords, labels, bonds = builder(angle_vec2)
         return coords, labels, bonds
     finally:
         folder._get_angles = orig_get_angles
@@ -485,6 +487,8 @@ def main():
     ap.add_argument("--gromacs_maxwarn", type=int, default=2)
     ap.add_argument("--gromacs_rerank", type=int, default=1,
                     help="1 to rerank final minimized outputs by GROMACS potential energy when available")
+    ap.add_argument("--hard_clash_reject_A", type=float, default=0.75,
+                    help="Reject beam candidates whose QTF hard-clash minimum distance is below this Angstrom threshold. 0 disables.")
     ap.add_argument("--random_seed", type=int, default=123)
     args = ap.parse_args()
 
@@ -596,6 +600,9 @@ def main():
                 candidate[parent.angles.size:n_prefix] = local_vec
 
                 E, terms = eval_energy_terms(folder_k, candidate)
+                hard_min = float(terms.get("hard_clash_min_dist", 0.0) or 0.0)
+                if float(args.hard_clash_reject_A) > 0.0 and hard_min > 0.0 and hard_min < float(args.hard_clash_reject_A):
+                    continue
                 st = State(
                     angles=candidate,
                     depth=depth,
@@ -609,6 +616,12 @@ def main():
                     local_choice=f"res{depth-1}_opt{opt_idx}",
                 )
                 new_states.append(st)
+
+        if not new_states:
+            raise RuntimeError(
+                f"All beam candidates were rejected by hard-clash filter at depth {depth}; "
+                f"try lowering --hard_clash_reject_A or increasing the beam/search space."
+            )
 
         new_states = dedup_states_by_backbone(folder_k, new_states, round_deg=float(args.step_deg))
         new_states.sort(key=lambda x: x.energy)
@@ -665,7 +678,7 @@ def main():
     for i, st in enumerate(beam, start=1):
         angle_full = st.angles
         E, terms = eval_energy_terms(full_folder, angle_full)
-        coords_full, labels_full, _ = build_full_coords(full_folder, angle_full)
+        coords_full, labels_full, _ = getattr(full_folder, "build_output_structure", full_folder.build_full_structure)(angle_full)
         ca = np.array([coords_full[j] for j, lbl in enumerate(labels_full) if lbl[1] == "CA"])
         sidechain_centroids = full_folder.compute_sidechain_centroids(coords_full, labels_full)
         clash_metrics = nonlocal_heavy_clash_metrics(coords_full, labels_full)

@@ -57,6 +57,11 @@ def prepare_pdb_for_gromacs(src_pdb: str, dst_pdb: Path) -> None:
     Viewers tolerate that, but pdb2gmx treats non-contiguous repeated residue IDs
     as separate residue blocks. This pass preserves coordinates but groups and
     serializes atoms by residue.
+
+    It also normalizes a small set of nonstandard atom names emitted by the
+    Rosetta-backed path into force-field-compatible names. In practice the
+    important case is PRO backbone NV -> N, which lets pdb2gmx map the residue
+    to the standard PRO template.
     """
     atom_order = {
         "N": 0,
@@ -70,6 +75,11 @@ def prepare_pdb_for_gromacs(src_pdb: str, dst_pdb: Path) -> None:
         "O": 91,
         "OXT": 92,
     }
+
+    def rewrite_atom_name(line: str, atom_name: str) -> str:
+        name_field = f"{atom_name:>4s}"[:4]
+        return f"{line[:12]}{name_field}{line[16:]}"
+
     records = []
     remarks = []
     with open(src_pdb) as handle:
@@ -80,12 +90,21 @@ def prepare_pdb_for_gromacs(src_pdb: str, dst_pdb: Path) -> None:
             if not line.startswith(("ATOM  ", "HETATM")):
                 continue
             atom_name = line[12:16].strip()
+            res_name = line[17:20].strip()
             chain_id = line[21].strip() or "A"
             try:
                 resseq = int(line[22:26])
             except ValueError:
                 resseq = original_index
             icode = line[26].strip()
+
+            # Rosetta's PRO backbone nitrogen can appear as NV in the emitted PDB.
+            # pdb2gmx does not recognize that name for standard amino-acid templates,
+            # so rewrite it to the conventional backbone N here.
+            if res_name == "PRO" and atom_name == "NV":
+                atom_name = "N"
+                line = rewrite_atom_name(line, atom_name)
+
             order = atom_order.get(atom_name, 10 + original_index)
             records.append((chain_id, resseq, icode, order, original_index, line))
 

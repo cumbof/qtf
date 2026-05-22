@@ -887,6 +887,20 @@ class QuantumBiophysicsFolder:
 
         return np.array(coords), labels, bonds
 
+    def build_output_structure(self, angle_vector):
+        """
+        Build the structure that should be emitted to downstream consumers.
+
+        In Rosetta stage-3 mode, this returns the actual PyRosetta pose scored
+        for the supplied torsions so saved PDBs and RMSDs reflect the same
+        structure Rosetta evaluated.
+        """
+        if self.current_stage == 3 and self.stage3_backend == "rosetta":
+            self._score_stage3_rosetta(angle_vector, return_terms=True)
+            if self._last_rosetta_pose is not None and self.last_energy_terms.get("rosetta_error", 1.0) == 0.0:
+                return self._pose_to_coords_labels_bonds(self._last_rosetta_pose)
+        return self.build_full_structure(angle_vector)
+
     def _assign_lj_type(self, rid: int, atom_name: str, elem: str) -> str:
         """Assign a compact LJ atom type from residue, atom name, and element."""
         aa = self.sequence[int(rid)] if 0 <= int(rid) < self.n_residues else "X"
@@ -1273,6 +1287,7 @@ class QuantumBiophysicsFolder:
             "rama": 0.0,
             "geometry": 0.0,
             "omega": 0.0,
+            "hard_clash": 0.0,
             "adjacent_heavy_sterics": 0.0,
             "adjacent_backbone_sterics": 0.0,
             "reference_offset": 0.0,
@@ -1458,6 +1473,43 @@ class QuantumBiophysicsFolder:
         _add_lj_from_mask(vdw_mask, 1.0)
         _add_lj_from_mask(vdw_14_mask, LJ_14_SCALE)
 
+        # 4b. HARD CLASH WALL
+        # Keep the smoothed LJ term usable for normal contacts, but add a steep
+        # guardrail for physically impossible heavy-atom overlaps. This prevents
+        # beam search from exploiting clipped LJ repulsion by preserving structures
+        # with sub-angstrom nonbonded contacts.
+        HARD_CLASH_MIN_A = float(os.getenv("QTF_HARD_CLASH_MIN_A", "1.20"))
+        HARD_CLASH_SCALE = float(os.getenv("QTF_HARD_CLASH_SCALE", "5000.0"))
+        HARD_CLASH_POWER = float(os.getenv("QTF_HARD_CLASH_POWER", "4.0"))
+        HARD_CLASH_14_SCALE = float(os.getenv("QTF_HARD_CLASH_14_SCALE", "0.25"))
+        hard_clash_min_dist = float("nan")
+        hard_clash_count = 0.0
+
+        def _hard_clash_from_mask(mask, pair_scale):
+            if not np.any(mask):
+                return 0.0, float("nan"), 0
+            r = D[mask]
+            finite = np.isfinite(r)
+            if not np.any(finite):
+                return 0.0, float("nan"), 0
+            r = r[finite]
+            min_dist = float(np.min(r))
+            shortfall = np.clip(HARD_CLASH_MIN_A - r, 0.0, None)
+            active = shortfall > 0.0
+            if not np.any(active):
+                return 0.0, min_dist, 0
+            denom = max(HARD_CLASH_MIN_A, 1e-6)
+            penalties = HARD_CLASH_SCALE * pair_scale * (shortfall[active] / denom) ** HARD_CLASH_POWER
+            return float(np.sum(penalties)), min_dist, int(np.sum(active))
+
+        e_hard_full, min_full, n_full = _hard_clash_from_mask(vdw_mask, 1.0)
+        e_hard_14, min_14, n_14 = _hard_clash_from_mask(vdw_14_mask, HARD_CLASH_14_SCALE)
+        add_term("hard_clash", e_hard_full + e_hard_14)
+        hard_mins = [x for x in (min_full, min_14) if np.isfinite(x)]
+        if hard_mins:
+            hard_clash_min_dist = float(min(hard_mins))
+        hard_clash_count = float(n_full + n_14)
+
         # LOCALS
         angle_dict = self._angle_dict_from_vector(angle_vec)
 
@@ -1532,6 +1584,12 @@ class QuantumBiophysicsFolder:
             "e2e_slack": float(slack_e2e) if len(ca_indices) >= 2 else 0.0,
             "vdw_pairs_full": float(np.sum(vdw_mask)) if "vdw_mask" in locals() else 0.0,
             "vdw_pairs_14": float(np.sum(vdw_14_mask)) if "vdw_14_mask" in locals() else 0.0,
+            "hard_clash_min_dist": float(hard_clash_min_dist) if np.isfinite(hard_clash_min_dist) else 0.0,
+            "hard_clash_count": float(hard_clash_count),
+            "hard_clash_min_A": float(HARD_CLASH_MIN_A),
+            "hard_clash_scale": float(HARD_CLASH_SCALE),
+            "hard_clash_power": float(HARD_CLASH_POWER),
+            "hard_clash_14_scale": float(HARD_CLASH_14_SCALE),
 
             # geometry diagnostics
             "geom_pro_ring": float(geom_subterms["pro_ring"]),
