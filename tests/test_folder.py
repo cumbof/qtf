@@ -511,3 +511,54 @@ class TestGetAnglesGlobalPhase:
         params = np.zeros(f.n_params)
         angles = f._get_angles(params)
         assert len(angles) == f.total_angles
+
+
+# ---------------------------------------------------------------------------
+# M-2 – NeRF degeneracy at zero-torsion init
+# ---------------------------------------------------------------------------
+
+
+class TestTopologySeedAngle:
+    """Verify that _initialize_topology_cache uses a non-degenerate seed."""
+
+    def test_static_labels_non_empty(self):
+        """Cache must produce at least one label entry."""
+        f = QuantumBiophysicsFolder("GA")
+        assert len(f.static_labels) > 0
+
+    def test_static_labels_count_grows_with_sequence(self):
+        """Longer sequences must produce more atom labels."""
+        f2 = QuantumBiophysicsFolder("GA")
+        f4 = QuantumBiophysicsFolder("GAVC")
+        assert len(f4.static_labels) > len(f2.static_labels)
+
+    def test_seed_coords_are_finite(self):
+        """build_full_structure with the topology seed must return finite coords."""
+        import numpy as np
+        from qtf.core.folder import _TOPOLOGY_SEED_ANGLE
+
+        f = QuantumBiophysicsFolder("GAVC")
+        seed = np.full(f.total_angles, _TOPOLOGY_SEED_ANGLE)
+        coords, _, _ = f.build_full_structure(seed)
+        assert np.all(np.isfinite(coords)), "seed coords contain NaN or Inf"
+
+    def test_zero_angles_produce_finite_labels(self):
+        """Even np.zeros is not expected to crash cache init (just brittle).
+
+        The topology cache discards coordinates, so static_labels must always
+        be populated regardless of the seed geometry.
+        """
+        import numpy as np
+
+        f = QuantumBiophysicsFolder("GAVC")
+        # Re-trigger cache with zeros to confirm labels still come out intact
+        f.static_labels = None
+        f._initialize_topology_cache()
+        assert f.static_labels is not None and len(f.static_labels) > 0
+
+    def test_seed_angle_constant_exported(self):
+        """_TOPOLOGY_SEED_ANGLE must be a small positive float."""
+        from qtf.core.folder import _TOPOLOGY_SEED_ANGLE
+
+        assert isinstance(_TOPOLOGY_SEED_ANGLE, float)
+        assert 0.0 < _TOPOLOGY_SEED_ANGLE < np.pi

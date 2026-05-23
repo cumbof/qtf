@@ -40,6 +40,15 @@ _COULOMB_PREFACTOR: float = 332.0637
 _DIELECTRIC: float = 4.0
 
 
+# Seed angle (rad) used when calling build_full_structure inside
+# _initialize_topology_cache.  All-zero torsions place every backbone atom
+# along the same line (collinear), zeroing the cross products in _nerf_step
+# and making the reference frame degenerate.  A small non-zero value avoids
+# this without affecting the cache output, which discards coordinates and
+# only retains atom labels.
+_TOPOLOGY_SEED_ANGLE: float = 0.1
+
+
 class QuantumBiophysicsFolder:
     """Hybrid quantum-classical protein folder."""
 
@@ -407,8 +416,24 @@ class QuantumBiophysicsFolder:
         return np.array(coords), labels, bonds
 
     def _initialize_topology_cache(self) -> None:
-        """Pre-compute static atom properties for vectorised energy evaluation."""
-        dummy_coords, self.static_labels, _ = self.build_full_structure(np.zeros(self.total_angles))
+        """Pre-compute static atom properties for vectorised energy evaluation.
+
+        A single call to ``build_full_structure`` is made here to harvest the
+        atom label list (``static_labels``).  The resulting coordinates are
+        **discarded** — only the labels, element symbols, and residue-index
+        mapping are retained for use by the energy function.
+
+        The seed torsion vector is ``_TOPOLOGY_SEED_ANGLE`` (0.1 rad) rather
+        than all-zeros.  All-zero torsions place every successive backbone
+        atom exactly along the same direction, making every cross product in
+        ``_nerf_step`` identically zero.  Although the 1e-9 floor in the
+        normalisation prevents a division-by-zero crash, the resulting
+        reference frames are degenerate and the coordinates are meaningless.
+        Using a small non-zero seed is costless (coordinates are unused) and
+        removes this brittleness.
+        """
+        seed = np.full(self.total_angles, _TOPOLOGY_SEED_ANGLE)
+        dummy_coords, self.static_labels, _ = self.build_full_structure(seed)
         n_atoms = len(dummy_coords)
 
         self.atom_to_res = np.array([x[0] for x in self.static_labels], dtype=int)
