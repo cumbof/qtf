@@ -48,6 +48,15 @@ _DIELECTRIC: float = 4.0
 # only retains atom labels.
 _TOPOLOGY_SEED_ANGLE: float = 0.1
 
+# Huber-loss transition threshold for geometry-integrity penalties (Å or Å³).
+# Below this threshold each penalty is quadratic (x²), preserving a smooth
+# gradient signal for small deviations.  Above it the loss grows only
+# linearly (2·δ·|x| − δ²), preventing a single severely distorted bond or
+# wrong-chirality centre from dominating the gradient and stalling the
+# optimiser.  Value of 1.0 Å corresponds to roughly one bond length of
+# distortion before saturation kicks in.
+_HUBER_DELTA_GEOM: float = 1.0
+
 
 class QuantumBiophysicsFolder:
     """Hybrid quantum-classical protein folder."""
@@ -712,9 +721,67 @@ class QuantumBiophysicsFolder:
                     energy_pi -= 5.0 * np.exp(-(dist - 3.8) ** 2)
         return energy_pi
 
+    @staticmethod
+    def _huber(x: float, delta: float) -> float:
+        """Huber loss: quadratic for |x| ≤ delta, linear beyond.
+
+        The Huber loss is continuously differentiable at the transition point
+        |x| = delta (both branches equal delta² and their derivatives equal
+        ±2·delta there), so the combined landscape remains smooth.
+
+        For |x| ≤ delta:  L = x²
+        For |x| > delta:  L = 2·delta·|x| − delta²
+
+        Parameters
+        ----------
+        x:
+            Residual, e.g. a bond-length deviation in Å or a volume error
+            in Å³.
+        delta:
+            Transition threshold.  Choose to match the scale of tolerable
+            distortion; ``_HUBER_DELTA_GEOM`` (1.0 Å) is the default for all
+            geometry-integrity terms.
+
+        Returns
+        -------
+        float
+            Non-negative Huber-loss value.
+        """
+        ax = abs(x)
+        if ax <= delta:
+            return float(x * x)
+        return float(2.0 * delta * ax - delta * delta)
+
     def _calculate_geometry_integrity(
         self, coords: np.ndarray, labels: list, atom_to_res_idx: np.ndarray
     ) -> float:
+        """Evaluate hard geometry constraints as soft energy penalties.
+
+        Three classes of constraint are checked for each residue:
+
+        1. **Pro ring closure** — the CD–N bond distance in proline must be
+           close to 1.47 Å.  Deviations beyond 0.1 Å (the dead zone) are
+           penalised.
+        2. **Cα chirality** — the scalar triple product
+           ``(N−Cα) × (C−Cα) · (Cβ−Cα)`` must be positive (L-amino acid).
+           Inversion or collapse of the tetrahedron is penalised whenever
+           the volume drops below 1.0 Å³.
+        3. **Peptide planarity / twist** — the dihedral formed by consecutive
+           Cα–C and N–Cα bonds should be close to trans (180°) for all
+           residue pairs except *X*–Pro links where cis is permitted.
+
+        Penalties (1) and (2) previously used unbounded quadratics, which
+        caused gradient explosion when a single geometry was far from ideal:
+        a bond stretched by 3 Å contributed O(450) kcal/mol and completely
+        drowned out all other terms, stalling the optimiser.  Both are now
+        replaced by a **Huber loss** with ``_HUBER_DELTA_GEOM`` = 1.0 Å
+        (see ``_huber``):
+
+        * Quadratic below δ — gradient proportional to deviation (smooth).
+        * Linear above δ  — gradient capped at 2·δ (bounded influence).
+
+        Penalty (3) is already linear and is left unchanged.
+        """
         energy = 0.0
         res_map: dict[int, dict[str, int]] = {}
         for k, lbl in enumerate(labels):
@@ -727,8 +794,9 @@ class QuantumBiophysicsFolder:
             res_name = self.sequence[r]
             if res_name == "P" and "CD" in atoms and "N" in atoms:
                 d = np.linalg.norm(coords[atoms["CD"]] - coords[atoms["N"]])
-                if abs(d - 1.47) > 0.1:
-                    energy += 50.0 * (d - 1.47) ** 2
+                dev = d - 1.47
+                if abs(dev) > 0.1:
+                    energy += 50.0 * self._huber(dev, _HUBER_DELTA_GEOM)
             if all(k in atoms for k in ("CA", "N", "C", "CB")):
                 ca = coords[atoms["CA"]]
                 n = coords[atoms["N"]]
@@ -736,7 +804,7 @@ class QuantumBiophysicsFolder:
                 cb = coords[atoms["CB"]]
                 volume = np.dot(np.cross(n - ca, c - ca), cb - ca)
                 if volume < 1.0:
-                    energy += 50.0 * (1.0 - volume) ** 2
+                    energy += 50.0 * self._huber(1.0 - volume, _HUBER_DELTA_GEOM)
             if r < self.n_residues - 1:
                 next_atoms = res_map.get(r + 1, {})
                 if all(k in atoms for k in ("C", "CA")) and all(k in next_atoms for k in ("N", "CA")):

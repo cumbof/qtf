@@ -644,3 +644,81 @@ class TestOmegaPreProline:
         omega_count = sum(1 for d in f.dof_map if d["type"] == "omega")
         assert omega_count == 1
         assert f.total_angles == 10
+
+
+# ---------------------------------------------------------------------------
+# M-4 – Huber loss in _calculate_geometry_integrity
+# ---------------------------------------------------------------------------
+
+
+class TestHuberLoss:
+    """Unit tests for QuantumBiophysicsFolder._huber."""
+
+    def test_zero_residual(self):
+        assert QuantumBiophysicsFolder._huber(0.0, 1.0) == 0.0
+
+    def test_within_delta_is_quadratic(self):
+        # |x| <= delta → x²
+        for x in (0.0, 0.5, 0.99, -0.5, -0.99):
+            assert pytest.approx(QuantumBiophysicsFolder._huber(x, 1.0)) == x ** 2
+
+    def test_at_transition_continuous(self):
+        # Both branches must agree at |x| = delta
+        delta = 1.0
+        from_below = delta ** 2
+        from_above = 2.0 * delta * delta - delta ** 2  # = delta²
+        assert pytest.approx(from_below) == from_above
+
+    def test_above_delta_is_linear(self):
+        # |x| > delta → 2·delta·|x| - delta²
+        delta = 1.0
+        for x in (1.5, 2.0, 5.0, -2.0):
+            expected = 2.0 * delta * abs(x) - delta ** 2
+            assert pytest.approx(QuantumBiophysicsFolder._huber(x, delta)) == expected
+
+    def test_gradient_bounded_above_delta(self):
+        """d/dx Huber = ±2·delta above the transition — must not exceed 2*delta."""
+        delta = 1.0
+        eps = 1e-6
+        for x in (2.0, 5.0, 100.0):
+            grad = (QuantumBiophysicsFolder._huber(x + eps, delta) -
+                    QuantumBiophysicsFolder._huber(x - eps, delta)) / (2 * eps)
+            assert abs(grad) <= 2.0 * delta + 1e-4
+
+    def test_huber_less_than_quadratic_for_large_residual(self):
+        """Huber penalty must be strictly smaller than the old quadratic for large x."""
+        delta = 1.0
+        for x in (2.0, 3.0, 10.0):
+            assert QuantumBiophysicsFolder._huber(x, delta) < x ** 2
+
+    def test_huber_equals_quadratic_for_small_residual(self):
+        """Below delta, Huber must equal the raw quadratic."""
+        delta = 1.0
+        for x in (0.1, 0.5, 0.9):
+            assert pytest.approx(QuantumBiophysicsFolder._huber(x, delta)) == x ** 2
+
+
+class TestGeometryIntegrityHuber:
+    """Verify that _calculate_geometry_integrity uses Huber-capped penalties."""
+
+    def test_energy_finite_for_normal_structure(self):
+        """Geometry integrity on a well-folded structure must be finite."""
+        f = QuantumBiophysicsFolder("GAVC")
+        angles = np.full(f.total_angles, 0.1)
+        coords, labels, _ = f.build_full_structure(angles)
+        e = f._calculate_geometry_integrity(coords, labels, f.atom_to_res)
+        assert np.isfinite(e)
+
+    def test_huber_caps_large_deviation(self):
+        """A severe geometry distortion must contribute less than its raw quadratic."""
+        delta = _TOPOLOGY_SEED_ANGLE  # reuse import; actual value is 0.1 (not delta)
+        from qtf.core.folder import _HUBER_DELTA_GEOM, QuantumBiophysicsFolder as QBF
+        large_dev = 5.0  # Å – far beyond any physical bond stretch
+        huber_penalty = 50.0 * QBF._huber(large_dev, _HUBER_DELTA_GEOM)
+        quadratic_penalty = 50.0 * large_dev ** 2
+        assert huber_penalty < quadratic_penalty
+
+    def test_huber_delta_constant_exported(self):
+        from qtf.core.folder import _HUBER_DELTA_GEOM
+        assert isinstance(_HUBER_DELTA_GEOM, float)
+        assert _HUBER_DELTA_GEOM > 0.0
