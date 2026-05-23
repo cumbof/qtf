@@ -308,6 +308,16 @@ class QuantumBiophysicsFolder:
         entry ``{"res": i, "type": "omega"}`` the value is read from the angle
         vector and used directly; otherwise ω defaults to π.
 
+        Implementation note — O(1) atom lookup
+        ----------------------------------------
+        Atom positions are accumulated in a plain Python list ``coords``.
+        Earlier versions located backbone atoms via a ``get_idx`` closure that
+        scanned ``labels`` in reverse — O(N) per call, making the whole
+        function O(N²) in the number of residues.  The current implementation
+        maintains ``label_idx``, a ``dict[(res_id, atom_name) → list_index]``
+        that is updated whenever an atom is appended through the ``_append``
+        helper, giving O(1) lookups throughout.
+
         Returns
         -------
         coords : ndarray, shape (N_atoms, 3)
@@ -318,28 +328,30 @@ class QuantumBiophysicsFolder:
         labels: list[tuple] = []
         bonds: list[tuple] = []
 
+        # O(1) backbone-atom lookup — keeps (res_id, atom_name) → list index.
+        # Updated in lock-step with every labels.append() via _append() below.
+        label_idx: dict[tuple[int, str], int] = {}
+
+        def _append(res_id: int, atom_name: str, element: str, pos: np.ndarray) -> int:
+            """Append one atom and register it in label_idx; return its index."""
+            idx = len(coords)
+            coords.append(pos)
+            labels.append((res_id, atom_name, element))
+            label_idx[(res_id, atom_name)] = idx
+            return idx
+
         angle_dict = {f"{x['res']}_{x['type']}": val for x, val in zip(self.dof_map, angle_vector)}
 
         # Seed backbone frame
-        coords.extend([
-            np.array([0, 0, 0]),
-            np.array([1.46, 0, 0]),
-            np.array([1.46 + 1.51 * np.cos(1.9), 1.51 * np.sin(1.9), 0]),
-        ])
-        labels.extend([(0, "N", "N"), (0, "CA", "C"), (0, "C", "C")])
+        _append(0, "N", "N", np.array([0.0, 0.0, 0.0]))
+        _append(0, "CA", "C", np.array([1.46, 0.0, 0.0]))
+        _append(0, "C", "C", np.array([1.46 + 1.51 * np.cos(1.9), 1.51 * np.sin(1.9), 0.0]))
         bonds.extend([(0, 1), (1, 2)])
 
         for i in range(self.n_residues):
-
-            def get_idx(r: int, n: str) -> int:
-                for k in range(len(labels) - 1, -1, -1):
-                    if labels[k][0] == r and labels[k][1] == n:
-                        return k
-                return -1
-
-            idx_N = get_idx(i, "N")
-            idx_CA = get_idx(i, "CA")
-            idx_C = get_idx(i, "C")
+            idx_N  = label_idx[(i, "N")]
+            idx_CA = label_idx[(i, "CA")]
+            idx_C  = label_idx[(i, "C")]
 
             # Side chain
             topo = self.SIDE_CHAIN_TOPO.get(self.sequence[i], self.SIDE_CHAIN_TOPO["DEFAULT"])
@@ -361,10 +373,9 @@ class QuantumBiophysicsFolder:
                     u_mid = -(u_nc + u_cc)
                     u_mid /= np.linalg.norm(u_mid) + 1e-9
                     p_CB = coords[idx_CA] + b_len * (np.cos(0.9) * u_mid + np.sin(0.9) * n_plane)
-                    coords.append(p_CB)
-                    labels.append((i, name, elem))
-                    bonds.append((idx_CA, len(coords) - 1))
-                    sc_map["CB"] = len(coords) - 1
+                    cb_idx = _append(i, name, elem, p_CB)
+                    bonds.append((idx_CA, cb_idx))
+                    sc_map["CB"] = cb_idx
                 else:
                     p_name = "CB"
                     if name.startswith("CD"):
@@ -419,39 +430,34 @@ class QuantumBiophysicsFolder:
                         a = coords[idx_CA]
 
                     new_pos = self._nerf_step(a, b, c, b_len, b_ang, t_val)
-                    coords.append(new_pos)
-                    labels.append((i, name, elem))
-                    bonds.append((idx_c, len(coords) - 1))
-                    sc_map[name] = len(coords) - 1
+                    new_idx = _append(i, name, elem, new_pos)
+                    bonds.append((idx_c, new_idx))
+                    sc_map[name] = new_idx
 
             # Carbonyl oxygen
             p_O = self._nerf_step(coords[idx_N], coords[idx_CA], coords[idx_C], 1.23, 2.1, np.pi)
-            coords.append(p_O)
-            labels.append((i, "O", "O"))
-            bonds.append((idx_C, len(coords) - 1))
+            o_idx = _append(i, "O", "O", p_O)
+            bonds.append((idx_C, o_idx))
 
             # Next residue backbone
             if i < self.n_residues - 1:
                 psi = angle_dict.get(f"{i}_psi", -0.5)
                 p_next_N = self._nerf_step(coords[idx_N], coords[idx_CA], coords[idx_C], 1.33, 2.0, psi)
-                coords.append(p_next_N)
-                labels.append((i + 1, "N", "N"))
-                bonds.append((idx_C, len(coords) - 1))
+                n_idx = _append(i + 1, "N", "N", p_next_N)
+                bonds.append((idx_C, n_idx))
 
                 # ω (peptide-bond torsion): π for all residue pairs except
                 # when residue i+1 is proline, in which case ω is an explicit
                 # DOF and its value is read from angle_dict.
                 omega = angle_dict.get(f"{i}_omega", np.pi)
                 p_next_CA = self._nerf_step(coords[idx_CA], coords[idx_C], p_next_N, 1.46, 2.1, omega)
-                coords.append(p_next_CA)
-                labels.append((i + 1, "CA", "C"))
-                bonds.append((len(coords) - 2, len(coords) - 1))
+                ca_idx = _append(i + 1, "CA", "C", p_next_CA)
+                bonds.append((n_idx, ca_idx))
 
                 phi = angle_dict.get(f"{i + 1}_phi", -1.0)
                 p_next_C = self._nerf_step(coords[idx_C], p_next_N, p_next_CA, 1.51, 1.9, phi)
-                coords.append(p_next_C)
-                labels.append((i + 1, "C", "C"))
-                bonds.append((len(coords) - 2, len(coords) - 1))
+                c_idx = _append(i + 1, "C", "C", p_next_C)
+                bonds.append((ca_idx, c_idx))
 
         return np.array(coords), labels, bonds
 

@@ -722,3 +722,80 @@ class TestGeometryIntegrityHuber:
         from qtf.core.folder import _HUBER_DELTA_GEOM
         assert isinstance(_HUBER_DELTA_GEOM, float)
         assert _HUBER_DELTA_GEOM > 0.0
+
+
+# ---------------------------------------------------------------------------
+# P-1 – O(1) label lookup in build_full_structure
+# ---------------------------------------------------------------------------
+
+
+class TestBuildFullStructureLookup:
+    """Verify correctness and sub-quadratic scaling of build_full_structure."""
+
+    def test_coords_labels_bonds_consistent_length(self):
+        """coords, labels, and bonds must have internally consistent lengths."""
+        f = QuantumBiophysicsFolder("GAVC")
+        angles = np.full(f.total_angles, 0.1)
+        coords, labels, bonds = f.build_full_structure(angles)
+        assert len(coords) == len(labels)
+        n = len(coords)
+        for a, b in bonds:
+            assert 0 <= a < n and 0 <= b < n, f"bond ({a},{b}) out of range for {n} atoms"
+
+    def test_backbone_atoms_present_for_each_residue(self):
+        """Every residue must have at least N, CA, C atoms in the label list."""
+        f = QuantumBiophysicsFolder("GAVC")
+        angles = np.full(f.total_angles, 0.1)
+        _, labels, _ = f.build_full_structure(angles)
+        for res_id in range(f.n_residues):
+            res_atoms = {lbl[1] for lbl in labels if lbl[0] == res_id}
+            for backbone in ("N", "CA", "C"):
+                assert backbone in res_atoms, \
+                    f"residue {res_id} missing backbone atom {backbone}"
+
+    def test_coords_finite(self):
+        """All atom coordinates must be finite."""
+        f = QuantumBiophysicsFolder("GAVC")
+        coords, _, _ = f.build_full_structure(np.full(f.total_angles, 0.1))
+        assert np.all(np.isfinite(coords))
+
+    def test_longer_sequence_more_atoms(self):
+        """A longer sequence must produce more atoms than a shorter one."""
+        f2 = QuantumBiophysicsFolder("GA")
+        f5 = QuantumBiophysicsFolder("GAVCL")
+        coords2, _, _ = f2.build_full_structure(np.full(f2.total_angles, 0.1))
+        coords5, _, _ = f5.build_full_structure(np.full(f5.total_angles, 0.1))
+        assert len(coords5) > len(coords2)
+
+    def test_scaling_subquadratic(self):
+        """build_full_structure wall-clock time must scale sub-quadratically.
+
+        Compares time for N=5 vs N=10 residues.  An O(N²) implementation
+        would show ~4× slowdown; O(N) should be < 3×.  We allow up to 3.5×
+        to accommodate OS scheduling jitter.
+        """
+        import time
+
+        seq_short = "GAVCL"           # 5 residues
+        seq_long  = "GAVCL" * 2      # 10 residues
+        f_s = QuantumBiophysicsFolder(seq_short)
+        f_l = QuantumBiophysicsFolder(seq_long)
+        a_s = np.full(f_s.total_angles, 0.1)
+        a_l = np.full(f_l.total_angles, 0.1)
+
+        reps = 200
+        t0 = time.perf_counter()
+        for _ in range(reps):
+            f_s.build_full_structure(a_s)
+        t_short = (time.perf_counter() - t0) / reps
+
+        t0 = time.perf_counter()
+        for _ in range(reps):
+            f_l.build_full_structure(a_l)
+        t_long = (time.perf_counter() - t0) / reps
+
+        ratio = t_long / (t_short + 1e-9)
+        assert ratio < 3.5, (
+            f"build_full_structure appears super-linear: "
+            f"N=5 → {t_short*1e6:.1f} µs, N=10 → {t_long*1e6:.1f} µs, ratio={ratio:.2f}"
+        )
