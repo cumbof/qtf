@@ -274,3 +274,77 @@ class TestResidueNameConvention:
         f = QuantumBiophysicsFolder("DDD")
         # D (Asp) is not in the hydrophobic set
         assert f.mask_hydrophobic.sum() == 0
+
+
+# ---------------------------------------------------------------------------
+# Electrostatics (_electrostatic_energy)
+# ---------------------------------------------------------------------------
+
+
+class TestElectrostaticEnergy:
+    """Guard the 1/r Coulomb formula and the physical constants.
+
+    The previous implementation used ``83.0 * Q / r²`` — an undocumented
+    1/r² falloff. The corrected form is
+    ``332.0637 * Q / (4.0 * r)`` which is the standard Coulomb law with a
+    uniform dielectric of 4.
+    """
+
+    def _make_folder_with_two_charges(self, q1: float, q2: float, r: float):
+        """Return a (folder, D) pair where only atoms 0 and 1 exist with
+        charges q1, q2 separated by distance r, and the non-bonded mask
+        allows the pair.  Uses QuantumBiophysicsFolder("GA") as a carrier
+        and monkey-patches the charge vector + mask."""
+        import numpy as np
+        f = QuantumBiophysicsFolder("GA")
+        n = len(f.q_vector)
+        # Override charge vector: only atoms 0 and 1 are charged
+        q = np.zeros(n)
+        q[0] = q1
+        q[1] = q2
+        f.q_vector = q
+        # Build a distance matrix where D[0,1] = D[1,0] = r, rest large
+        D = np.full((n, n), 100.0)
+        np.fill_diagonal(D, 0.0)
+        D[0, 1] = D[1, 0] = r
+        # Allow the pair in mask_non_bonded
+        mask = np.zeros((n, n), dtype=bool)
+        mask[0, 1] = mask[1, 0] = True
+        f.mask_non_bonded = mask
+        return f, D
+
+    def test_opposite_charges_are_attractive(self):
+        # q1=+1, q2=-1 → E = 332.0637 * (-1) / (4 * r) < 0
+        f, D = self._make_folder_with_two_charges(+1.0, -1.0, 5.0)
+        assert f._electrostatic_energy(D) < 0.0
+
+    def test_like_charges_are_repulsive(self):
+        # q1=+1, q2=+1 → E = 332.0637 / (4 * r) > 0
+        f, D = self._make_folder_with_two_charges(+1.0, +1.0, 5.0)
+        assert f._electrostatic_energy(D) > 0.0
+
+    def test_one_over_r_falloff(self):
+        """Energy at r=5 should be exactly twice the energy at r=10 (1/r law)."""
+        f5, D5 = self._make_folder_with_two_charges(+1.0, -1.0, 5.0)
+        f10, D10 = self._make_folder_with_two_charges(+1.0, -1.0, 10.0)
+        e5 = f5._electrostatic_energy(D5)
+        e10 = f10._electrostatic_energy(D10)
+        assert e5 / e10 == pytest.approx(2.0, rel=1e-6)
+
+    def test_magnitude_matches_coulomb_formula(self):
+        """Numerical value matches 332.0637 * q1*q2 / (4.0 * r)."""
+        q1, q2, r = 1.0, -1.0, 8.0
+        expected = 332.0637 * q1 * q2 / (4.0 * r)
+        f, D = self._make_folder_with_two_charges(q1, q2, r)
+        assert f._electrostatic_energy(D) == pytest.approx(expected, rel=1e-5)
+
+    def test_zero_charges_return_zero(self):
+        f = QuantumBiophysicsFolder("GG")
+        # GG has no formal charges under any force field
+        import numpy as np
+        n = len(f.q_vector)
+        D = np.ones((n, n))
+        np.fill_diagonal(D, 0.0)
+        # Even if all charges are zero, energy must be zero
+        f.q_vector = np.zeros(n)
+        assert f._electrostatic_energy(D) == pytest.approx(0.0)

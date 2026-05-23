@@ -31,6 +31,14 @@ from qtf.core.tracker import LandscapeTracker
 
 logger = logging.getLogger(__name__)
 
+# Coulomb's law prefactor: 332.0637 kcal mol⁻¹ Å e⁻²
+# (charges in elementary charges, distances in Ångströms, energy in kcal/mol)
+_COULOMB_PREFACTOR: float = 332.0637
+# Uniform implicit-solvent dielectric constant (ε ≈ 4 is the standard choice
+# for buried/intermediate environments in coarse force fields; see e.g.
+# Warshel & Russell, Q Rev Biophys 1984).
+_DIELECTRIC: float = 4.0
+
 
 class QuantumBiophysicsFolder:
     """Hybrid quantum-classical protein folder."""
@@ -495,11 +503,7 @@ class QuantumBiophysicsFolder:
         total_energy += e_hbond
 
         # Electrostatics
-        Q_mat = np.outer(self.q_vector, self.q_vector)
-        elec_mask = np.triu(self.mask_non_bonded, k=1) & (np.abs(Q_mat) > 0.0001)
-        if np.any(elec_mask):
-            r_elec = np.maximum(D[elec_mask], 1.0)
-            total_energy += np.sum(83.0 * Q_mat[elec_mask] / (r_elec ** 2))
+        total_energy += self._electrostatic_energy(D)
 
         # Disulfide bonds
         if len(self.idx_SG_atoms) > 1:
@@ -560,6 +564,24 @@ class QuantumBiophysicsFolder:
             self.tracker.log(total_energy)
 
         return total_energy
+
+    def _electrostatic_energy(self, D: np.ndarray) -> float:
+        """Coulomb electrostatic energy in kcal/mol.
+
+        Uses the standard prefactor 332.0637 kcal mol⁻¹ Å e⁻² and a uniform
+        implicit-solvent dielectric ``_DIELECTRIC`` (default 4.0), giving::
+
+            E = 332.0637 · qᵢqⱼ / (4.0 · rᵢⱼ)
+
+        A hard lower bound of 1.0 Å is applied to ``rᵢⱼ`` to prevent
+        singularities at unphysically short distances.
+        """
+        Q_mat = np.outer(self.q_vector, self.q_vector)
+        elec_mask = np.triu(self.mask_non_bonded, k=1) & (np.abs(Q_mat) > 0.0001)
+        if not np.any(elec_mask):
+            return 0.0
+        r_elec = np.maximum(D[elec_mask], 1.0)
+        return float(np.sum(_COULOMB_PREFACTOR * Q_mat[elec_mask] / (_DIELECTRIC * r_elec)))
 
     def _calculate_rotamer_energy(self, angle_dict: dict) -> float:
         energy = 0.0
