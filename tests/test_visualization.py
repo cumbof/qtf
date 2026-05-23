@@ -131,3 +131,96 @@ class TestCollectResults:
 
         results = _collect_results(ranking_for_plots)
         assert len(results) == len(ranking_for_plots.stats_df)
+
+
+# ---------------------------------------------------------------------------
+# Stage marker colour consistency
+# ---------------------------------------------------------------------------
+
+
+class TestStageMarkerColours:
+    """Verify stage markers are coloured by name, not by per-replica index."""
+
+    def _make_ranking(self, markers_per_replica):
+        """Build a minimal EnsembleRanking from synthetic tracker data.
+
+        Parameters
+        ----------
+        markers_per_replica:
+            list of lists of stage-name strings, one inner list per replica.
+        """
+        from qtf.analysis.ranking import EnsembleRanking
+        from qtf.core.tracker import LandscapeTracker
+        from qtf.core.folder import QuantumBiophysicsFolder
+
+        f = QuantumBiophysicsFolder("GA")
+        results = []
+        for i, stage_names in enumerate(markers_per_replica):
+            tracker = LandscapeTracker()
+            for step, name in enumerate(stage_names, start=1):
+                for _ in range(step * 5):
+                    tracker.log(-float(step))
+                tracker.mark_stage(name)
+            angles = np.full(f.total_angles, 0.1)
+            coords, labels, _ = f.build_full_structure(angles)
+            results.append({
+                "id": i,
+                "seed": i,
+                "energy": -float(i + 1),
+                "coords": coords,
+                "labels": labels,
+                "tracker": tracker,
+            })
+        return EnsembleRanking.from_ensemble(results)
+
+    def test_same_stage_name_same_colour_across_replicas(self):
+        """Stage1 must get the same hex colour whether it is the first or only marker."""
+        from qtf.visualization.plots import _PALETTE
+        # replica 0: Stage1, Stage2, Stage3
+        # replica 1: Stage1, Stage3 (skips Stage2)
+        ranking = self._make_ranking([
+            ["Stage1", "Stage2", "Stage3"],
+            ["Stage1", "Stage3"],
+        ])
+        fig = plot_energy_landscape(ranking)
+        # Collect annotation texts and their font colours from vlines
+        colour_by_name: dict[str, str] = {}
+        for annotation in fig.layout.annotations:
+            txt = annotation.text
+            colour = annotation.font.color
+            colour_by_name[txt] = colour
+
+        # Stage1 → stage1 palette colour
+        assert colour_by_name.get("Stage1") == _PALETTE["stage1"]
+        # Stage2 → stage2 palette colour
+        assert colour_by_name.get("Stage2") == _PALETTE["stage2"]
+        # Stage3 → stage3 palette colour (NOT stage2, which would be the bug)
+        assert colour_by_name.get("Stage3") == _PALETTE["stage3"]
+
+    def test_skipped_stage_does_not_shift_colours(self):
+        """A replica missing Stage2 must not promote Stage3 to stage2 colour."""
+        from qtf.visualization.plots import _PALETTE
+        ranking = self._make_ranking([
+            ["Stage1", "Stage3"],  # only replica; Stage2 is never emitted
+        ])
+        fig = plot_energy_landscape(ranking)
+        colour_by_name: dict[str, str] = {}
+        for annotation in fig.layout.annotations:
+            colour_by_name[annotation.text] = annotation.font.color
+
+        # Stage1 → stage1 (index 0)
+        assert colour_by_name.get("Stage1") == _PALETTE["stage1"]
+        # Stage3 → stage2 colour because Stage2 was never seen globally
+        # (only two unique names exist, so Stage3 maps to index 1 = stage2)
+        assert colour_by_name.get("Stage3") == _PALETTE["stage2"]
+
+    def test_each_stage_name_drawn_at_most_once(self):
+        """Duplicate stage names across replicas must produce only one vline."""
+        ranking = self._make_ranking([
+            ["Stage1", "Stage2"],
+            ["Stage1", "Stage2"],
+        ])
+        fig = plot_energy_landscape(ranking)
+        texts = [a.text for a in fig.layout.annotations]
+        assert texts.count("Stage1") == 1
+        assert texts.count("Stage2") == 1

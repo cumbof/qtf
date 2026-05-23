@@ -211,6 +211,19 @@ def plot_energy_landscape(
 
     stage_colours = [_PALETTE["stage1"], _PALETTE["stage2"], _PALETTE["stage3"]]
 
+    # Build a global stage-name → colour map by collecting every unique stage
+    # name across all replicas in first-appearance order.  Colouring by the
+    # per-replica enumerate index was wrong: a replica that skips an
+    # intermediate stage would offset all subsequent stage colours (e.g.
+    # Stage3 appearing as stage2 colour).
+    seen_stage_names: dict[str, str] = {}  # name → hex colour
+    for r in results:
+        for _, sname in r["tracker"].stage_markers:
+            if sname not in seen_stage_names:
+                idx = len(seen_stage_names)
+                seen_stage_names[sname] = stage_colours[min(idx, len(stage_colours) - 1)]
+    stage_colour_map: dict[str, str] = seen_stage_names
+
     fig = go.Figure()
     stage_lines_added: set[str] = set()
 
@@ -247,18 +260,17 @@ def plot_energy_landscape(
             )
         )
 
-        # Stage markers (add vertical lines only once per stage name)
-        for idx_m, (step, stage_name) in enumerate(tracker.stage_markers):
-            stage_colour = stage_colours[min(idx_m, len(stage_colours) - 1)]
-            line_key = stage_name
-            if line_key not in stage_lines_added:
+        # Stage markers — colour by name, not by per-replica enumerate index.
+        for step, stage_name in tracker.stage_markers:
+            stage_colour = stage_colour_map.get(stage_name, stage_colours[-1])
+            if stage_name not in stage_lines_added:
                 fig.add_vline(
                     x=step,
                     line=dict(color=stage_colour, width=1.5, dash="dash"),
                     annotation_text=stage_name,
                     annotation_font_color=stage_colour,
                 )
-                stage_lines_added.add(line_key)
+                stage_lines_added.add(stage_name)
 
     fig.update_layout(
         title=dict(text=title, font=dict(size=16)),
