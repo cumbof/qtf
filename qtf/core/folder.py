@@ -716,8 +716,34 @@ class QuantumBiophysicsFolder:
         self,
         max_iter: int = 2000,
         initial_params: np.ndarray | None = None,
+        scout_attempts: int | None = None,
     ) -> tuple[np.ndarray, list, list, LandscapeTracker, np.ndarray, float]:
         """Run the three-stage optimisation curriculum.
+
+        Parameters
+        ----------
+        max_iter:
+            Maximum number of energy evaluations allowed for **each** of the
+            three optimisation stages (COBYLA collapse, SLSQP refine, SLSQP
+            relax).  The default of 2000 is a generous budget suitable for
+            peptides up to ~20 residues.
+        initial_params:
+            Pre-computed circuit parameters to use as the starting point for
+            Stage 1.  When *None* (the default) a scouting phase randomly
+            samples ``scout_attempts`` parameter vectors and picks the one
+            with the lowest energy.
+        scout_attempts:
+            Number of random parameter vectors evaluated during the scouting
+            phase (only used when ``initial_params`` is *None*).  A larger
+            value improves the quality of the starting point at a linear cost
+            in energy evaluations.
+
+            If *None* (the default) the value is computed as
+            ``min(64, max_iter // 10)``, which keeps the scouting budget at
+            most 10 % of one optimisation stage while still sampling at least
+            a few dozen points.  Pass an explicit integer to override —
+            e.g. ``scout_attempts=1`` for the fastest possible run during
+            testing, or ``scout_attempts=200`` for a thorough global search.
 
         Returns
         -------
@@ -727,7 +753,9 @@ class QuantumBiophysicsFolder:
         self.tracker = LandscapeTracker()
 
         if initial_params is None:
-            init_params = self.get_smart_initialization(n_attempts=max_iter)
+            n_scout = min(64, max_iter // 10) if scout_attempts is None else scout_attempts
+            logger.info("Scouting %d starting points…", n_scout)
+            init_params = self.get_smart_initialization(n_attempts=n_scout)
         else:
             init_params = initial_params
 

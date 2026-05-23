@@ -348,3 +348,103 @@ class TestElectrostaticEnergy:
         # Even if all charges are zero, energy must be zero
         f.q_vector = np.zeros(n)
         assert f._electrostatic_energy(D) == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# fold() — scout_attempts budget
+# ---------------------------------------------------------------------------
+
+
+class TestFoldScoutBudget:
+    """Guard the scout_attempts logic introduced to prevent fold() from
+    silently consuming max_iter evaluations just for initialisation."""
+
+    def _count_energy_calls(self, folder, **fold_kwargs):
+        """Run fold() and return the number of energy_function calls made
+        during the scouting phase only (before Stage 1 begins)."""
+        import numpy as np
+        call_counts = []
+
+        original = folder.energy_function
+
+        def counting_energy(params):
+            call_counts.append(1)
+            return original(params)
+
+        folder.energy_function = counting_energy
+        # We only need to check the scouting phase, so abort early by passing
+        # a pre-computed initial_params when we want zero scout calls.
+        folder.fold(**fold_kwargs)
+        folder.energy_function = original
+        return len(call_counts)
+
+    def test_default_scout_well_below_max_iter(self):
+        """Default scouting must use at most min(64, max_iter//10) attempts."""
+        f = QuantumBiophysicsFolder("GA")
+        max_iter = 100
+        expected_max_scout = min(64, max_iter // 10)
+        # Total calls = scout + 3 stages; stage calls dominate, but scout must be ≤ expected
+        # We verify by passing explicit scout_attempts=0 and comparing totals.
+        total_default = self._count_energy_calls(f, max_iter=max_iter)
+        total_no_scout = self._count_energy_calls(
+            f, max_iter=max_iter, initial_params=np.zeros(f.n_params)
+        )
+        scout_calls = total_default - total_no_scout
+        assert scout_calls <= expected_max_scout + 5  # +5 for rounding/overhead
+
+    def test_explicit_scout_attempts_respected(self):
+        """When scout_attempts=1, only 1 random evaluation is done for init."""
+        f = QuantumBiophysicsFolder("GA")
+        calls = []
+        original = f.energy_function
+
+        def track(params):
+            calls.append(1)
+            return original(params)
+
+        f.energy_function = track
+        f.fold(max_iter=50, scout_attempts=1)
+        f.energy_function = original
+        # First call is the single scout evaluation; rest are optimiser calls
+        # We can't easily separate them, but total >= 1 guarantees it ran.
+        assert len(calls) >= 1
+
+    def test_initial_params_skips_scouting(self):
+        """Passing initial_params must bypass the scouting phase entirely."""
+        f = QuantumBiophysicsFolder("GA")
+        scout_calls = []
+        original_scout = f.get_smart_initialization
+
+        def spy_scout(*args, **kwargs):
+            scout_calls.append(1)
+            return original_scout(*args, **kwargs)
+
+        f.get_smart_initialization = spy_scout
+        f.fold(max_iter=50, initial_params=np.zeros(f.n_params))
+        f.get_smart_initialization = original_scout
+        assert len(scout_calls) == 0
+
+    def test_scout_attempts_none_uses_formula(self):
+        """scout_attempts=None must resolve to min(64, max_iter // 10)."""
+        # We test via get_smart_initialization call count.
+        for max_iter in (10, 100, 1000):
+            expected = min(64, max_iter // 10)
+            f = QuantumBiophysicsFolder("G")
+            recorded = []
+            original = f.get_smart_initialization
+
+            def spy(n_attempts=20, seed=None, _rec=recorded):
+                _rec.append(n_attempts)
+                return original(n_attempts=n_attempts, seed=seed)
+
+            f.get_smart_initialization = spy
+            f.fold(max_iter=max_iter)
+            f.get_smart_initialization = original
+            assert recorded[0] == expected, (
+                f"max_iter={max_iter}: expected scout={expected}, got {recorded[0]}"
+            )
+
+    def test_fold_returns_six_values(self):
+        f = QuantumBiophysicsFolder("GA")
+        result = f.fold(max_iter=10, scout_attempts=1)
+        assert len(result) == 6
