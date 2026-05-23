@@ -83,3 +83,51 @@ def test_plot_ranking_has_bar_and_table(ranking_for_plots):
 def test_plot_ranking_custom_title(ranking_for_plots):
     fig = plot_ranking(ranking_for_plots, title="My Ranking")
     assert fig.layout.title.text == "My Ranking"
+
+
+# ---------------------------------------------------------------------------
+# _collect_results error handling
+# ---------------------------------------------------------------------------
+
+
+class TestCollectResults:
+    """Verify that _collect_results raises clearly instead of returning broken data."""
+
+    def test_returns_full_list_for_valid_ranking(self, ranking_for_plots):
+        from qtf.visualization.plots import _collect_results
+
+        results = _collect_results(ranking_for_plots)
+        assert isinstance(results, list)
+        assert len(results) >= 1
+
+    def test_every_result_has_required_keys(self, ranking_for_plots):
+        from qtf.visualization.plots import _collect_results
+
+        for r in _collect_results(ranking_for_plots):
+            for key in ("id", "coords", "labels", "tracker"):
+                assert key in r, f"result dict missing key '{key}'"
+
+    def test_raises_for_object_without_results(self):
+        from qtf.visualization.plots import _collect_results
+
+        class FakeRanking:
+            pass  # no _results attribute
+
+        with pytest.raises(ValueError, match="_collect_results"):
+            _collect_results(FakeRanking())
+
+    def test_raises_for_empty_results_list(self):
+        from qtf.visualization.plots import _collect_results
+
+        class FakeRanking:
+            _results: list = []
+
+        with pytest.raises(ValueError, match="EnsembleRanking.from_ensemble"):
+            _collect_results(FakeRanking())
+
+    def test_result_count_matches_dataframe(self, ranking_for_plots):
+        """Number of result dicts must equal number of rows in stats_df."""
+        from qtf.visualization.plots import _collect_results
+
+        results = _collect_results(ranking_for_plots)
+        assert len(results) == len(ranking_for_plots.stats_df)

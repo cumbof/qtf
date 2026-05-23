@@ -438,20 +438,43 @@ def plot_ranking(
 # ---------------------------------------------------------------------------
 
 def _collect_results(ranking) -> list[dict]:
-    """Recover the original list of result dicts from an EnsembleRanking.
+    """Return the full list of replica result dicts from an *EnsembleRanking*.
 
-    The ranking stores ``best_by_energy`` and ``best_by_rmsd`` directly but
-    does not store the full list.  We reconstruct it from the stats DataFrame
-    by walking the tracker and coord data stored in each result dict.
-    Note: the EnsembleRanking must have been created via ``from_ensemble``
-    which keeps a reference to the results list internally.
+    Parameters
+    ----------
+    ranking:
+        An :class:`~qtf.analysis.ranking.EnsembleRanking` instance that was
+        built via :meth:`~qtf.analysis.ranking.EnsembleRanking.from_ensemble`.
+        That constructor stores the complete result list in ``ranking._results``,
+        which is the only source this function consults.
+
+    Returns
+    -------
+    list[dict]
+        The full list of replica dicts, each containing at minimum ``id``,
+        ``coords``, ``labels``, and ``tracker``.
+
+    Raises
+    ------
+    ValueError
+        If *ranking* has no ``_results`` attribute, or if that attribute is
+        empty.  This replaces a previous silent fallback that returned only
+        the one or two "best" replica dicts, causing ``KeyError`` in callers
+        that iterated over all replica IDs from the stats DataFrame.
+
+        **Fix**: always construct the ranking with::
+
+            ranking = EnsembleRanking.from_ensemble(results, ...)
+
+        where *results* is the list returned by
+        :meth:`~qtf.core.ensemble.EnsembleFoldingManager.get_results`.
     """
-    # EnsembleRanking.from_ensemble attaches _results for this purpose
-    if hasattr(ranking, "_results"):
-        return ranking._results
-    # Fallback: reconstruct a minimal list from the two stored best dicts
-    seen: dict[int, dict] = {}
-    for r in [ranking.best_by_energy, ranking.best_by_rmsd]:
-        if r is not None:
-            seen[r["id"]] = r
-    return list(seen.values())
+    results = getattr(ranking, "_results", None)
+    if not results:
+        raise ValueError(
+            "_collect_results: the EnsembleRanking object carries no result "
+            "data.  Build the ranking via "
+            "EnsembleRanking.from_ensemble(results, ...) where 'results' is "
+            "the list returned by EnsembleFoldingManager.get_results()."
+        )
+    return results
