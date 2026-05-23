@@ -207,11 +207,34 @@ class QuantumBiophysicsFolder:
         return charges
 
     def _get_angles(self, params: np.ndarray) -> np.ndarray:
-        """Map circuit parameters to torsion angles via statevector phases."""
+        """Map circuit parameters to torsion angles via statevector phases.
+
+        The 2ⁿ complex amplitudes of the statevector each carry a phase in
+        ``(-π, π]``.  The first ``total_angles`` phases are used as torsion
+        angles after removing the **global phase**.
+
+        A global rotation ``e^{iα}|ψ⟩`` shifts every amplitude phase by α
+        uniformly, but is physically unobservable — it would add a spurious
+        common offset to every dihedral and waste one degree of freedom.
+        The gauge is fixed by subtracting ``angle(ψ₀)`` (the phase of the
+        ``|0…0⟩`` basis-state amplitude) from all extracted phases, so that
+        ``phases[0]`` is always 0.  The result is wrapped back into
+        ``(-π, π]``.
+
+        **Consequence**: the zeroth entry of ``dof_map`` — φ of residue 0,
+        the N-terminal φ dihedral — is held at 0 and cannot be optimised.
+        This is acceptable: the N-terminal φ has no backbone predecessor and
+        is conventionally undefined (or set to a reference value).  The
+        optimiser therefore controls ``K − 1`` independent phase degrees of
+        freedom for K total torsion angles.
+        """
         param_dict = dict(zip(self.ansatz.parameters, params))
         bound_circuit = self.ansatz.assign_parameters(param_dict)
         psi = Statevector(bound_circuit).data
-        return np.angle(psi)[: self.total_angles]
+        phases = np.angle(psi)[: self.total_angles]
+        # Remove global phase: pin phases[0] to 0 and wrap into (-π, π].
+        phases = (phases - np.angle(psi[0]) + np.pi) % (2 * np.pi) - np.pi
+        return phases
 
     @staticmethod
     def _nerf_step(

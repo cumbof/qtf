@@ -2,6 +2,7 @@
 
 import numpy as np
 import pytest
+from qiskit.quantum_info import Statevector
 
 from qtf.core.folder import QuantumBiophysicsFolder
 
@@ -448,3 +449,65 @@ class TestFoldScoutBudget:
         f = QuantumBiophysicsFolder("GA")
         result = f.fold(max_iter=10, scout_attempts=1)
         assert len(result) == 6
+
+
+# ---------------------------------------------------------------------------
+# _get_angles — global phase removal
+# ---------------------------------------------------------------------------
+
+
+class TestGetAnglesGlobalPhase:
+    """Guard the global-phase-removal fix in _get_angles.
+
+    A global phase e^{iα}|ψ⟩ shifts every amplitude phase by α uniformly.
+    After the fix, angle(ψ₀) is subtracted from all phases so that
+    phases[0] ≡ 0, making the output gauge-invariant.
+    """
+
+    def test_first_angle_is_always_zero(self):
+        """phases[0] must be exactly 0 for any parameter vector."""
+        f = QuantumBiophysicsFolder("GA")
+        rng = np.random.default_rng(42)
+        for _ in range(20):
+            params = rng.uniform(-np.pi, np.pi, f.n_params)
+            angles = f._get_angles(params)
+            assert angles[0] == pytest.approx(0.0, abs=1e-10)
+
+    def test_global_phase_shift_gives_identical_angles(self):
+        """A statevector multiplied by e^{iα} must yield the same angles."""
+        f = QuantumBiophysicsFolder("GAV")
+        params = np.ones(f.n_params) * 0.3
+
+        # Ground-truth angles from the unshifted state
+        psi = Statevector(f.ansatz.assign_parameters(
+            dict(zip(f.ansatz.parameters, params))
+        )).data
+        angles_orig = f._get_angles(params)
+
+        # Manually apply the global-phase correction to a phase-shifted copy
+        for alpha in (0.5, 1.234, -2.0, np.pi):
+            psi_shifted = np.exp(1j * alpha) * psi
+            phases_shifted = np.angle(psi_shifted)[: f.total_angles]
+            angles_manual = (
+                phases_shifted - np.angle(psi_shifted[0]) + np.pi
+            ) % (2 * np.pi) - np.pi
+            np.testing.assert_allclose(
+                angles_orig, angles_manual, atol=1e-10,
+                err_msg=f"mismatch at alpha={alpha}"
+            )
+
+    def test_angles_within_minus_pi_to_pi(self):
+        """All extracted angles must lie in the half-open interval (-π, π]."""
+        f = QuantumBiophysicsFolder("GAVC")
+        rng = np.random.default_rng(7)
+        for _ in range(10):
+            params = rng.uniform(-2 * np.pi, 2 * np.pi, f.n_params)
+            angles = f._get_angles(params)
+            assert np.all(angles > -np.pi - 1e-10), "angle below -π"
+            assert np.all(angles <= np.pi + 1e-10), "angle above +π"
+
+    def test_angles_length_matches_total_angles(self):
+        f = QuantumBiophysicsFolder("GGG")
+        params = np.zeros(f.n_params)
+        angles = f._get_angles(params)
+        assert len(angles) == f.total_angles
