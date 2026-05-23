@@ -222,3 +222,55 @@ class TestGetSmartInitialization:
     def test_returns_ndarray(self, folder_ga):
         params = folder_ga.get_smart_initialization(n_attempts=2, seed=0)
         assert isinstance(params, np.ndarray)
+
+
+# ---------------------------------------------------------------------------
+# Residue-name conventions (regression tests for the 3-letter vs 1-letter bug)
+# ---------------------------------------------------------------------------
+
+
+class TestResidueNameConvention:
+    """The folder stores ``self.sequence`` as single-letter codes; several
+    energy terms used to compare it against three-letter codes (``"VAL"``,
+    ``"PRO"``, ``"PHE"`` …) which silently returned 0 for every input.
+
+    These tests pin the convention and guard against regression.
+    """
+
+    def test_rotamer_energy_nonzero_for_VIT(self):
+        f = QuantumBiophysicsFolder("V")
+        # chi1 in the gauche+ basin (~-1.047 rad) should give a strong negative
+        angle_dict = {"0_chi1": -1.047}
+        e = f._calculate_rotamer_energy(angle_dict)
+        assert e < -1.0, f"expected strong negative rotamer energy, got {e}"
+
+    def test_rotamer_energy_nonzero_for_aromatic(self):
+        f = QuantumBiophysicsFolder("F")
+        angle_dict = {"0_chi1": -1.047}
+        e = f._calculate_rotamer_energy(angle_dict)
+        assert e < 0.0
+
+    def test_rotamer_energy_nonzero_for_proline(self):
+        f = QuantumBiophysicsFolder("P")
+        # PRO uses a quadratic penalty around ±0.5 rad
+        angle_dict = {"0_chi1": 2.0}
+        e = f._calculate_rotamer_energy(angle_dict)
+        assert e > 0.0
+
+    def test_rotamer_default_branch_for_generic_residue(self):
+        # Glycine has no chi1 (no entry in angle_dict) → energy stays 0
+        f = QuantumBiophysicsFolder("A")
+        angle_dict = {"0_chi1": 0.0}
+        e = f._calculate_rotamer_energy(angle_dict)
+        # The generic branch is 1.0 * (1 + cos(3*chi)) = 2.0 at chi=0
+        assert e == pytest.approx(2.0)
+
+    def test_hydrophobic_mask_nonempty_for_hydrophobic_sequence(self):
+        f = QuantumBiophysicsFolder("VVV")
+        # With the bug, mask_hydrophobic was all-False for any sequence
+        assert f.mask_hydrophobic.sum() > 0
+
+    def test_hydrophobic_mask_empty_for_polar_sequence(self):
+        f = QuantumBiophysicsFolder("DDD")
+        # D (Asp) is not in the hydrophobic set
+        assert f.mask_hydrophobic.sum() == 0

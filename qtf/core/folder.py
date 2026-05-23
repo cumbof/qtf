@@ -401,7 +401,7 @@ class QuantumBiophysicsFolder:
         self.vdw_radii_vector = np.array([self.VDW_RADII.get(x[2], 1.7) for x in self.static_labels])
         self.mask_heavy = np.array([not x.startswith("H") for x in self.atom_names], dtype=bool)
 
-        hydro_res_set = {"ALA", "VAL", "LEU", "ILE", "MET", "PHE", "TRP", "PRO", "CYS"}
+        hydro_res_set = {"A", "V", "L", "I", "M", "F", "W", "P", "C"}
         self.mask_hydrophobic = np.zeros(n_atoms, dtype=bool)
         for k, (rid, name, _) in enumerate(self.static_labels):
             if self.sequence[rid] in hydro_res_set and name.startswith("C"):
@@ -568,11 +568,11 @@ class QuantumBiophysicsFolder:
             key = f"{i}_chi1"
             if key in angle_dict:
                 chi = angle_dict[key]
-                if res_name in ("VAL", "ILE", "THR"):
+                if res_name in ("V", "I", "T"):
                     energy += -3.0 * (np.exp(-(chi - np.pi) ** 2 / 0.5) + np.exp(-(chi - (-1.047)) ** 2 / 0.5))
-                elif res_name == "PRO":
+                elif res_name == "P":
                     energy += 10.0 * min((chi - (-0.5)) ** 2, (chi - 0.5) ** 2)
-                elif res_name in ("TRP", "PHE", "TYR", "HIS"):
+                elif res_name in ("W", "F", "Y", "H"):
                     energy += -2.0 * (np.exp(-(chi - np.pi) ** 2 / 0.5) + np.exp(-(chi - (-1.047)) ** 2 / 0.5))
                 else:
                     energy += 1.0 * (1.0 + np.cos(3.0 * chi))
@@ -583,7 +583,7 @@ class QuantumBiophysicsFolder:
     ) -> float:
         aromatics: list[tuple] = []
         for r_idx in np.unique(atom_to_res_idx):
-            if self.sequence[r_idx] in ("PHE", "TYR", "TRP"):
+            if self.sequence[r_idx] in ("F", "Y", "W"):
                 mask = atom_to_res_idx == r_idx
                 r_coords = coords[mask]
                 r_names = self.atom_names[mask]
@@ -624,7 +624,7 @@ class QuantumBiophysicsFolder:
         for r in range(self.n_residues):
             atoms = res_map.get(r, {})
             res_name = self.sequence[r]
-            if res_name == "PRO" and "CD" in atoms and "N" in atoms:
+            if res_name == "P" and "CD" in atoms and "N" in atoms:
                 d = np.linalg.norm(coords[atoms["CD"]] - coords[atoms["N"]])
                 if abs(d - 1.47) > 0.1:
                     energy += 50.0 * (d - 1.47) ** 2
@@ -647,7 +647,7 @@ class QuantumBiophysicsFolder:
                     n2 = np.cross(b2, b3)
                     n2 /= np.linalg.norm(n2)
                     parallelism = np.dot(n1, n2)
-                    twist = (1.0 + parallelism) if self.sequence[r + 1] == "PRO" else (1.0 - parallelism)
+                    twist = (1.0 + parallelism) if self.sequence[r + 1] == "P" else (1.0 - parallelism)
                     if twist > 0.05:
                         energy += 20.0 * twist
         return energy
