@@ -147,6 +147,23 @@ class QuantumBiophysicsFolder:
         # ------------------------------------------------------------------
         # Degrees of freedom
         # ------------------------------------------------------------------
+        # Each residue contributes φ and ψ backbone dihedrals plus up to five
+        # side-chain χ angles.  In addition, the peptide-bond torsion ω is
+        # added as an explicit DOF for every residue **i** whose successor
+        # residue **i+1** is proline ("P").  All other ω angles are fixed at
+        # π (trans-amide) — deviations from planarity are < 5° in practice
+        # and are not worth the extra quantum resource.
+        #
+        # NOTE — encoding vs optimiser gap
+        # The quantum statevector has 2ⁿ complex amplitudes; extracting the
+        # first ``total_angles`` phases is sufficient to carry ω_Pro angles
+        # without any structural change to the circuit.  However, the current
+        # COBYLA optimiser path treats all extracted phases symmetrically and
+        # cannot constrain individual DOFs.  The ω_Pro angles therefore enter
+        # the optimisation unconstrained in [−π, π].  If a narrow prior is
+        # desired (e.g. cis-Pro at ~0 ± 20°), a penalty term should be added
+        # to the energy function, or the optimiser should be replaced with one
+        # that supports bounded variables.
         self.dof_map: list[dict] = []
         for i, aa in enumerate(self.sequence):
             self.dof_map.append({"res": i, "type": "phi"})
@@ -159,6 +176,10 @@ class QuantumBiophysicsFolder:
                     chis.add(tor)
             for k in sorted(chis):
                 self.dof_map.append({"res": i, "type": k})
+            # Pre-proline ω is free; add it last so existing φ/ψ/χ indices
+            # are unaffected for non-proline-containing sequences.
+            if i < self.n_residues - 1 and self.sequence[i + 1] == "P":
+                self.dof_map.append({"res": i, "type": "omega"})
 
         self.total_angles = len(self.dof_map)
 
@@ -270,6 +291,13 @@ class QuantumBiophysicsFolder:
         self, angle_vector: np.ndarray
     ) -> tuple[np.ndarray, list, list]:
         """Build 3-D Cartesian coordinates from a torsion-angle vector.
+
+        The angle vector is indexed by ``dof_map``.  Most peptide-bond torsion
+        angles (ω) are fixed at π (trans-amide); the only exception is the ω
+        **preceding a proline residue** (cis-Pro occurs in ~5 % of cases and
+        non-planar trans-Pro in another ~5 %).  When the DOF map contains an
+        entry ``{"res": i, "type": "omega"}`` the value is read from the angle
+        vector and used directly; otherwise ω defaults to π.
 
         Returns
         -------
@@ -401,7 +429,10 @@ class QuantumBiophysicsFolder:
                 labels.append((i + 1, "N", "N"))
                 bonds.append((idx_C, len(coords) - 1))
 
-                omega = np.pi
+                # ω (peptide-bond torsion): π for all residue pairs except
+                # when residue i+1 is proline, in which case ω is an explicit
+                # DOF and its value is read from angle_dict.
+                omega = angle_dict.get(f"{i}_omega", np.pi)
                 p_next_CA = self._nerf_step(coords[idx_CA], coords[idx_C], p_next_N, 1.46, 2.1, omega)
                 coords.append(p_next_CA)
                 labels.append((i + 1, "CA", "C"))

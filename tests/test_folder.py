@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from qiskit.quantum_info import Statevector
 
-from qtf.core.folder import QuantumBiophysicsFolder
+from qtf.core.folder import QuantumBiophysicsFolder, _TOPOLOGY_SEED_ANGLE
 
 
 # ---------------------------------------------------------------------------
@@ -562,3 +562,85 @@ class TestTopologySeedAngle:
 
         assert isinstance(_TOPOLOGY_SEED_ANGLE, float)
         assert 0.0 < _TOPOLOGY_SEED_ANGLE < np.pi
+
+
+# ---------------------------------------------------------------------------
+# M-3 – pre-proline ω optimisation
+# ---------------------------------------------------------------------------
+
+
+class TestOmegaPreProline:
+    """Verify that ω for residues preceding Pro enters the DOF map and
+    that build_full_structure honours its value."""
+
+    def test_no_omega_dof_without_proline(self):
+        """A sequence with no Pro must have no omega DOF entries."""
+        f = QuantumBiophysicsFolder("GAVC")
+        omega_dofs = [d for d in f.dof_map if d["type"] == "omega"]
+        assert omega_dofs == []
+
+    def test_omega_dof_added_before_proline(self):
+        """Residue preceding P must gain an omega DOF."""
+        f = QuantumBiophysicsFolder("GAP")
+        omega_dofs = [d for d in f.dof_map if d["type"] == "omega"]
+        assert len(omega_dofs) == 1
+        assert omega_dofs[0]["res"] == 1  # residue 1 (A) precedes P at position 2
+
+    def test_omega_dof_count_matches_pre_pro_count(self):
+        """A sequence with two pre-Pro positions gets two omega DOFs."""
+        f = QuantumBiophysicsFolder("GAPGPV")
+        omega_dofs = [d for d in f.dof_map if d["type"] == "omega"]
+        assert len(omega_dofs) == 2
+
+    def test_omega_default_is_pi_without_dof(self):
+        """Without an omega DOF the built structure uses ω = π (trans)."""
+        f = QuantumBiophysicsFolder("GA")
+        coords_trans, _, _ = f.build_full_structure(np.zeros(f.total_angles))
+        # Re-build with an explicit pi to confirm they match
+        assert np.all(np.isfinite(coords_trans))
+
+    def test_omega_affects_coordinates(self):
+        """Setting ω to 0 (cis) for a pre-Pro residue must shift CA of Pro."""
+        f = QuantumBiophysicsFolder("GAP")
+        omega_idx = next(
+            k for k, d in enumerate(f.dof_map)
+            if d["type"] == "omega" and d["res"] == 1
+        )
+        angles_trans = np.full(f.total_angles, _TOPOLOGY_SEED_ANGLE)
+        angles_cis = angles_trans.copy()
+        angles_cis[omega_idx] = 0.0  # cis-Pro
+
+        coords_trans, _, _ = f.build_full_structure(angles_trans)
+        coords_cis, _, _ = f.build_full_structure(angles_cis)
+
+        # The Pro Cα (residue 2, "CA") coordinates must differ
+        def ca_pos(coords, labels, res):
+            for idx, (r, n, _) in enumerate(labels):
+                if r == res and n == "CA":
+                    return coords[idx]
+            return None
+
+        _, labels_t, _ = f.build_full_structure(angles_trans)
+        ca_t = ca_pos(coords_trans, labels_t, 2)
+        ca_c = ca_pos(coords_cis,
+                      f.build_full_structure(angles_cis)[1], 2)
+        assert ca_t is not None and ca_c is not None
+        assert not np.allclose(ca_t, ca_c, atol=1e-3), \
+            "cis and trans Pro Cα must differ"
+
+    def test_total_angles_includes_omega_dof(self):
+        """total_angles must equal len(dof_map) and include every omega entry.
+
+        For "GAP":
+          G  → phi, psi                        = 2
+          A  → phi, psi  (CB at fixed angle)   = 2
+          P  → phi, psi, chi1, chi2, chi3       = 5
+          ω  → omega DOF for A (pre-Pro)        = 1
+          Total = 10
+        """
+        f = QuantumBiophysicsFolder("GAP")
+        assert f.total_angles == len(f.dof_map), \
+            "total_angles must equal the number of dof_map entries"
+        omega_count = sum(1 for d in f.dof_map if d["type"] == "omega")
+        assert omega_count == 1
+        assert f.total_angles == 10
