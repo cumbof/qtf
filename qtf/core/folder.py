@@ -274,6 +274,180 @@ class QuantumBiophysicsFolder:
         # Remove global phase: pin phases[0] to 0 and wrap into (-π, π].
         phases = (phases - np.angle(psi[0]) + np.pi) % (2 * np.pi) - np.pi
         return phases
+    # ──────────────────────────────────────────────────────────────────────────
+    # CORE: _get_angles — two modes
+    # ──────────────────────────────────────────────────────────────────────────
+    def _get_angles(self, params, mode: str = "statevector", backend=None, shots: int = 4096):
+        """
+        Maps circuit parameters → torsion angles.
+
+        Parameters
+        ----------
+        params  : np.ndarray   — circuit parameters (trainable)
+        mode    : str
+            "statevector"  — exact classical simulation (used during optimisation)
+            "sampler"      — measurement-based extraction (used for final hardware run)
+        backend : Qiskit backend or None
+            Only used when mode="sampler".
+            None → AerSimulator() (noiseless shot-based sim).
+            Pass a real IBM backend for actual hardware execution.
+        shots   : int
+            Number of shots per basis circuit (only used in sampler mode).
+        """
+        if self.ansatz is None:
+            raise RuntimeError("Qiskit not available.")
+
+        # ── bind params ────────────────────────────────────────────────────────
+        param_dict    = dict(zip(self.ansatz.parameters, params))
+        bound_circuit = self.ansatz.assign_parameters(param_dict)
+
+        # ══════════════════════════════════════════════════════════════════════
+        # MODE 1: STATEVECTOR  (classical optimisation phase)
+        # ══════════════════════════════════════════════════════════════════════
+        if mode == "statevector":
+            if Statevector is None:
+                raise RuntimeError("Statevector not available. Install qiskit.")
+            sv   = Statevector(bound_circuit).data
+            return np.angle(sv)[:self.total_angles]
+
+        # ══════════════════════════════════════════════════════════════════════
+        # MODE 2: SAMPLER  (hardware / noisy-sim final extraction)
+        # ══════════════════════════════════════════════════════════════════════
+        if mode == "sampler":
+            if backend is None:
+                backend = AerSimulator()
+
+            n        = self.n_qubits
+            n_states = 2 ** n   # full probability vector length e.g. 64 for n=6
+
+            # ── helpers ───────────────────────────────────────────────────────
+            def _basis_circuit(qc, basis: str):
+                c = qc.copy()
+                if basis == "X":
+                    for q in range(n):
+                        c.h(q)
+                elif basis == "Y":
+                    for q in range(n):
+                        c.sdg(q)
+                        c.h(q)
+                c.measure_all()
+                return c
+
+            def _run(qc):
+                tqc = transpile(qc, backend)
+                job = backend.run(tqc, shots=shots)
+                return job.result().get_counts()
+
+            def _counts_to_pvec(counts):
+                """
+                Convert measurement counts → full probability vector of length 2^n.
+                Each bitstring maps to an integer index (qubit-0 = LSB).
+                """
+                pvec  = np.zeros(n_states, dtype=float)
+                total = sum(counts.values())
+                for bitstring, c in counts.items():
+                    bs  = bitstring.replace(" ", "")[::-1]  # qubit-0 at index 0
+                    idx = int(bs, 2)                         # binary → integer
+                    pvec[idx] += c / total
+                return pvec
+
+            # ── run Z / X / Y → full probability vectors ──────────────────────
+            pZ = _counts_to_pvec(_run(_basis_circuit(bound_circuit, "Z")))
+            pX = _counts_to_pvec(_run(_basis_circuit(bound_circuit, "X")))
+            pY = _counts_to_pvec(_run(_basis_circuit(bound_circuit, "Y")))
+
+            # ── convert probability vectors → angles ───────────────────────────
+            # State angles: each state |k> assigned angle 2π*k/N on unit circle
+            state_angles = 2.0 * np.pi * np.arange(n_states) / n_states
+
+            def _marginal_angles(pvec):
+                """
+                Per-qubit marginal: p(qubit_i = 1) = sum of probs where bit i = 1
+                Map [0,1] → [-π, π] via:  angle = 2π * p1 - π
+                Gives n angles, one per qubit.
+                """
+                angles = []
+                for q in range(n):
+                    mask = np.array([(k >> q) & 1 for k in range(n_states)],
+                                    dtype=float)
+                    p1 = np.dot(pvec, mask)              # P(qubit q = 1)
+                    angles.append(2.0 * np.pi * p1 - np.pi)
+                return np.array(angles)
+
+            def _circular_mean(pvec):
+                """
+                Circular mean of the full distribution weighted by state_angles.
+                Captures where probability mass is concentrated on the circle.
+                angle = atan2(Σ p_k sin(θ_k), Σ p_k cos(θ_k)) → [-π, π]
+                """
+                s = np.sum(pvec * np.sin(state_angles))
+                c = np.sum(pvec * np.cos(state_angles))
+                return np.arctan2(s, c)
+
+            def _cdf_angles(pvec):
+                """
+                Map full 2^n probability vector → 2^n angles via CDF.
+                CDF[k] = cumulative probability up to state k → mapped to [-π, π].
+                This preserves the full shape of the distribution.
+                """
+                cdf = np.cumsum(pvec)                    # length 2^n
+                return 2.0 * np.pi * cdf - np.pi        # map [0,1] → [-π, π]
+
+            # ── build angle set from all three bases ───────────────────────────
+            # Per-qubit marginals: n angles per basis    → 3n total
+            mZ = _marginal_angles(pZ)
+            mX = _marginal_angles(pX)
+            mY = _marginal_angles(pY)
+
+            # Circular means: 1 per basis               → 3 total
+            cmZ = _circular_mean(pZ)
+            cmX = _circular_mean(pX)
+            cmY = _circular_mean(pY)
+
+            # CDF-based angles from Z basis: 2^n angles → richest signal
+            cdf_angles = _cdf_angles(pZ)                # length 64 for n=6
+
+            # Cross-basis KL divergence angles           → 2 total
+            eps = 1e-12
+            kl_ZX = float(np.sum(pZ * np.log((pZ + eps) / (pX + eps))))
+            kl_ZY = float(np.sum(pZ * np.log((pZ + eps) / (pY + eps))))
+            cross_1 = np.arctan(kl_ZX) * 2.0 - np.pi / 2.0
+            cross_2 = np.arctan(kl_ZY) * 2.0 - np.pi / 2.0
+
+            # Stack everything
+            # Total: n + n + n + 3 + 2^n + 2 = 3n+5 + 2^n angles
+            # For n=6: 3*6+5 + 64 = 87 angles — more than enough for 33 total_angles
+            base = np.concatenate([
+                mZ,                          # n marginal angles from Z
+                mX,                          # n marginal angles from X
+                mY,                          # n marginal angles from Y
+                [cmZ, cmX, cmY],             # 3 circular means
+                cdf_angles,                  # 2^n CDF angles (richest)
+                [cross_1, cross_2],          # 2 cross-basis angles
+            ])
+
+            # ── clip to [-π, π] ────────────────────────────────────────────────
+            base = np.clip(base, -np.pi, np.pi)
+
+            # ── expand to total_angles if needed ───────────────────────────────
+            if len(base) == 0:
+                base = np.zeros(1, dtype=float)
+            if len(base) >= self.total_angles:
+                return base[:self.total_angles]
+
+            out = np.zeros(self.total_angles, dtype=float)
+            out[:len(base)] = base
+            L = len(base)
+            for k in range(L, self.total_angles):
+                i = k % L
+                j = (k * 3 + 1) % L
+                m = (k * 7 + 2) % L
+                v = (0.60 * base[i]
+                     + 0.30 * np.sin(base[j])
+                     + 0.10 * np.cos(base[m]))
+                out[k] = (v + np.pi) % (2 * np.pi) - np.pi
+            return out
+        raise ValueError(f"Unknown mode: '{mode}'. Use 'statevector' or 'sampler'.")
 
     @staticmethod
     def _nerf_step(
