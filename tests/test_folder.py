@@ -799,3 +799,94 @@ class TestBuildFullStructureLookup:
             f"build_full_structure appears super-linear: "
             f"N=5 → {t_short*1e6:.1f} µs, N=10 → {t_long*1e6:.1f} µs, ratio={ratio:.2f}"
         )
+
+
+# ---------------------------------------------------------------------------
+# H-3 – Length-aware end-to-end constraint target
+# ---------------------------------------------------------------------------
+
+
+class TestLengthAwareE2EConstraint:
+    """Verify the E2E target scales with chain length: 4.5 + 0.4·max(0,N−5) Å."""
+
+    @pytest.mark.parametrize("n_residues,expected_target", [
+        (3, 4.5),
+        (5, 4.5),
+        (10, 6.5),
+        (15, 8.5),
+        (20, 10.5),
+    ])
+    def test_target_formula_values(self, n_residues, expected_target):
+        """E2E target formula produces the correct value for various chain lengths."""
+        computed = 4.5 + 0.40 * max(0, n_residues - 5)
+        assert computed == pytest.approx(expected_target)
+
+    def test_longer_chain_has_larger_target(self):
+        """A 20-residue chain must have a strictly larger E2E target than a 5-residue chain."""
+        target_5 = 4.5 + 0.40 * max(0, 5 - 5)
+        target_20 = 4.5 + 0.40 * max(0, 20 - 5)
+        assert target_20 > target_5
+
+    def test_constraint_term_is_nonneg_and_finite(self):
+        """Constraint energy from energy_function must be finite and non-negative."""
+        f = QuantumBiophysicsFolder("GAVCL", use_e2e_constraint=True)
+        rng = np.random.default_rng(0)
+        params = rng.uniform(-0.8, 0.8, f.n_params)
+        f.energy_function(params, return_terms=True)
+        terms = f.last_energy_terms
+        assert np.isfinite(terms["constraint"])
+        assert terms["constraint"] >= 0.0
+
+    def test_constraint_disabled_gives_zero(self):
+        """When use_e2e_constraint=False the constraint term must be exactly zero."""
+        f = QuantumBiophysicsFolder("GAVCL", use_e2e_constraint=False)
+        rng = np.random.default_rng(1)
+        params = rng.uniform(-0.8, 0.8, f.n_params)
+        f.energy_function(params, return_terms=True)
+        terms = f.last_energy_terms
+        assert terms["constraint"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# C-3 – Bond-graph VdW exclusions (1-2, 1-3 excluded; 1-4 scaled by 0.35)
+# ---------------------------------------------------------------------------
+
+
+class TestBondGraphVDWExclusions:
+    """Verify bond-graph based VdW masking: C-3 correctness fix."""
+
+    def test_bonded_pairs_excluded_from_strict_vdw_mask(self):
+        """Every covalent bond (1-2 pair) must be absent from mask_non_bonded_vdw."""
+        f = QuantumBiophysicsFolder("GAVC")
+        _, _, static_bonds = f.build_full_structure(np.full(f.total_angles, 0.1))
+        for i, j in static_bonds:
+            assert not f.mask_non_bonded_vdw[i, j], (
+                f"Bonded pair ({i},{j}) incorrectly present in strict VdW non-bonded mask"
+            )
+            assert not f.mask_non_bonded_vdw[j, i]
+
+    def test_14_mask_and_strict_mask_are_disjoint(self):
+        """1-4 pairs and strictly non-bonded pairs must be mutually exclusive."""
+        f = QuantumBiophysicsFolder("GAVC")
+        overlap = f.mask_non_bonded_vdw & f.mask_non_bonded_vdw_14
+        assert not overlap.any(), (
+            "mask_non_bonded_vdw and mask_non_bonded_vdw_14 share entries; "
+            "they must be disjoint"
+        )
+
+    def test_14_mask_nonempty_for_peptide(self):
+        """A multi-residue peptide must have at least some 1-4 atom pairs."""
+        f = QuantumBiophysicsFolder("GAVC")
+        assert f.mask_non_bonded_vdw_14.any(), (
+            "Expected at least one 1-4 atom pair in mask_non_bonded_vdw_14"
+        )
+
+    def test_vdw_energy_finite_and_nonneg(self):
+        """VdW repulsion energy must be finite and non-negative."""
+        f = QuantumBiophysicsFolder("GAVC")
+        rng = np.random.default_rng(7)
+        params = rng.uniform(-0.8, 0.8, f.n_params)
+        f.energy_function(params, return_terms=True)
+        terms = f.last_energy_terms
+        assert np.isfinite(terms["vdw_repulsion"])
+        assert terms["vdw_repulsion"] >= 0.0

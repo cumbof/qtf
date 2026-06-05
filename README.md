@@ -15,32 +15,33 @@
 3. [Package Structure](#package-structure)
 4. [Dependencies](#dependencies)
 5. [Installation](#installation)
-6. [Quick Start](#quick-start)
-7. [Core Concepts](#core-concepts)
+6. [CLI (`qtf-run`)](#cli-qtf-run)
+7. [Quick Start](#quick-start)
+8. [Core Concepts](#core-concepts)
    - [Holographic Encoding](#holographic-encoding)
    - [Degrees of Freedom](#degrees-of-freedom)
    - [NERF Geometry Builder](#nerf-geometry-builder)
    - [Three-Stage Optimisation](#three-stage-optimisation)
-8. [Physics Engine](#physics-engine)
+9. [Physics Engine](#physics-engine)
    - [Force Fields](#force-fields)
    - [Energy Terms](#energy-terms)
-9. [Ensemble Folding](#ensemble-folding)
-   - [Initialisation Strategy](#initialisation-strategy)
-   - [Running an Ensemble](#running-an-ensemble)
-10. [Ranking and Analysis](#ranking-and-analysis)
+10. [Ensemble Folding](#ensemble-folding)
+    - [Initialisation Strategy](#initialisation-strategy)
+    - [Running an Ensemble](#running-an-ensemble)
+11. [Ranking and Analysis](#ranking-and-analysis)
     - [EnsembleRanking Statistics](#ensembleranking-statistics)
     - [Convergence Assessment](#convergence-assessment)
     - [Kabsch RMSD](#kabsch-rmsd)
-11. [Visualisation](#visualisation)
+12. [Visualisation](#visualisation)
     - [3-D Structure Viewer](#3-d-structure-viewer)
     - [Energy Landscape](#energy-landscape)
     - [Ranking Dashboard](#ranking-dashboard)
-12. [PDB Utilities](#pdb-utilities)
-13. [API Reference](#api-reference)
-14. [Reproducibility](#reproducibility)
-15. [Logging](#logging)
-16. [References](#references)
-17. [License](#license)
+13. [PDB Utilities](#pdb-utilities)
+14. [API Reference](#api-reference)
+15. [Reproducibility](#reproducibility)
+16. [Logging](#logging)
+17. [References](#references)
+18. [License](#license)
 
 ---
 
@@ -119,9 +120,15 @@ qtf/
    └── plots.py                plot_structure(), plot_energy_landscape(), plot_ranking()
 
  utils/
-    ├── __init__.py
-    └── pdb.py                  save_pdb(), get_ground_truth_backbone(),
-                                calculate_physics_metrics()
+   ├── __init__.py
+   ├── pdb.py                  save_pdb(), get_ground_truth_backbone(),
+   │                           calculate_physics_metrics()
+   ├── workflow.py             make_folder() helper — wires optional backends
+   └── gromacs.py              GROMACS minimisation bridge (optional)
+
+ cli/
+   ├── __init__.py
+   └── run.py                  qtf-run CLI entry point
 ```
 
 ---
@@ -145,9 +152,10 @@ pip install "qtf[workflows]" # mdtraj, biopython, openmm, matplotlib workflow to
 ```
 
 The upstream experiment workflow code is kept inside the package as lowercase
-modules, matching this repository's structure. The main batch runner is available
-at `scripts/qtf_run.py`; supporting workflow modules live under `qtf/`, and the
-small reference panels/PDB inputs live under `experimental_structures/`.
+modules, matching this repository's structure. The main batch runner is the
+`qtf-run` CLI command (installed automatically with `pip install qtf`); its
+supporting workflow utilities live under `qtf/utils/workflow.py` and the
+optional GROMACS bridge under `qtf/utils/gromacs.py`.
 
 ---
 
@@ -168,6 +176,39 @@ pip install -e ".[dev]"
 ```
 
 **Minimum Python version:** 3.9
+
+---
+
+## CLI (`qtf-run`)
+
+A command-line interface is installed automatically with `pip install qtf`:
+
+```bash
+qtf-run --predict YYDPETGTWY --forcefield amber --ensemble_size 5
+```
+
+**Common flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--predict SEQ` | required | Target amino acid sequence |
+| `--forcefield` | `amber` | `amber` \| `opls` \| `charmm` \| `all` (runs all three) |
+| `--ensemble_size N` | `3` | Number of independent replicas |
+| `--maxiter N` | `2000` | Max optimiser iterations per stage |
+| `--prime_strategy` | `Random` | `Random` \| `Helix` \| `Sheet` \| `mixed` |
+| `--reference_structure PDB_ID` | None | RCSB PDB ID for RMSD comparison |
+| `--reference_pdb PATH` | None | Local PDB file for RMSD comparison |
+| `--rmsd_mode` | `ca` | `ca` (Cα only) \| `heavy` (all heavy atoms) |
+| `--rmsd_residue_scope` | `core` | `core` (drop first/last residue) \| `all` |
+| `--top_k N` | `1` | Save and compare the N lowest-energy models |
+| `--top_frac F` | None | Save the top fraction F (0–1) of models (overrides `--top_k`) |
+| `--energy_backend` | `custom` | Stage-3 scorer: `custom` \| `rosetta` \| `openmm` |
+| `--mode` | `predict_and_compare` | `predict_and_compare` \| `predict_only` |
+
+Outputs are written to `outputs/<SEQUENCE>_<FF>_<TIMESTAMP>/`:
+- Per-model PDB files with energy stored in `REMARK 1`
+- `results.json` — full per-replica statistics
+- RMSD comparison table (when `--reference_structure` or `--reference_pdb` is provided)
 
 ---
 
@@ -268,6 +309,7 @@ For a protein of length L, the degrees of freedom are:
 |------|------------------|-------------|
 | φ (phi) | 1 | N–Cα–C–N backbone dihedral angle |
 | ψ (psi) | 1 | Cα–C–N–Cα backbone dihedral angle |
+| ω (omega) | 0–1 | Peptide plane twist; exposed as an optimisable DOF only for the residue **preceding** a Pro (cis/trans isomerism) |
 | χ₁–χ₅ | 0–5 (residue-dependent) | Side-chain rotamer angles |
 
 **Side-chain torsion counts by residue:**
@@ -361,17 +403,23 @@ All three force fields share:
 
 ### Energy Terms
 
-The total energy `E_total` is evaluated at every optimiser step and is a sum of nine terms:
+The total energy `E_total` is evaluated at every optimiser step and is a sum of ten terms:
 
-#### 1. End-to-End Constraint (Hairpin Bias)
+#### 1. End-to-End Constraint
 
-A harmonic potential keeps the N-terminal and C-terminal Cα atoms at a target distance of 5.5 Å, enforcing a U-shaped hairpin topology that is typical of small β-hairpin peptides like Chignolin:
+A slack-band harmonic potential keeps the N-terminal and C-terminal Cα atoms near a
+**length-aware target distance** that scales with sequence length:
 
 ```
-E_constraint = λ · (d(Cα_first, Cα_last) − 5.5)²
+target = 4.5 + 0.40 · max(0, N − 5)   (Å)
+slack  = 1.5 + 0.05 · N               (Å)
+
+deviation = max(0, |d(Cα_first, Cα_last) − target| − slack)
+E_constraint = λ · deviation²
 ```
 
 `λ` = 50.0 in Stages 1–2, 5.0 in Stage 3 (released to let the protein explore freely).
+The constraint can be disabled at construction time with `use_e2e_constraint=False`.
 
 #### 2. Implicit Solvent / Hydrophobic Effect (SASA Approximation)
 
@@ -412,10 +460,13 @@ The strength −25.0 is deliberately large to strongly drive secondary-structure
 Pairwise Coulomb interactions between all atom pairs separated by at least 2 residues, with non-negligible partial charges (|q_i · q_j| > 10⁻⁴):
 
 ```
-sudo apt update  83.0 · qᵢ · qⱼ / max(rᵢⱼ, 1.0)²
+E_elec = 332.0637 · qᵢ · qⱼ / (4.0 · rᵢⱼ)
 ```
 
-The constant 83.0 is an approximate Coulomb constant in these unit-agnostic internal units. A distance floor of 1.0 Å prevents divergence for overlapping atoms (sterics handles those separately). The computation is vectorised using NumPy outer products and boolean masking.
+The prefactor 332.0637 is the Coulomb constant in kcal mol⁻¹ Å e⁻² and 4.0 is a
+uniform implicit-solvent dielectric constant (ε ≈ 4 is the standard choice for
+buried environments in coarse force fields; see Warshel & Russell, Q Rev Biophys
+1984). The computation is vectorised using NumPy outer products and boolean masking.
 
 #### 5. Disulfide Bonds (Cys–Cys SG Bridges)
 
@@ -433,12 +484,17 @@ When two or more cysteine residues are present, all SG–SG pairs are monitored:
   E_penalty  = +40.0 · max(0, saturation − 1.0)²
   ```
 
-#### 6. Sterics (Softened Lennard-Jones Repulsion)
+#### 6. Sterics (Bond-Graph VdW Repulsion)
 
-Steric clashes between all heavy-atom pairs separated by at least 2 residues are penalised with a softened 12-term:
+Steric clashes between heavy-atom pairs are penalised with a softened repulsion term.
+Non-bonded pairs are determined via a BFS over the covalent bond graph:
+
+- **1-2 pairs** (directly bonded) and **1-3 pairs** (two bonds apart) are fully excluded.
+- **1-4 pairs** (three bonds apart) contribute with a scale factor of **0.35** (AMBER convention).
+- All other pairs are included at full weight.
 
 ```
-sudo apt update < σᵢ + σⱼ
+term = (σᵢ + σⱼ) / (rᵢⱼ + 0.1))¹²    when rᵢⱼ < σᵢ + σⱼ
 ```
 
 where σ is the van der Waals radius (Bondi 1964). For extreme overlaps (term > 50), a logarithmic cap prevents gradient explosion during the early collapse stage:
@@ -447,7 +503,7 @@ where σ is the van der Waals radius (Bondi 1964). For extreme overlaps (term > 
 term = 50 + log(term − 49)   if term > 50
 ```
 
-The contribution is scaled by 0.1 to balance against the other energy terms. The full distance matrix is computed in one vectorised NumPy operation.
+The contribution is scaled by 0.1 to balance against the other energy terms.
 
 #### 7. Ramachandran Bias
 
@@ -493,11 +549,21 @@ The energy is `ΔE · exp(−(d − d_opt)²)` centred on the optimal distances 
 
 #### 10. Geometry Integrity
 
-Hard structural constraints penalise three types of physically impossible geometry:
+Structural constraints penalise three types of physically impossible geometry.
+All penalties use a **Huber loss** — quadratic for small deviations (smooth gradient
+signal for the optimiser) and linear for large deviations (prevents a single
+badly-placed atom from dominating the landscape):
 
-- **Proline ring closure**: The CD–N distance must be 1. 0.1 Å. Penalty: `+50 · (d − 1.47)²`47 
-- **L-chirality**: The signed volume `(N−Cα) × (C−Cα) · (Cβ−Cα)` must be > 1.0. Penalty: `+50 · (1 − volume)²` when violated.
-- **Peptide planarity (ω angle)**: The Cα–C–N'–Cα' dihedral must be near 180° (or 0° for Xaa-Pro). A planarity score is derived from the alignment of the two peptide-plane normal vectors. Penalty: `+20 · twist` when the twist exceeds 0.05.
+```
+huber(x, δ) = x²            if |x| ≤ δ
+            = 2δ|x| − δ²    if |x| > δ      (δ = 1.0 Å by default)
+```
+
+The three terms are:
+
+- **Proline ring closure**: The CD–N distance must be 1.47 ± δ Å. Penalty: `+50 · huber(d − 1.47)`.
+- **L-chirality**: The signed volume `(N−Cα) × (C−Cα) · (Cβ−Cα)` must be > 1.0. Penalty: `+50 · huber(max(0, 1 − volume))`.
+- **Peptide planarity (ω angle)**: The Cα–C–N'–Cα' dihedral must be near 180° (or 0° for Xaa-Pro). Penalty: `+20 · huber(twist)` when the twist exceeds 0.05.
 
 ---
 
@@ -505,7 +571,14 @@ Hard structural constraints penalise three types of physically impossible geomet
 
 ### Initialisation Strategy
 
-Each replica uses **random initialisation with basin-hopping**: `scout_attempts` random parameter vectors are drawn uniformly from [−0.8, 0.8]^P (where P is the circuit parameter count) and evaluated with the energy function. The lowest-energy vector is used as the starting point for the full three-stage optimisation.
+Each replica's starting point is determined by a `prime_strategy`:
+
+| Strategy | Description |
+|----------|-------------|
+| `"random"` (default) | `scout_attempts` random parameter vectors sampled from [−0.8, 0.8]^P; the lowest-energy one is used |
+| `"helix"` | Circuit is pre-optimised to output canonical α-helix torsions (φ ≈ −60°, ψ ≈ −45°) before the main optimisation |
+| `"sheet"` | Circuit is pre-optimised to output β-sheet torsions (φ ≈ −135°, ψ ≈ 135°) |
+| `"mixed"` | Replicas are split evenly between helix and sheet priming |
 
 Seeds are derived deterministically from the protein sequence using SHA-256:
 
@@ -528,13 +601,20 @@ folder = QuantumBiophysicsFolder("ACDEFGHIKLMNPQRSTVWY", force_field="charmm")
 manager = EnsembleFoldingManager(folder)
 
 manager.run_ensemble(
-    n_runs=10,            # run 10 independent replicas
-    max_iter=3000,        # maximum optimiser iterations per stage, per replica
-    scout_attempts=100,   # basin-hopping breadth (higher = better start but slower)
+    n_runs=10,                # run 10 independent replicas
+    max_iter=3000,            # maximum optimiser iterations per stage, per replica
+    scout_attempts=100,       # basin-hopping breadth (higher = better start but slower)
+    prime_strategy="random",  # "random" | "helix" | "sheet" | "mixed"
 )
 
 # Retrieve results sorted by ascending final energy
 results = manager.get_results()
+
+# Retrieve top-k lowest-energy results
+top3 = manager.select_top(top_k=3)
+
+# Retrieve top 20% lowest-energy results
+top_frac = manager.select_top(top_frac=0.2)
 ```
 
 Each element of `results` is a `dict` with the following keys:
@@ -841,7 +921,13 @@ print(f"Radius of gyration  : {rg:.2f} Å")
 ### `QuantumBiophysicsFolder`
 
 ```python
-class QuantumBiophysicsFolder(sequence: str, force_field: str = "charmm")
+class QuantumBiophysicsFolder(
+    sequence: str,
+    force_field: str = "charmm",
+    use_e2e_constraint: bool = True,
+    e2e_scale: float = 1.0,
+    energy_backend: str = "custom",
+)
 ```
 
 **Constructor parameters:**
@@ -850,6 +936,9 @@ class QuantumBiophysicsFolder(sequence: str, force_field: str = "charmm")
 |-----------|------|---------|-------------|
 | `sequence` | str | — | Single-letter amino acid sequence (case-insensitive) |
 | `force_field` | str | `"charmm"` | One of `"charmm"`, `"amber"`, `"opls"` |
+| `use_e2e_constraint` | bool | `True` | Enable/disable the length-aware end-to-end constraint |
+| `e2e_scale` | float | `1.0` | Multiplier for the E2E constraint strength |
+| `energy_backend` | str | `"custom"` | Scoring backend for Stage 3: `"custom"` (built-in), `"rosetta"` (PyRosetta, optional), `"openmm"` (OpenMM, optional) |
 
 **Key attributes (post-construction):**
 
@@ -872,17 +961,18 @@ class QuantumBiophysicsFolder(sequence: str, force_field: str = "charmm")
 | `vdw_radii_vector` | ndarray | VdW radii per atom, shape `(N_atoms,)` |
 | `mask_heavy` | ndarray (bool) | True for non-hydrogen atoms |
 | `mask_hydrophobic` | ndarray (bool) | True for hydrophobic carbon atoms |
-| `mask_non_bonded` | ndarray (bool) | True for pairs separated by ≥ 2 residues, shape `(N_atoms, N_atoms)` |
+| `mask_non_bonded_vdw` | ndarray (bool) | True for pairs with bond-graph distance > 3 (strict non-bonded), shape `(N_atoms, N_atoms)` |
+| `mask_non_bonded_vdw_14` | ndarray (bool) | True for 1-4 pairs (bond-graph distance = 3; scaled by 0.35 in VdW) |
 
 **Methods:**
 
 | Method | Signature | Returns | Description |
 |--------|-----------|---------|-------------|
-| `_get_angles` | `(params: ndarray)` | `ndarray` | Map circuit parameters → N torsion angles via statevector phases |
+| `_get_angles` | `(params: ndarray)` | `ndarray` | Map circuit parameters → N torsion angles via statevector phases (phases[0] pinned to 0 to remove global phase) |
 | `build_full_structure` | `(angle_vector: ndarray)` | `(coords, labels, bonds)` | NERF geometry builder; all-atom 3-D coordinates |
-| `energy_function` | `(params: ndarray)` | `float` | Evaluate total force-field energy; logs to tracker if set |
+| `energy_function` | `(params: ndarray, return_terms: bool = False)` | `float` | Evaluate total force-field energy; stores per-term breakdown in `last_energy_terms` when `return_terms=True` |
 | `get_smart_initialization` | `(n_attempts=20, seed=None)` | `ndarray` | Basin-hopping: return the best of `n_attempts` random parameter vectors |
-| `fold` | `(max_iter=2000, initial_params=None)` | `(coords, labels, bonds, tracker, params, energy)` | Run the full three-stage optimisation curriculum |
+| `fold` | `(max_iter=2000, initial_params=None, scout_attempts=None)` | `(coords, labels, bonds, tracker, params, energy)` | Run the full three-stage optimisation curriculum; `scout_attempts` caps basin-hopping budget (defaults to `min(64, max_iter // 10)`) |
 
 ---
 
@@ -896,8 +986,11 @@ class EnsembleFoldingManager(folder: QuantumBiophysicsFolder)
 
 | Method | Signature | Returns | Description |
 |--------|-----------|---------|-------------|
-| `run_ensemble` | `(n_runs=5, max_iter=2000, scout_attempts=50)` | `None` | Run `n_runs` independent replicas with random initialisation |
+| `run_ensemble` | `(n_runs=5, max_iter=2000, scout_attempts=50, prime_strategy="random")` | `None` | Run `n_runs` independent replicas; `prime_strategy` controls initialisation |
 | `get_results` | `()` | `list[dict]` | All replica dicts, sorted by ascending energy |
+| `get_ranked_results` | `()` | `list[dict]` | Alias of `get_results()` |
+| `select_top` | `(top_k=None, top_frac=None)` | `list[dict]` | Return the `top_k` (or `top_frac` fraction) lowest-energy replicas |
+| `prime_circuit` | `(target_type="helix", seed=42)` | `ndarray` | Pre-optimise circuit parameters to target backbone geometry; returns initial params |
 
 ---
 
