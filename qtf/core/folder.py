@@ -266,7 +266,7 @@ class QuantumBiophysicsFolder:
         is conventionally undefined (or set to a reference value).  The
         optimiser therefore controls ``K − 1`` independent phase degrees of
         freedom for K total torsion angles.
-        """
+        
         param_dict = dict(zip(self.ansatz.parameters, params))
         bound_circuit = self.ansatz.assign_parameters(param_dict)
         psi = Statevector(bound_circuit).data
@@ -274,6 +274,7 @@ class QuantumBiophysicsFolder:
         # Remove global phase: pin phases[0] to 0 and wrap into (-π, π].
         phases = (phases - np.angle(psi[0]) + np.pi) % (2 * np.pi) - np.pi
         return phases
+        """
     # ──────────────────────────────────────────────────────────────────────────
     # CORE: _get_angles — two modes
     # ──────────────────────────────────────────────────────────────────────────
