@@ -23,11 +23,19 @@ import hashlib
 import logging
 
 import numpy as np
+from qiskit import transpile
 from qiskit.circuit.library import efficient_su2
 from qiskit.quantum_info import Statevector
 from scipy.optimize import minimize
+from qiskit.circuit.library import EfficientSU2 as efficient_su2
+from qiskit import transpile, QuantumCircuit
+from qiskit_aer import AerSimulator
+from qiskit.circuit import ParameterVector
+from qiskit_ibm_runtime import QiskitRuntimeService
+    
 
 from qtf.core.tracker import LandscapeTracker
+
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +64,10 @@ _TOPOLOGY_SEED_ANGLE: float = 0.1
 # optimiser.  Value of 1.0 Å corresponds to roughly one bond length of
 # distortion before saturation kicks in.
 _HUBER_DELTA_GEOM: float = 1.0
+
+
+#service = QiskitRuntimeService(token="YOUR_TOKEN")
+#backend = service.backend("ibm_Miami")
 
 
 class QuantumBiophysicsFolder:
@@ -197,7 +209,52 @@ class QuantumBiophysicsFolder:
         # ------------------------------------------------------------------
         self.n_qubits = max(2, int(np.ceil(np.log2(self.total_angles))))
         self.reps = int(np.ceil(self.total_angles / self.n_qubits)) + 2
+        def build_brickwork_ansatz(n_qubits, reps):
+            """
+            Custom brickwork (brick-layer) ansatz.
+            
+            Structure per rep:
+            Layer 1: Ry+Rz on ALL qubits
+            Layer 2: CX on EVEN pairs  (0-1, 2-3, 4-5, ...)
+            Layer 3: CX on ODD pairs   (1-2, 3-4, 5-6, ...)
+            
+            This gives full connectivity with fewer serial 2Q layers
+            than circular entanglement — lower depth, less noise on hardware.
+            
+            Gate count per rep:
+            - 2 * n_qubits single-qubit rotations
+            - (n_qubits-1) CX gates split across 2 layers
+            """
+            # Total params: 2 rotations per qubit per rep + 2 final rotations
+            n_params_total = 2 * n_qubits * (reps + 1)
+            params = ParameterVector('θ', n_params_total)
+            qc     = QuantumCircuit(n_qubits)
+            p_idx  = 0
+
+            for rep in range(reps):
+
+                # ── Single-qubit rotation layer ────────────────────────────────
+                for q in range(n_qubits):
+                    qc.ry(params[p_idx],     q); p_idx += 1
+                    qc.rz(params[p_idx],     q); p_idx += 1
+
+                # ── Even layer: CX on (0,1), (2,3), (4,5), ... ────────────────
+                for q in range(0, n_qubits - 1, 2):
+                    qc.cx(q, q + 1)
+
+                # ── Odd layer: CX on (1,2), (3,4), (5,6), ... ────────────────
+                for q in range(1, n_qubits - 1, 2):
+                    qc.cx(q, q + 1)
+
+            # ── Final rotation layer (no entanglement after) ───────────────────
+            for q in range(n_qubits):
+                qc.ry(params[p_idx], q); p_idx += 1
+                qc.rz(params[p_idx], q); p_idx += 1
+
+            return qc
+
         self.ansatz = efficient_su2(self.n_qubits, reps=self.reps, entanglement="circular")
+        #self.ansatz   = build_brickwork_ansatz(self.n_qubits, self.reps)
         self.n_params = self.ansatz.num_parameters
 
         self.current_stage = 1
@@ -244,9 +301,9 @@ class QuantumBiophysicsFolder:
                 logger.warning("Unknown force field '%s'. Defaulting to CHARMM.", force_field)
             charges.update(charmm)
         return charges
-
+    """
     def _get_angles(self, params: np.ndarray) -> np.ndarray:
-        """Map circuit parameters to torsion angles via statevector phases.
+        Map circuit parameters to torsion angles via statevector phases.
 
         The 2ⁿ complex amplitudes of the statevector each carry a phase in
         ``(-π, π]``.  The first ``total_angles`` phases are used as torsion
@@ -259,7 +316,6 @@ class QuantumBiophysicsFolder:
         ``|0…0⟩`` basis-state amplitude) from all extracted phases, so that
         ``phases[0]`` is always 0.  The result is wrapped back into
         ``(-π, π]``.
-
         **Consequence**: the zeroth entry of ``dof_map`` — φ of residue 0,
         the N-terminal φ dihedral — is held at 0 and cannot be optimised.
         This is acceptable: the N-terminal φ has no backbone predecessor and
@@ -275,179 +331,45 @@ class QuantumBiophysicsFolder:
         phases = (phases - np.angle(psi[0]) + np.pi) % (2 * np.pi) - np.pi
         return phases
         """
-    # ──────────────────────────────────────────────────────────────────────────
-    # CORE: _get_angles — two modes
-    # ──────────────────────────────────────────────────────────────────────────
     def _get_angles(self, params, mode: str = "statevector", backend=None, shots: int = 4096):
-        """
-        Maps circuit parameters → torsion angles.
-
-        Parameters
-        ----------
-        params  : np.ndarray   — circuit parameters (trainable)
-        mode    : str
-            "statevector"  — exact classical simulation (used during optimisation)
-            "sampler"      — measurement-based extraction (used for final hardware run)
-        backend : Qiskit backend or None
-            Only used when mode="sampler".
-            None → AerSimulator() (noiseless shot-based sim).
-            Pass a real IBM backend for actual hardware execution.
-        shots   : int
-            Number of shots per basis circuit (only used in sampler mode).
-        """
         if self.ansatz is None:
             raise RuntimeError("Qiskit not available.")
 
-        # ── bind params ────────────────────────────────────────────────────────
+        # Bind parameters to circuit
         param_dict    = dict(zip(self.ansatz.parameters, params))
         bound_circuit = self.ansatz.assign_parameters(param_dict)
 
-        # ══════════════════════════════════════════════════════════════════════
-        # MODE 1: STATEVECTOR  (classical optimisation phase)
-        # ══════════════════════════════════════════════════════════════════════
+        # ── MODE 1: STATEVECTOR ────────────────────────────────────────────────
         if mode == "statevector":
-            if Statevector is None:
-                raise RuntimeError("Statevector not available. Install qiskit.")
-            sv   = Statevector(bound_circuit).data
-            return np.angle(sv)[:self.total_angles]
+            sv     = Statevector(bound_circuit).data
+            angles = np.angle(sv)                        # complex amplitudes → angles in [-π, π]
+            return angles[:self.total_angles]            # trim to what we need
 
-        # ══════════════════════════════════════════════════════════════════════
-        # MODE 2: SAMPLER  (hardware / noisy-sim final extraction)
-        # ══════════════════════════════════════════════════════════════════════
+        # ── MODE 2: SHOT-BASED ─────────────────────────────────────────────────
         if mode == "sampler":
             if backend is None:
-                backend = AerSimulator()
-
+                backend = AerSimulator()                 # default noiseless shot sim
             n        = self.n_qubits
-            n_states = 2 ** n   # full probability vector length e.g. 64 for n=6
+            n_states = 2 ** n
+            # Measure in Z basis only
+            qc = bound_circuit.copy()
+            qc.measure_all()
+            tqc    = transpile(qc, backend)
+            counts = backend.run(tqc, shots=shots).result().get_counts()
 
-            # ── helpers ───────────────────────────────────────────────────────
-            def _basis_circuit(qc, basis: str):
-                c = qc.copy()
-                if basis == "X":
-                    for q in range(n):
-                        c.h(q)
-                elif basis == "Y":
-                    for q in range(n):
-                        c.sdg(q)
-                        c.h(q)
-                c.measure_all()
-                return c
+            # Counts → probability vector of length 2^n
+            pvec  = np.zeros(n_states, dtype=float)
+            total = sum(counts.values())
+            for bitstring, c in counts.items():
+                bs       = bitstring.replace(" ", "")[::-1]   # qubit-0 = LSB
+                idx      = int(bs, 2)
+                pvec[idx] += c / total
 
-            def _run(qc):
-                tqc = transpile(qc, backend)
-                job = backend.run(tqc, shots=shots)
-                return job.result().get_counts()
+            # CDF of prob vector → mapped to [-π, π]
+            cdf    = np.cumsum(pvec)                     # length 2^n, range [0, 1]
+            angles = 2.0 * np.pi * cdf - np.pi          # → [-π, π]
 
-            def _counts_to_pvec(counts):
-                """
-                Convert measurement counts → full probability vector of length 2^n.
-                Each bitstring maps to an integer index (qubit-0 = LSB).
-                """
-                pvec  = np.zeros(n_states, dtype=float)
-                total = sum(counts.values())
-                for bitstring, c in counts.items():
-                    bs  = bitstring.replace(" ", "")[::-1]  # qubit-0 at index 0
-                    idx = int(bs, 2)                         # binary → integer
-                    pvec[idx] += c / total
-                return pvec
-
-            # ── run Z / X / Y → full probability vectors ──────────────────────
-            pZ = _counts_to_pvec(_run(_basis_circuit(bound_circuit, "Z")))
-            pX = _counts_to_pvec(_run(_basis_circuit(bound_circuit, "X")))
-            pY = _counts_to_pvec(_run(_basis_circuit(bound_circuit, "Y")))
-
-            # ── convert probability vectors → angles ───────────────────────────
-            # State angles: each state |k> assigned angle 2π*k/N on unit circle
-            state_angles = 2.0 * np.pi * np.arange(n_states) / n_states
-
-            def _marginal_angles(pvec):
-                """
-                Per-qubit marginal: p(qubit_i = 1) = sum of probs where bit i = 1
-                Map [0,1] → [-π, π] via:  angle = 2π * p1 - π
-                Gives n angles, one per qubit.
-                """
-                angles = []
-                for q in range(n):
-                    mask = np.array([(k >> q) & 1 for k in range(n_states)],
-                                    dtype=float)
-                    p1 = np.dot(pvec, mask)              # P(qubit q = 1)
-                    angles.append(2.0 * np.pi * p1 - np.pi)
-                return np.array(angles)
-
-            def _circular_mean(pvec):
-                """
-                Circular mean of the full distribution weighted by state_angles.
-                Captures where probability mass is concentrated on the circle.
-                angle = atan2(Σ p_k sin(θ_k), Σ p_k cos(θ_k)) → [-π, π]
-                """
-                s = np.sum(pvec * np.sin(state_angles))
-                c = np.sum(pvec * np.cos(state_angles))
-                return np.arctan2(s, c)
-
-            def _cdf_angles(pvec):
-                """
-                Map full 2^n probability vector → 2^n angles via CDF.
-                CDF[k] = cumulative probability up to state k → mapped to [-π, π].
-                This preserves the full shape of the distribution.
-                """
-                cdf = np.cumsum(pvec)                    # length 2^n
-                return 2.0 * np.pi * cdf - np.pi        # map [0,1] → [-π, π]
-
-            # ── build angle set from all three bases ───────────────────────────
-            # Per-qubit marginals: n angles per basis    → 3n total
-            mZ = _marginal_angles(pZ)
-            mX = _marginal_angles(pX)
-            mY = _marginal_angles(pY)
-
-            # Circular means: 1 per basis               → 3 total
-            cmZ = _circular_mean(pZ)
-            cmX = _circular_mean(pX)
-            cmY = _circular_mean(pY)
-
-            # CDF-based angles from Z basis: 2^n angles → richest signal
-            cdf_angles = _cdf_angles(pZ)                # length 64 for n=6
-
-            # Cross-basis KL divergence angles           → 2 total
-            eps = 1e-12
-            kl_ZX = float(np.sum(pZ * np.log((pZ + eps) / (pX + eps))))
-            kl_ZY = float(np.sum(pZ * np.log((pZ + eps) / (pY + eps))))
-            cross_1 = np.arctan(kl_ZX) * 2.0 - np.pi / 2.0
-            cross_2 = np.arctan(kl_ZY) * 2.0 - np.pi / 2.0
-
-            # Stack everything
-            # Total: n + n + n + 3 + 2^n + 2 = 3n+5 + 2^n angles
-            # For n=6: 3*6+5 + 64 = 87 angles — more than enough for 33 total_angles
-            base = np.concatenate([
-                mZ,                          # n marginal angles from Z
-                mX,                          # n marginal angles from X
-                mY,                          # n marginal angles from Y
-                [cmZ, cmX, cmY],             # 3 circular means
-                cdf_angles,                  # 2^n CDF angles (richest)
-                [cross_1, cross_2],          # 2 cross-basis angles
-            ])
-
-            # ── clip to [-π, π] ────────────────────────────────────────────────
-            base = np.clip(base, -np.pi, np.pi)
-
-            # ── expand to total_angles if needed ───────────────────────────────
-            if len(base) == 0:
-                base = np.zeros(1, dtype=float)
-            if len(base) >= self.total_angles:
-                return base[:self.total_angles]
-
-            out = np.zeros(self.total_angles, dtype=float)
-            out[:len(base)] = base
-            L = len(base)
-            for k in range(L, self.total_angles):
-                i = k % L
-                j = (k * 3 + 1) % L
-                m = (k * 7 + 2) % L
-                v = (0.60 * base[i]
-                     + 0.30 * np.sin(base[j])
-                     + 0.10 * np.cos(base[m]))
-                out[k] = (v + np.pi) % (2 * np.pi) - np.pi
-            return out
+            return angles[:self.total_angles]            # trim to what we need
         raise ValueError(f"Unknown mode: '{mode}'. Use 'statevector' or 'sampler'.")
 
     @staticmethod
@@ -707,7 +629,11 @@ class QuantumBiophysicsFolder:
             gamma = 5.0
             constraint_strength = 5.0
 
-        angle_vec = self._get_angles(params)
+        # Pick ONE of these:
+        angle_vec = self._get_angles(params)                                    # statevector (default)
+        # angle_vec = self._get_angles(params, mode="sampler", shots=4096)      # shot-based
+        # angle_vec = self._get_angles(params, mode="sampler",                  # real hardware
+        #                 backend=your_backend, shots=4096)
         coords, _, _ = self.build_full_structure(angle_vec)
         total_energy = 0.0
 
@@ -1108,5 +1034,14 @@ class QuantumBiophysicsFolder:
                          tol=1e-6, options={"maxiter": max_iter, "disp": False})
         logger.info("  Final energy: %.2f", res_3.fun)
 
-        coords, labels, bonds = self.build_full_structure(self._get_angles(res_3.x))
+        # Statevector (default)
+        angle_vec = self._get_angles(res_3.x)
+
+        # Shot-based
+        # angle_vec = self._get_angles(res_3.x, mode="sampler", shots=4096)
+
+        # Real hardware
+        # angle_vec = self._get_angles(res_3.x, mode="sampler", backend=your_backend, shots=4096)
+
+        coords, labels, bonds = self.build_full_structure(angle_vec)
         return coords, labels, bonds, self.tracker, res_3.x, res_3.fun
