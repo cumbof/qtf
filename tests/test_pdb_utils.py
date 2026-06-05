@@ -2,11 +2,13 @@
 
 import os
 import tempfile
+import urllib.error
+import urllib.request
 
 import numpy as np
 import pytest
 
-from qtf.utils.pdb import calculate_physics_metrics, save_pdb
+from qtf.utils.pdb import calculate_physics_metrics, get_ground_truth_backbone, save_pdb
 
 
 # ---------------------------------------------------------------------------
@@ -185,3 +187,289 @@ def test_save_pdb_resnames_override_sequence():
         assert " ALA " not in content
     finally:
         os.unlink(fname)
+
+
+# ---------------------------------------------------------------------------
+# get_ground_truth_backbone (B6: User-Agent, timeout, retries, HTTPS-only)
+# ---------------------------------------------------------------------------
+
+
+def _write_minimal_pdb(path: str, n_ca: int = 5) -> None:
+    """Write a minimal PDB file with ``n_ca`` CA atoms and a few
+    header lines, suitable for being parsed by
+    ``get_ground_truth_backbone`` without hitting the network."""
+    lines = [
+        "HEADER    MINIMAL TEST PDB                             01-JAN-00   TEST",
+        "TITLE     A SHORT TEST PDB FOR GET_GROUND_TRUTH_BACKBONE",
+        # Pad the file to > _MIN_VALID_PDB_BYTES so the size validator
+        # in _download_pdb does not reject it.  200 bytes is the floor.
+        "REMARK   1 THIS IS A FAKE PDB USED ONLY BY THE QTF UNIT TESTS.",
+        "REMARK   2 IT IS NOT BIOLOGICALLY MEANINGFUL.",
+    ]
+    for i in range(n_ca):
+        serial = i + 1
+        x, y, z = float(i), 0.0, 0.0
+        lines.append(
+            f"ATOM  {serial:5d}  CA  ALA A{serial:4d}    "
+            f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00           C"
+        )
+    lines.append("END\n")
+    with open(path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def test_get_ground_truth_backbone_uses_cache(tmp_path, monkeypatch):
+    """If a cached PDB file already exists, the network must NOT be
+    touched. B6 also ensures the cache file is loaded even if it
+    was downloaded by a previous version of QTF."""
+    cache_file = tmp_path / "1CRN.pdb"
+    _write_minimal_pdb(str(cache_file), n_ca=3)
+
+    def _explode(*_a, **_k):
+        raise AssertionError("urlopen must not be called when the cache is warm")
+
+    monkeypatch.setattr("qtf.utils.pdb.urllib.request.urlopen", _explode)
+
+    coords = get_ground_truth_backbone("1CRN", cache_dir=str(tmp_path))
+    assert coords.shape == (3, 3)
+
+
+def test_get_ground_truth_backbone_user_agent_and_timeout(tmp_path, monkeypatch):
+    """The download request must:
+      * include a `User-Agent` header (B6: RCSB returns 403 without one),
+      * pass a finite `timeout=` to `urlopen` (B6: default timeout is
+        unbounded, hangs for minutes on rate-limited responses).
+    """
+    captured: dict = {}
+
+    class _FakeResponse:
+        def __init__(self, body: bytes):
+            self._body = body
+
+        def read(self) -> bytes:
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+    def _fake_urlopen(req, timeout=None):
+        captured["req"] = req
+        captured["timeout"] = timeout
+        # Build a body large enough to pass the size validator
+        # (>=200 bytes) and that contains at least one CA atom line.
+        body = (
+            b"REMARK   1 FAKE PDB USED ONLY BY QTF UNIT TESTS, NOT BIOLOGICALLY MEANINGFUL.\n"
+            b"REMARK   2 PAD TO PASS THE 200-BYTE SIZE VALIDATOR.  PAD.  PAD.  PAD.  PAD.  PAD.\n"
+            b"ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00           C\n"
+        )
+        return _FakeResponse(body)
+
+    monkeypatch.setattr("qtf.utils.pdb.urllib.request.urlopen", _fake_urlopen)
+
+    coords = get_ground_truth_backbone("1ABC", cache_dir=str(tmp_path))
+
+    # The Request was built with a User-Agent
+    assert "User-agent" in captured["req"].headers
+    assert captured["req"].headers["User-agent"].startswith("QTF/")
+    # The urlopen call received a finite timeout
+    assert captured["timeout"] is not None
+    assert captured["timeout"] > 0
+    # The URL is HTTPS only
+    assert captured["req"].full_url.startswith("https://")
+    # And the parser saw the single CA atom we wrote
+    assert coords.shape == (1, 3)
+
+
+def test_get_ground_truth_backbone_retries_on_503(tmp_path, monkeypatch):
+    """A 503 Service Unavailable response must be retried. After the
+    retry budget is exhausted, the function raises a RuntimeError
+    (not an urllib.error.HTTPError, so callers can catch a single
+    exception type regardless of cause)."""
+    call_count = {"n": 0}
+    sleeps: list[float] = []
+
+    good_body = (
+        b"REMARK   1 FAKE PDB USED ONLY BY QTF UNIT TESTS, NOT BIOLOGICALLY MEANINGFUL.\n"
+        b"REMARK   2 PAD TO PASS THE 200-BYTE SIZE VALIDATOR.  PAD.  PAD.  PAD.  PAD.  PAD.\n"
+        b"ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00           C\n"
+    )
+
+    class _FakeResponse:
+        def __init__(self, body: bytes):
+            self._body = body
+
+        def read(self) -> bytes:
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+    def _fake_urlopen(req, timeout=None):
+        call_count["n"] += 1
+        if call_count["n"] < 3:
+            # First two attempts: 503 Service Unavailable
+            raise urllib.error.HTTPError(
+                req.full_url, 503, "Service Unavailable", {}, None
+            )
+        # Third attempt: success
+        return _FakeResponse(good_body)
+
+    # Short-circuit the sleep so the test does not take 3+ seconds.
+    monkeypatch.setattr("qtf.utils.pdb.time.sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr("qtf.utils.pdb.urllib.request.urlopen", _fake_urlopen)
+
+    coords = get_ground_truth_backbone("2GB1", cache_dir=str(tmp_path))
+
+    assert call_count["n"] == 3, f"expected 3 attempts, got {call_count['n']}"
+    # The retry sleep was the documented exponential backoff
+    assert sleeps[:2] == [0.5, 1.0]
+    assert coords.shape == (1, 3)
+
+
+def test_get_ground_truth_backbone_eventually_fails_after_503_exhausted(tmp_path, monkeypatch):
+    """If the server keeps returning 503, the function must give up
+    after the retry budget and raise a RuntimeError, not a raw
+    urllib HTTPError."""
+    monkeypatch.setattr("qtf.utils.pdb.time.sleep", lambda _s: None)
+
+    def _fake_urlopen(req, timeout=None):
+        raise urllib.error.HTTPError(
+            req.full_url, 503, "Service Unavailable", {}, None
+        )
+
+    monkeypatch.setattr("qtf.utils.pdb.urllib.request.urlopen", _fake_urlopen)
+
+    with pytest.raises(RuntimeError, match="503"):
+        get_ground_truth_backbone("5AWL", cache_dir=str(tmp_path))
+
+
+def test_get_ground_truth_backbone_rejects_http_url(monkeypatch):
+    """B6: only HTTPS is allowed. A future refactor that flips the
+    URL template to http:// must surface a hard error rather than
+    silently leaking credentials or accepting MITM."""
+    from qtf.utils import pdb as qtf_pdb
+    monkeypatch.setattr(
+        qtf_pdb, "_PDB_DOWNLOAD_URL_TEMPLATE", "http://files.rcsb.org/download/{pdb_id}.pdb"
+    )
+
+    # Force a download by ensuring the cache misses. We point cache_dir
+    # at a fresh tmp dir.
+    import tempfile as _tempfile
+    with _tempfile.TemporaryDirectory() as cache_dir:
+        with pytest.raises(ValueError, match="HTTPS"):
+            get_ground_truth_backbone("5AWL", cache_dir=cache_dir)
+
+
+def test_get_ground_truth_backbone_detects_truncation(tmp_path, monkeypatch):
+    """If the server returns an empty or suspiciously small body
+    (e.g. an HTML error page that snuck through a redirect), the
+    function must raise a RuntimeError and NOT cache the bad file."""
+
+    class _FakeResponse:
+        def __init__(self, body: bytes):
+            self._body = body
+
+        def read(self) -> bytes:
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+    def _fake_urlopen(req, timeout=None):
+        # 50 bytes is below the 200-byte floor.
+        return _FakeResponse(b"too short\n")
+
+    monkeypatch.setattr("qtf.utils.pdb.urllib.request.urlopen", _fake_urlopen)
+    monkeypatch.setattr("qtf.utils.pdb.time.sleep", lambda _s: None)
+
+    target = tmp_path / "5AWL.pdb"
+    with pytest.raises(RuntimeError, match="truncated"):
+        get_ground_truth_backbone("5AWL", cache_dir=str(tmp_path))
+    # The bad response must NOT have been cached.
+    assert not target.exists()
+
+
+def test_get_ground_truth_backbone_retries_on_urlerror(tmp_path, monkeypatch):
+    """Transient URLErrors (e.g. DNS hiccup) must be retried with
+    the same exponential backoff as HTTP 5xx."""
+
+    good_body = (
+        b"REMARK   1 FAKE PDB USED ONLY BY QTF UNIT TESTS, NOT BIOLOGICALLY MEANINGFUL.\n"
+        b"REMARK   2 PAD TO PASS THE 200-BYTE SIZE VALIDATOR.  PAD.  PAD.  PAD.  PAD.  PAD.\n"
+        b"ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00           C\n"
+    )
+
+    class _FakeResponse:
+        def __init__(self, body: bytes):
+            self._body = body
+
+        def read(self) -> bytes:
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+    call_count = {"n": 0}
+    sleeps: list[float] = []
+
+    def _fake_urlopen(req, timeout=None):
+        call_count["n"] += 1
+        if call_count["n"] < 2:
+            raise urllib.error.URLError("simulated DNS failure")
+        return _FakeResponse(good_body)
+
+    monkeypatch.setattr("qtf.utils.pdb.time.sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr("qtf.utils.pdb.urllib.request.urlopen", _fake_urlopen)
+
+    coords = get_ground_truth_backbone("6LYZ", cache_dir=str(tmp_path))
+
+    assert call_count["n"] == 2
+    assert sleeps[:1] == [0.5]
+    assert coords.shape == (1, 3)
+
+
+def test_get_ground_truth_backbone_creates_cache_dir(tmp_path, monkeypatch):
+    """`cache_dir` may not exist yet; the function must create it
+    rather than crash with FileNotFoundError."""
+    fresh = tmp_path / "deep" / "nested" / "cache"
+    assert not fresh.exists()
+
+    good_body = (
+        b"REMARK   1 FAKE PDB USED ONLY BY QTF UNIT TESTS, NOT BIOLOGICALLY MEANINGFUL.\n"
+        b"REMARK   2 PAD TO PASS THE 200-BYTE SIZE VALIDATOR.  PAD.  PAD.  PAD.  PAD.  PAD.\n"
+        b"ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00           C\n"
+    )
+
+    class _FakeResponse:
+        def __init__(self, body: bytes):
+            self._body = body
+
+        def read(self) -> bytes:
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+    monkeypatch.setattr(
+        "qtf.utils.pdb.urllib.request.urlopen",
+        lambda req, timeout=None: _FakeResponse(good_body),
+    )
+    coords = get_ground_truth_backbone("7XYZ", cache_dir=str(fresh))
+    assert coords.shape == (1, 3)
+    assert fresh.is_dir()
+    assert (fresh / "7XYZ.pdb").exists()

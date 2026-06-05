@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import tempfile
+import time
+import urllib.error
 import urllib.request
 from typing import List, Optional, Sequence, Union
 
 import numpy as np
+
+
+logger = logging.getLogger(__name__)
 
 
 _AA1_TO_3 = {
@@ -15,6 +22,31 @@ _AA1_TO_3 = {
     "L": "LEU", "K": "LYS", "M": "MET", "F": "PHE", "P": "PRO",
     "S": "SER", "T": "THR", "W": "TRP", "Y": "TYR", "V": "VAL",
 }
+
+
+# ---------------------------------------------------------------------------
+# Network configuration for PDB downloads
+# ---------------------------------------------------------------------------
+# B6 hardening: RCSB and the EBI mirror reject unauthenticated
+# `urllib` requests that lack a `User-Agent` header (HTTP 403), and
+# the default socket timeout is *unbounded*, so a rate-limited
+# response can hang the call for several minutes. We set a sensible
+# `User-Agent`, a finite `timeout`, and an exponential-backoff retry
+# loop. The values below are tuned for the public RCSB
+# `https://files.rcsb.org/download/<PDB>.pdb` endpoint, which serves
+# the same files as the EBI mirror.
+
+# Keep the version in sync with qtf.__version__.
+_USER_AGENT = "QTF/0.3.1 (+https://github.com/cumbof/QTF)"
+
+_PDB_DOWNLOAD_URL_TEMPLATE = "https://files.rcsb.org/download/{pdb_id}.pdb"
+
+_DEFAULT_DOWNLOAD_TIMEOUT = 15.0   # seconds
+_MAX_DOWNLOAD_RETRIES = 3
+_RETRY_BACKOFFS_SEC = (0.5, 1.0, 2.0)
+_MIN_VALID_PDB_BYTES = 200         # any real PDB file is far larger; this catches truncation
+# HTTP status codes that warrant a retry (server-side, transient).
+_RETRY_HTTP_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
 
 
 def _resolve_resname(
@@ -171,6 +203,101 @@ def save_pdb(
         f.write("END\n")
 
 
+def _download_pdb(
+    pdb_id: str,
+    target_path: str,
+    *,
+    timeout: float = _DEFAULT_DOWNLOAD_TIMEOUT,
+    max_retries: int = _MAX_DOWNLOAD_RETRIES,
+) -> None:
+    """Download ``pdb_id`` from RCSB to ``target_path`` with retries.
+
+    B6 hardening:
+      * Sets a ``User-Agent`` header (RCSB returns 403 without one).
+      * Uses a finite ``timeout`` so a stuck connection does not hang
+        the caller for minutes.
+      * Forces ``https://``; refuses any other scheme.
+      * Retries on transient network errors and on the HTTP status
+        codes listed in ``_RETRY_HTTP_STATUSES`` (408, 425, 429,
+        5xx). Each retry waits ``_RETRY_BACKOFFS_SEC[i]`` seconds
+        before the ``i``-th attempt.
+      * Validates the response size: anything smaller than
+        ``_MIN_VALID_PDB_BYTES`` bytes is treated as a truncation and
+        re-raised (the caller decides whether to retry).
+      * Writes the file atomically via a sibling temp file +
+        ``os.replace`` so a process crash mid-write cannot leave a
+        half-written PDB on disk.
+    """
+    url = _PDB_DOWNLOAD_URL_TEMPLATE.format(pdb_id=pdb_id)
+    if not url.startswith("https://"):
+        # Defence in depth: the template already pins https, but a
+        # future contributor that changes the template should not be
+        # able to silently downgrade to http.
+        raise ValueError(
+            f"PDB downloads must use HTTPS; got url={url!r}"
+        )
+
+    headers = {"User-Agent": _USER_AGENT}
+    last_error: Optional[Exception] = None
+    for attempt in range(max_retries):
+        req = urllib.request.Request(url, headers=dict(headers))
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read()
+            if len(raw) < _MIN_VALID_PDB_BYTES:
+                raise RuntimeError(
+                    f"PDB {pdb_id} download from {url} truncated: "
+                    f"got {len(raw)} bytes (expected at least "
+                    f"{_MIN_VALID_PDB_BYTES})"
+                )
+            # Atomic write: tmp file in the same directory + os.replace.
+            target_dir = os.path.dirname(os.path.abspath(target_path)) or "."
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=f".{pdb_id}_", suffix=".pdb", dir=target_dir
+            )
+            try:
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(raw)
+                os.replace(tmp_path, target_path)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+            return
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if exc.code not in _RETRY_HTTP_STATUSES or attempt == max_retries - 1:
+                raise RuntimeError(
+                    f"PDB {pdb_id} download failed: HTTP {exc.code} {exc.reason}"
+                ) from exc
+            wait = _RETRY_BACKOFFS_SEC[min(attempt, len(_RETRY_BACKOFFS_SEC) - 1)]
+            logger.warning(
+                "PDB %s download attempt %d/%d failed with HTTP %d; "
+                "retrying in %.1fs",
+                pdb_id, attempt + 1, max_retries, exc.code, wait,
+            )
+            time.sleep(wait)
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last_error = exc
+            if attempt == max_retries - 1:
+                raise RuntimeError(
+                    f"PDB {pdb_id} download failed after {max_retries} "
+                    f"attempts: {exc}"
+                ) from exc
+            wait = _RETRY_BACKOFFS_SEC[min(attempt, len(_RETRY_BACKOFFS_SEC) - 1)]
+            logger.warning(
+                "PDB %s download attempt %d/%d failed: %s; retrying in %.1fs",
+                pdb_id, attempt + 1, max_retries, exc, wait,
+            )
+            time.sleep(wait)
+    # Defensive fallback (the for-loop always either returns or raises).
+    raise RuntimeError(
+        f"PDB {pdb_id} download failed after {max_retries} attempts: {last_error}"
+    )
+
+
 def get_ground_truth_backbone(pdb_id: str, cache_dir: str = ".") -> np.ndarray:
     """Download (or load from cache) the Cα coordinates of a PDB entry.
 
@@ -185,12 +312,29 @@ def get_ground_truth_backbone(pdb_id: str, cache_dir: str = ".") -> np.ndarray:
     -------
     ndarray, shape (N_residues, 3)
         Cα Cartesian coordinates from the first model in the PDB file.
+
+    Notes
+    -----
+    Network behaviour (B6):
+      * HTTP requests are issued over HTTPS only; plain HTTP is refused.
+      * A custom ``User-Agent`` header is sent (RCSB returns 403
+        without one).
+      * A finite per-attempt ``timeout`` is used; the download
+        retries up to 3 times on transient errors (HTTP 408/425/429/
+        5xx and network URLErrors) with exponential backoff
+        (0.5 s, 1 s, 2 s).
+      * The response is validated for size; anything smaller than a
+        few hundred bytes is treated as a truncation and the file is
+        not cached.
+      * The file is written atomically (via a sibling temp file +
+        ``os.replace``) so a process crash mid-write cannot leave a
+        half-written cache file.
     """
     pdb_id = pdb_id.upper()
+    os.makedirs(cache_dir, exist_ok=True)
     filename = os.path.join(cache_dir, f"{pdb_id}.pdb")
     if not os.path.exists(filename):
-        url = f"https://files.rcsb.org/download/{pdb_id}.pdb"
-        urllib.request.urlretrieve(url, filename)
+        _download_pdb(pdb_id, filename)
 
     coords_ca: list[list[float]] = []
     with open(filename, "r") as f:
