@@ -8,7 +8,12 @@ import urllib.request
 import numpy as np
 import pytest
 
-from qtf.utils.pdb import calculate_physics_metrics, get_ground_truth_backbone, save_pdb
+from qtf.utils.pdb import (
+    calculate_physics_metrics,
+    calculate_physics_metrics_rich,
+    get_ground_truth_backbone,
+    save_pdb,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +63,108 @@ def test_returns_floats():
     e2e, rg = calculate_physics_metrics(coords)
     assert isinstance(e2e, float)
     assert isinstance(rg, float)
+
+
+# ---------------------------------------------------------------------------
+# B7: standard Rg definition + calculate_physics_metrics_rich (legacy
+# root-mean-square bond length exposed for backward compatibility with the
+# previous (undocumented) behaviour of the function)
+# ---------------------------------------------------------------------------
+
+
+def test_rg_known_value_tetrahedron():
+    """Rg for a regular tetrahedron centred at the origin = sqrt(3).
+
+    The 4 vertices ``(1, 1, 1)``, ``(1, -1, -1)``, ``(-1, 1, -1)``,
+    ``(-1, -1, 1)`` are equidistant from the origin with
+    ``|r_i|^2 = 3`` for every i, so ``Rg^2 = mean(|r_i|^2) = 3`` and
+    ``Rg = sqrt(3)``. This is a hand-computed, parametrization-free
+    reference value that pins the textbook Rg definition against
+    regressions to the older ``np.diff``-based implementation.
+    """
+    coords = np.array([
+        [1.0, 1.0, 1.0],
+        [1.0, -1.0, -1.0],
+        [-1.0, 1.0, -1.0],
+        [-1.0, -1.0, 1.0],
+    ])
+    _, rg = calculate_physics_metrics(coords)
+    assert rg == pytest.approx(np.sqrt(3.0))
+
+
+def test_rg_matches_textbook_definition():
+    """Rg must equal ``sqrt(mean(|r_i - centroid|^2))`` exactly."""
+    rng = np.random.default_rng(seed=20240605)
+    coords = rng.normal(loc=(1.0, -2.0, 0.5), scale=2.5, size=(37, 3))
+    _, rg = calculate_physics_metrics(coords)
+    centroid = coords.mean(axis=0)
+    expected = float(np.sqrt(np.mean(np.sum((coords - centroid) ** 2, axis=1))))
+    assert rg == pytest.approx(expected)
+
+
+def test_rg_is_not_rms_bond_length():
+    """Sanity: the textbook Rg must not collapse to the RMS bond length.
+
+    A 3-point chain ``(0,0,0) -> (1,0,0) -> (0,2,0)`` has centroid
+    ``(1/3, 2/3, 0)`` and squared distances to the centroid
+    ``5/9, 8/9, 17/9`` summing to ``30/9 = 10/3``, so
+    ``Rg = sqrt(10/3) / 3 = sqrt(10)/3``. The RMS bond length is
+    ``sqrt((1^2 + 5^2) / 2) = sqrt(13/2)``. The two values differ,
+    and the standard Rg is the smaller one. This guards against a
+    regression where the function silently reverts to the buggy
+    ``np.diff`` formula.
+    """
+    coords = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 2.0, 0.0]])
+    _, rg = calculate_physics_metrics(coords)
+    expected_rg = np.sqrt(10.0) / 3.0
+    assert rg == pytest.approx(expected_rg)
+    rms_bond = np.sqrt((1.0 ** 2 + np.sqrt(5.0) ** 2) / 2.0)
+    assert not np.isclose(rg, rms_bond)
+
+
+def test_rich_function_keys_and_values():
+    """``calculate_physics_metrics_rich`` returns the three expected keys."""
+    coords = np.array([
+        [1.0, 1.0, 1.0],
+        [1.0, -1.0, -1.0],
+        [-1.0, 1.0, -1.0],
+        [-1.0, -1.0, 1.0],
+    ])
+    result = calculate_physics_metrics_rich(coords)
+    assert set(result.keys()) == {
+        "end_to_end",
+        "radius_of_gyration",
+        "root_mean_square_bond_length",
+    }
+    assert result["end_to_end"] == pytest.approx(
+        np.linalg.norm(coords[0] - coords[-1])
+    )
+    assert result["radius_of_gyration"] == pytest.approx(np.sqrt(3.0))
+    # All 3 consecutive bonds have squared length 8, so rms = sqrt(8).
+    assert result["root_mean_square_bond_length"] == pytest.approx(
+        np.sqrt(8.0)
+    )
+
+
+def test_rich_function_single_atom_rms_bond_length_is_zero():
+    """With N < 2 there are no bonds; the legacy field is 0.0."""
+    coords = np.array([[5.0, 3.0, 1.0]])
+    result = calculate_physics_metrics_rich(coords)
+    assert result["end_to_end"] == pytest.approx(0.0)
+    assert result["radius_of_gyration"] == pytest.approx(0.0)
+    assert result["root_mean_square_bond_length"] == pytest.approx(0.0)
+
+
+def test_two_tuple_unpacking_still_works():
+    """The original ``e2e, rg = calculate_physics_metrics(coords)`` API
+    must keep working (callers in ``qtf/cli/run.py`` and
+    ``qtf/analysis/ranking.py`` rely on it)."""
+    coords = np.array([[0.0, 0.0, 0.0], [3.0, 4.0, 0.0]])
+    e2e, rg = calculate_physics_metrics(coords)
+    assert e2e == pytest.approx(5.0)
+    # Centroid = (1.5, 2, 0); |r_i - centroid|^2 = 2.25 + 4 = 6.25 for both
+    # atoms, so Rg = sqrt(6.25) = 2.5.
+    assert rg == pytest.approx(2.5)
 
 
 # ---------------------------------------------------------------------------

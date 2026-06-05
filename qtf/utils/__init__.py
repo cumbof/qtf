@@ -12,13 +12,19 @@ import (``qtf.core.folder`` -> ``qtf.utils`` -> ``qtf.utils.workflow``
 still works without breaking the import order.
 """
 
-from .pdb import save_pdb, get_ground_truth_backbone, calculate_physics_metrics
+from .pdb import (
+    save_pdb,
+    get_ground_truth_backbone,
+    calculate_physics_metrics,
+    calculate_physics_metrics_rich,
+)
 
 __all__ = [
     # PDB I/O and metrics (eagerly imported above)
     "save_pdb",
     "get_ground_truth_backbone",
     "calculate_physics_metrics",
+    "calculate_physics_metrics_rich",
     # Workflow helpers (lazily resolved via __getattr__)
     "AA3_TO_1",
     "adjacent_heavy_clash_metrics",
