@@ -44,6 +44,13 @@ class EnsembleRanking:
     best_by_rmsd:
         The replica dict for the structure with the lowest RMSD vs ground
         truth, or ``None`` if no ground truth was provided.
+    best_replica_id:
+        Canonical ``id`` of the best-by-energy replica. Computed from the
+        same single source of truth as ``best_by_energy`` and
+        ``stats_df['is_best_energy']`` so all three are guaranteed to be
+        mutually consistent (this is the B3 contract: in the presence of
+        tied energies, ``np.argmin`` picks the first occurrence in the
+        input list, and that single index propagates everywhere).
     pairwise_rmsd_matrix:
         All-vs-all RMSD matrix between predicted structures.
     convergence:
@@ -57,6 +64,7 @@ class EnsembleRanking:
     best_by_rmsd: Optional[dict]
     pairwise_rmsd_matrix: np.ndarray
     convergence: dict
+    best_replica_id: int = -1
     _results: list = field(default_factory=list, repr=False)
 
     @classmethod
@@ -121,6 +129,20 @@ class EnsembleRanking:
         df = pd.DataFrame(rows)
 
         # ------------------------------------------------------------------
+        # Single source of truth for "best by energy"
+        # ------------------------------------------------------------------
+        # We compute the canonical best-by-energy index from a plain
+        # Python list of energies derived directly from `results`. This
+        # guarantees that `best_by_energy`, `stats_df["is_best_energy"]`,
+        # and `best_replica_id` all refer to the same replica — even when
+        # the input list has been reordered by the caller, even when
+        # `EnsembleFoldingManager` skipped failed replicas (B1), and
+        # even when several replicas have the same minimum energy (B3:
+        # `np.argmin` is a strict first-occurrence tie-breaker).
+        energies = [r["energy"] for r in results]
+        best_energy_idx = int(np.argmin(energies))
+
+        # ------------------------------------------------------------------
         # Rankings
         # ------------------------------------------------------------------
         df["rank_energy"] = df["energy"].rank(method="min").astype(int)
@@ -129,16 +151,28 @@ class EnsembleRanking:
         else:
             df["rank_rmsd"] = pd.Series(dtype="Int64")
 
-        best_energy_idx = int(df["energy"].idxmin())
-        df["is_best_energy"] = df.index == best_energy_idx
+        # Default the boolean columns to False everywhere, then mark the
+        # one canonical row with `.at[best_idx, ...] = True`. This is
+        # independent of the DataFrame's current integer index labels
+        # (which are 0..N-1 here but could in principle be non-default
+        # for a future refactor) and therefore more robust than
+        # `df.index == best_energy_idx`.
+        df["is_best_energy"] = False
+        df.at[best_energy_idx, "is_best_energy"] = True
 
         if ground_truth_ca is not None:
-            best_rmsd_idx = int(df["rmsd_vs_gt"].idxmin())
-            df["is_best_rmsd"] = df.index == best_rmsd_idx
+            rmsd_values = [r for r in df["rmsd_vs_gt"].tolist()]
+            best_rmsd_idx = int(np.argmin(rmsd_values))
+            df["is_best_rmsd"] = False
+            df.at[best_rmsd_idx, "is_best_rmsd"] = True
         else:
+            best_rmsd_idx = None
             df["is_best_rmsd"] = False
 
-        # Sort by energy for display
+        # Sort by energy for display. NOTE: the boolean column values
+        # `is_best_energy` and `is_best_rmsd` are stored *per row* (as
+        # Python objects), so the sort reorders the rows but the flag
+        # travels with the row it was assigned to.
         df = df.sort_values("rank_energy").reset_index(drop=True)
 
         # ------------------------------------------------------------------
@@ -159,8 +193,15 @@ class EnsembleRanking:
         # ------------------------------------------------------------------
         # Retrieve best replica dicts
         # ------------------------------------------------------------------
+        # Use the canonical `best_energy_idx` and `best_rmsd_idx` (when
+        # defined) so all three of `best_by_energy`, `best_by_rmsd`, and
+        # `best_replica_id` are guaranteed to point at the same physical
+        # replica that the corresponding row in `stats_df` is flagging.
         best_energy_replica = results[best_energy_idx]
-        best_rmsd_replica = results[best_rmsd_idx] if ground_truth_ca is not None else None
+        best_rmsd_replica = (
+            results[best_rmsd_idx] if best_rmsd_idx is not None else None
+        )
+        best_replica_id = int(best_energy_replica["id"])
 
         return cls(
             stats_df=df,
@@ -168,6 +209,7 @@ class EnsembleRanking:
             best_by_rmsd=best_rmsd_replica,
             pairwise_rmsd_matrix=pwrmsd,
             convergence=convergence,
+            best_replica_id=best_replica_id,
             _results=results,
         )
 

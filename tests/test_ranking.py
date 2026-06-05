@@ -187,3 +187,96 @@ def test_summary_with_gt_mentions_rmsd(ranking_with_gt):
 def test_private_results_attr(ranking_no_gt, two_results):
     assert hasattr(ranking_no_gt, "_results")
     assert len(ranking_no_gt._results) == len(two_results)
+
+
+# ---------------------------------------------------------------------------
+# B3: tied-energy consistency between best_by_energy, is_best_energy,
+# and best_replica_id
+# ---------------------------------------------------------------------------
+
+
+def test_ranking_tie_returns_first(results_factory):
+    """When two or more replicas share the minimum energy, the ranking
+    must pick the *first* one in the input list (np.argmin is a strict
+    first-occurrence tie-breaker). The same index must be used for
+    `best_by_energy`, `stats_df['is_best_energy']`, and
+    `best_replica_id`."""
+    results = results_factory([3.0, 3.0, 5.0])  # replicas 0 and 1 tied at 3.0
+    ranking = EnsembleRanking.from_ensemble(results)
+
+    # The lowest-energy replica is the first one in the list
+    assert ranking.best_by_energy["id"] == 0
+    assert ranking.best_by_energy["energy"] == pytest.approx(3.0)
+    # The boolean flag points at the same replica
+    best_row = ranking.stats_df[ranking.stats_df["is_best_energy"]]
+    assert len(best_row) == 1
+    assert int(best_row.iloc[0]["replica_id"]) == 0
+    # best_replica_id matches too
+    assert ranking.best_replica_id == 0
+
+
+def test_best_by_energy_matches_flag_across_reorderings(results_factory):
+    """Three replicas with energies [5.0, 3.0, 4.0]. Reorder the list
+    (simulating a manager that skipped a failed replica, see B1) and
+    verify that `best_by_energy`, `stats_df['is_best_energy']`, and
+    `best_replica_id` are still mutually consistent for every
+    ordering.
+
+    This is the direct regression test for B3 from QTF-plan-2.md: a
+    single source of truth must drive all three so the visualisation
+    layer (e.g. plot_ranking) highlights and renders the same
+    replica.
+    """
+    base = results_factory([5.0, 3.0, 4.0])  # ids 0, 1, 2 in that order
+    for perm in (
+        (0, 1, 2),
+        (1, 0, 2),
+        (2, 1, 0),
+        (0, 2, 1),
+    ):
+        reordered = [base[i] for i in perm]
+        ranking = EnsembleRanking.from_ensemble(reordered)
+
+        # The lowest energy in this permutation is 3.0, which is at
+        # perm.index(1) in the input list, and corresponds to the
+        # original id 1.
+        expected_position = perm.index(1)
+        expected_id = reordered[expected_position]["id"]
+
+        assert ranking.best_by_energy["id"] == expected_id
+        assert ranking.best_replica_id == expected_id
+        best_row = ranking.stats_df[ranking.stats_df["is_best_energy"]]
+        assert len(best_row) == 1
+        assert int(best_row.iloc[0]["replica_id"]) == expected_id
+        assert int(best_row.iloc[0]["replica_id"]) == ranking.best_by_energy["id"]
+
+
+def test_best_replica_id_attribute_exposed(results_factory):
+    """`best_replica_id` is the public, single-source-of-truth handle
+    for the best-by-energy replica. It must be present on every
+    ranking and equal to `best_by_energy['id']`."""
+    results = results_factory([2.0, 7.0, 5.0])
+    ranking = EnsembleRanking.from_ensemble(results)
+    assert hasattr(ranking, "best_replica_id")
+    assert isinstance(ranking.best_replica_id, int)
+    assert ranking.best_replica_id == ranking.best_by_energy["id"]
+
+
+def test_is_best_energy_unique_per_ranking(results_factory):
+    """Exactly one row in `stats_df` must have `is_best_energy=True`."""
+    results = results_factory([5.0, 3.0, 3.0, 3.0, 9.0])  # triple tie
+    ranking = EnsembleRanking.from_ensemble(results)
+    assert ranking.stats_df["is_best_energy"].sum() == 1
+
+
+def test_summary_reports_consistent_best_replica(results_factory):
+    """`summary()` must report the same replica id as `best_by_energy`
+    and `best_replica_id`. This is the user-facing contract that the
+    visualisation layer relies on."""
+    results = results_factory([4.0, 4.0, 1.0, 4.0])
+    ranking = EnsembleRanking.from_ensemble(results)
+    s = ranking.summary()
+    # The id of the best-by-energy replica (2) must appear in the
+    # 'Best by energy' line.
+    assert f"replica {ranking.best_replica_id}" in s
+    assert f"replica {ranking.best_by_energy['id']}" in s
