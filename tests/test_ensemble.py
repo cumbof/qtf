@@ -133,3 +133,138 @@ def test_run_ensemble_resets_results_each_call(folder_ga, zero_structure):
             manager.run_ensemble(n_runs=1)
 
     assert len(manager.results) == 1
+
+
+# ---------------------------------------------------------------------------
+# run_ensemble: per-replica failure handling (B1)
+# ---------------------------------------------------------------------------
+
+
+def test_run_ensemble_continues_after_failure(folder_ga, zero_structure, tmp_path):
+    """A single replica raising must NOT abort the whole ensemble.
+
+    Reproduces the bug originally tracked as B1 in QTF-plan-2.md: a
+    `RuntimeError` from `self.folder.fold()` on replica 2 used to bubble
+    out of the loop and discard the partial results from replicas 0 and 1.
+    After the fix the loop catches the exception, records it in
+    `last_error`, and proceeds so `len(m.results) == n_runs - 1`.
+    """
+    coords, labels, bonds = zero_structure
+    tracker = LandscapeTracker()
+    fake_params = np.zeros(folder_ga.n_params)
+    ok_result = (coords, labels, bonds, tracker, fake_params, -3.0)
+
+    # Replica 0 ok, replica 1 ok, replica 2 raises, replica 3 ok.
+    # We use n_runs=4 so the loop has to demonstrably continue past the
+    # failure rather than just terminating on the last replica.
+    side_effects = [ok_result, ok_result, RuntimeError("COBYLA blew up"), ok_result]
+
+    with patch.object(folder_ga, "fold", side_effect=side_effects):
+        with patch.object(folder_ga, "get_smart_initialization", return_value=fake_params):
+            manager = EnsembleFoldingManager(folder_ga)
+            ckpt = tmp_path / "ckpt.json"
+            manager.run_ensemble(n_runs=4, checkpoint_path=str(ckpt))
+
+    # Three of four replicas succeeded
+    assert len(manager.results) == 3
+    # The failed replica's id (2) is not in the surviving results
+    surviving_ids = {r["id"] for r in manager.results}
+    assert surviving_ids == {0, 1, 3}
+    # last_error is set and is the RuntimeError we injected
+    assert isinstance(manager.last_error, RuntimeError)
+    assert str(manager.last_error) == "COBYLA blew up"
+    # Checkpoint reflects the 3 surviving replicas
+    assert ckpt.exists()
+    import json as _json
+    payload = _json.loads(ckpt.read_text())
+    assert payload["sequence"] == folder_ga.sequence
+    assert [r["id"] for r in payload["replicas"]] == [0, 1, 3]
+
+
+def test_run_ensemble_keyboard_interrupt_propagates_after_preserving_results(
+    folder_ga, zero_structure, tmp_path
+):
+    """KeyboardInterrupt / SystemExit must re-raise (Ctrl-C still aborts)
+    but partial results must NOT be discarded, and a final checkpoint must
+    be written so the user can resume from disk."""
+    coords, labels, bonds = zero_structure
+    tracker = LandscapeTracker()
+    fake_params = np.zeros(folder_ga.n_params)
+    ok_result = (coords, labels, bonds, tracker, fake_params, -1.0)
+
+    # Replica 0 ok, replica 1 raises KeyboardInterrupt.
+    side_effects = [ok_result, KeyboardInterrupt()]
+
+    with patch.object(folder_ga, "fold", side_effect=side_effects):
+        with patch.object(folder_ga, "get_smart_initialization", return_value=fake_params):
+            manager = EnsembleFoldingManager(folder_ga)
+            ckpt = tmp_path / "ckpt.json"
+            with pytest.raises(KeyboardInterrupt):
+                manager.run_ensemble(n_runs=5, checkpoint_path=str(ckpt))
+
+    # The first replica's result survived the abort
+    assert len(manager.results) == 1
+    assert manager.results[0]["id"] == 0
+    # last_error is NOT set for user-initiated interrupts (we re-raise
+    # rather than swallow), so it remains None from the call's start.
+    assert manager.last_error is None
+    # A final checkpoint was still written before the exception propagated
+    assert ckpt.exists()
+    import json as _json
+    payload = _json.loads(ckpt.read_text())
+    assert [r["id"] for r in payload["replicas"]] == [0]
+
+
+def test_run_ensemble_last_error_reset_at_start(folder_ga, zero_structure):
+    """`last_error` must be reset to None at the beginning of every
+    run_ensemble call, so a previously failed run does not leave stale
+    state visible to the caller."""
+    coords, labels, bonds = zero_structure
+    tracker = LandscapeTracker()
+    fake_params = np.zeros(folder_ga.n_params)
+    ok_result = (coords, labels, bonds, tracker, fake_params, -2.0)
+    fail = [ok_result, RuntimeError("boom"), ok_result]
+
+    manager = EnsembleFoldingManager(folder_ga)
+    with patch.object(folder_ga, "fold", side_effect=fail):
+        with patch.object(folder_ga, "get_smart_initialization", return_value=fake_params):
+            manager.run_ensemble(n_runs=3)
+    assert isinstance(manager.last_error, RuntimeError)
+
+    # Second call: no failure -> last_error should be cleared
+    with patch.object(folder_ga, "fold", return_value=ok_result):
+        with patch.object(folder_ga, "get_smart_initialization", return_value=fake_params):
+            manager.run_ensemble(n_runs=1)
+    assert manager.last_error is None
+
+
+def test_run_ensemble_last_error_none_initially(folder_ga):
+    """A freshly constructed manager must report `last_error is None`,
+    not raise AttributeError."""
+    manager = EnsembleFoldingManager(folder_ga)
+    assert manager.last_error is None
+
+
+def test_run_ensemble_checkpoint_is_metadata_only(folder_ga, zero_structure, tmp_path):
+    """The checkpoint JSON must NOT contain heavy arrays (coords, params,
+    tracker, labels, bonds) — only the metadata needed to resume."""
+    coords, labels, bonds = zero_structure
+    tracker = LandscapeTracker()
+    fake_params = np.zeros(folder_ga.n_params)
+    ok_result = (coords, labels, bonds, tracker, fake_params, -7.0)
+
+    with patch.object(folder_ga, "fold", return_value=ok_result):
+        with patch.object(folder_ga, "get_smart_initialization", return_value=fake_params):
+            manager = EnsembleFoldingManager(folder_ga)
+            ckpt = tmp_path / "ckpt.json"
+            manager.run_ensemble(n_runs=1, checkpoint_path=str(ckpt))
+
+    payload_text = ckpt.read_text()
+    for forbidden in ("\"coords\"", "\"params\"", "\"tracker\"", "\"labels\"", "\"bonds\""):
+        assert forbidden not in payload_text, (
+            f"checkpoint must be metadata-only; found {forbidden}"
+        )
+    import json as _json
+    payload = _json.loads(payload_text)
+    assert payload["replicas"][0]["energy"] == pytest.approx(-7.0)
+    assert payload["replicas"][0]["id"] == 0

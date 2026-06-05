@@ -8,7 +8,10 @@ basin-hopping before each full optimisation run.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import os
+import tempfile
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -28,6 +31,14 @@ class EnsembleFoldingManager:
     def __init__(self, folder: QuantumBiophysicsFolder) -> None:
         self.folder = folder
         self.results: list[dict] = []
+        self._last_error: Exception | None = None
+        self._checkpoint_path: str | None = None
+
+    @property
+    def last_error(self) -> Exception | None:
+        """Return the most recent per-replica exception, or ``None`` if the
+        last ensemble run completed without any per-replica failure."""
+        return self._last_error
 
     # ------------------------------------------------------------------
     # Ensemble run
@@ -71,8 +82,16 @@ class EnsembleFoldingManager:
         max_iter: int = 2000,
         scout_attempts: int = 50,
         prime_strategy: str = "random",
+        checkpoint_path: str | None = None,
     ) -> None:
         """Run *n_runs* independent folding trajectories with random initialisation.
+
+        A failure in a single replica (any ``Exception``) is logged, recorded in
+        :attr:`last_error`, and the loop proceeds to the next replica. A
+        ``KeyboardInterrupt`` / ``SystemExit`` (e.g. ``Ctrl-C``) is *not*
+        swallowed: it is re-raised after writing a final checkpoint so the
+        caller still gets control, but the results already collected are
+        preserved on disk.
 
         Parameters
         ----------
@@ -83,9 +102,19 @@ class EnsembleFoldingManager:
         scout_attempts:
             Number of random parameter sets evaluated during basin-hopping
             to find a good starting point for each replica.
+        checkpoint_path:
+            Optional path to a JSON file. When provided, a JSON-safe snapshot
+            of the successfully completed replicas is written to disk after
+            every successful replica, and again before any re-raised
+            interrupt. The file is created if missing and overwritten if it
+            exists. The snapshot contains metadata only (id, seed, type,
+            energy, energy_terms) so it stays small; the heavy arrays
+            (coords, params) are deliberately not serialised.
         """
         logger.info("Starting ensemble run: %d trajectories", n_runs)
         self.results = []
+        self._last_error = None
+        self._checkpoint_path = checkpoint_path
 
         # Deterministic base seed derived from protein sequence
         base_seed = int(
@@ -105,16 +134,45 @@ class EnsembleFoldingManager:
                 else:
                     strat = "random"
 
-            if strat != "random":
-                start_params = self.prime_circuit(target_type=strat, seed=replica_seed)
-            else:
-                start_params = self.folder.get_smart_initialization(
-                    n_attempts=scout_attempts, seed=replica_seed
-                )
+            try:
+                if strat != "random":
+                    start_params = self.prime_circuit(
+                        target_type=strat, seed=replica_seed
+                    )
+                else:
+                    start_params = self.folder.get_smart_initialization(
+                        n_attempts=scout_attempts, seed=replica_seed
+                    )
 
-            coords, labels, bonds, tracker, final_params, final_energy = self.folder.fold(
-                max_iter=max_iter, initial_params=start_params
-            )
+                coords, labels, bonds, tracker, final_params, final_energy = (
+                    self.folder.fold(
+                        max_iter=max_iter, initial_params=start_params
+                    )
+                )
+            except (KeyboardInterrupt, SystemExit):
+                # User-initiated abort: preserve whatever we have, checkpoint
+                # if requested, and let the exception propagate so the caller
+                # can decide what to do.
+                logger.warning(
+                    "Replica %d aborted by user; preserving %d prior result(s)",
+                    i + 1,
+                    len(self.results),
+                )
+                self._write_checkpoint()
+                raise
+            except Exception as exc:        # noqa: BLE001 — last-ditch recovery
+                # Per-replica failure: log, record, and continue with the next
+                # replica. This is the only way to keep an ensemble of N
+                # replicas alive when one of them hits a numerical issue, a
+                # COBYLA MAXFUN error, or a misconfigured force field.
+                logger.error(
+                    "Replica %d failed: %s",
+                    i + 1,
+                    exc,
+                    exc_info=True,
+                )
+                self._last_error = exc
+                continue
 
             logger.info("  Replica %d final energy: %.4f", i + 1, final_energy)
             energy_terms = dict(getattr(self.folder, "last_energy_terms", {}) or {})
@@ -131,6 +189,70 @@ class EnsembleFoldingManager:
                     "params": final_params,
                     "tracker": tracker,
                 }
+            )
+            self._write_checkpoint()
+
+    # ------------------------------------------------------------------
+    # Checkpointing
+    # ------------------------------------------------------------------
+
+    def _write_checkpoint(self) -> None:
+        """Atomically write a JSON snapshot of completed replicas to disk.
+
+        The snapshot is metadata-only: ``id``, ``seed``, ``type``, ``energy``,
+        and ``energy_terms``. Heavy arrays (``coords``, ``labels``, ``bonds``,
+        ``params``, ``tracker``) are intentionally omitted to keep the file
+        small and JSON-safe. The file is written atomically (via a sibling
+        temp file + ``os.replace``) so a crash mid-write cannot leave a
+        half-written checkpoint.
+
+        No-op if ``self._checkpoint_path`` is ``None``.
+        """
+        if self._checkpoint_path is None:
+            return
+        snapshot = {
+            "sequence": self.folder.sequence,
+            "replicas": [
+                {
+                    "id": r["id"],
+                    "seed": r["seed"],
+                    "type": r["type"],
+                    "energy": float(r["energy"]),
+                    "energy_terms": {
+                        k: (float(v) if isinstance(v, (int, float)) else v)
+                        for k, v in r.get("energy_terms", {}).items()
+                    },
+                }
+                for r in self.results
+            ],
+        }
+        target_dir = os.path.dirname(os.path.abspath(self._checkpoint_path)) or "."
+        try:
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=".qtf_ckpt_", suffix=".json", dir=target_dir
+            )
+            try:
+                with os.fdopen(fd, "w") as fh:
+                    json.dump(snapshot, fh, indent=2)
+                os.replace(tmp_path, self._checkpoint_path)
+            except Exception:
+                # Best-effort cleanup of the temp file; the exception itself
+                # is intentionally swallowed because a failed checkpoint
+                # write must not abort the ensemble.
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                logger.warning(
+                    "Failed to write checkpoint to %s",
+                    self._checkpoint_path,
+                    exc_info=True,
+                )
+        except Exception:
+            logger.warning(
+                "Failed to prepare checkpoint at %s",
+                self._checkpoint_path,
+                exc_info=True,
             )
 
     # ------------------------------------------------------------------
