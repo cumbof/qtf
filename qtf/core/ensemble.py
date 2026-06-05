@@ -44,14 +44,54 @@ class EnsembleFoldingManager:
     # Ensemble run
     # ------------------------------------------------------------------
 
-    def prime_circuit(self, target_type='helix', seed=42):
+    def prime_circuit(self, target_type='helix', seed=42, overwrite: bool = False):
+        """Smart initialization: pre-optimize the circuit to output secondary
+        structure angles.
+
+        Parameters
+        ----------
+        target_type:
+            ``'helix'`` (default, ``phi=-60``, ``psi=-45``),
+            ``'sheet'`` (``phi=-135``, ``psi=135``), or anything else in
+            which case a uniform random parameter vector is returned
+            directly (no COBYLA priming cost is incurred).
+        seed:
+            Seed for the priming optimiser's random initial guess.
+        overwrite:
+            If ``False`` (the default), the call is a no-op when the
+            folder already has a non-``None`` ``circuit_parameters``
+            attribute — the existing value is returned untouched. Pass
+            ``overwrite=True`` to force re-priming.
+
+        Returns
+        -------
+        numpy.ndarray
+            The primed (or pre-existing) circuit-parameter vector of shape
+            ``(self.folder.n_params,)``.
+
+        Notes
+        -----
+        ``QuantumBiophysicsFolder`` does not declare a
+        ``circuit_parameters`` attribute by default; the idempotency
+        guard is therefore a soft opt-in for users who set it manually
+        (or who subclass the folder to provide a persistent store).
+        This matches the convention in the rest of the code base where
+        the folder is treated as the single source of truth for a
+        given sequence, and priming is a one-shot transformation that
+        should never silently destroy a user's prior work.
         """
-        Smart Initialization: Pre-optimizes circuit to output Secondary Structure angles.
-        """
-        print(f"--- PRIMING CIRCUIT FOR {target_type.upper()} ---")
-        
+        existing = getattr(self.folder, "circuit_parameters", None)
+        if existing is not None and not overwrite:
+            logger.info(
+                "Skipping prime_circuit: folder.circuit_parameters is already set; "
+                "pass overwrite=True to force re-priming"
+            )
+            return existing
+
+        logger.info("--- PRIMING CIRCUIT FOR %s ---", target_type.upper())
+
         rng = np.random.default_rng(seed)
-        
+
         if target_type == 'helix':
             t_phi, t_psi = np.deg2rad(-60.0), np.deg2rad(-45.0)
         elif target_type == 'sheet':
@@ -61,11 +101,11 @@ class EnsembleFoldingManager:
 
         targets = np.zeros(self.folder.total_angles)
         masks = np.zeros(self.folder.total_angles)
-        
+
         for i, dof in enumerate(self.folder.dof_map):
             if dof['type'] == 'phi': targets[i] = t_phi; masks[i] = 1.0
             elif dof['type'] == 'psi': targets[i] = t_psi; masks[i] = 1.0
-            
+
         def priming_cost(params):
             curr = self.folder._get_angles(params)
             diff = (curr - targets + np.pi) % (2 * np.pi) - np.pi
@@ -73,7 +113,7 @@ class EnsembleFoldingManager:
 
         init_guess = rng.uniform(-0.1, 0.1, self.folder.n_params)
         res = minimize(priming_cost, init_guess, method='COBYLA', options={'maxiter': 200})
-        print(f" > Priming Error: {res.fun:.4f}")
+        logger.info("  > Priming Error: %.4f", res.fun)
         return res.x
 
     def run_ensemble(
