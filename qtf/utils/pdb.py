@@ -37,7 +37,7 @@ _AA1_TO_3 = {
 # the same files as the EBI mirror.
 
 # Keep the version in sync with qtf.__version__.
-_USER_AGENT = "QTF/0.3.2 (+https://github.com/cumbof/QTF)"
+_USER_AGENT = "QTF/0.3.3 (+https://github.com/cumbof/QTF)"
 
 _PDB_DOWNLOAD_URL_TEMPLATE = "https://files.rcsb.org/download/{pdb_id}.pdb"
 
@@ -350,40 +350,7 @@ def get_ground_truth_backbone(pdb_id: str, cache_dir: str = ".") -> np.ndarray:
     return np.array(coords_ca)
 
 
-def calculate_physics_metrics(coords: np.ndarray) -> tuple[float, float]:
-    """Compute end-to-end distance and (standard) radius of gyration.
-
-    Parameters
-    ----------
-    coords:
-        Coordinate array, shape ``(N, 3)``.
-
-    Returns
-    -------
-    end_to_end : float
-        Euclidean distance between the first and last coordinate.
-    radius_of_gyration : float
-        Root-mean-square distance of all atoms from the centroid,
-        ``sqrt(mean_i |r_i - centroid|^2)``. This is the standard
-        textbook definition of the radius of gyration.
-
-    Notes
-    -----
-    Earlier versions of this function returned the root-mean-square
-    length of the consecutive bond vectors
-    ``sqrt(mean_i |r_{i+1} - r_i|^2)`` under the ``radius_of_gyration``
-    label. That quantity is now exposed as
-    ``root_mean_square_bond_length`` by
-    :func:`calculate_physics_metrics_rich` for users who relied on the
-    previous (undocumented) behaviour.
-    """
-    end_to_end = float(np.linalg.norm(coords[0] - coords[-1]))
-    centroid = np.mean(coords, axis=0)
-    rg = float(np.sqrt(np.mean(np.sum((coords - centroid) ** 2, axis=1))))
-    return end_to_end, rg
-
-
-def calculate_physics_metrics_rich(coords: np.ndarray) -> dict[str, float]:
+def calculate_physics_metrics(coords: np.ndarray) -> dict[str, float]:
     """Compute end-to-end distance, radius of gyration, and the RMS bond length.
 
     Parameters
@@ -406,10 +373,12 @@ def calculate_physics_metrics_rich(coords: np.ndarray) -> dict[str, float]:
             ``sqrt(mean_i |r_{i+1} - r_i|^2)`` over the (N-1)
             consecutive bond vectors. ``0.0`` when ``N < 2``.
             Retained for backward compatibility with an older version
-            of :func:`calculate_physics_metrics` that incorrectly
-            labelled the same expression as the radius of gyration.
+            of this function that incorrectly labelled the same
+            expression as the radius of gyration.
     """
-    e2e, rg = calculate_physics_metrics(coords)
+    end_to_end = float(np.linalg.norm(coords[0] - coords[-1]))
+    centroid = np.mean(coords, axis=0)
+    rg = float(np.sqrt(np.mean(np.sum((coords - centroid) ** 2, axis=1))))
     if coords.shape[0] >= 2:
         rms_bond_length = float(
             np.sqrt(
@@ -419,7 +388,7 @@ def calculate_physics_metrics_rich(coords: np.ndarray) -> dict[str, float]:
     else:
         rms_bond_length = 0.0
     return {
-        "end_to_end": e2e,
+        "end_to_end": end_to_end,
         "radius_of_gyration": rg,
         "root_mean_square_bond_length": rms_bond_length,
     }

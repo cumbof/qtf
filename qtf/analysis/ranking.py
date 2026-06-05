@@ -111,7 +111,9 @@ class EnsembleRanking:
         # ------------------------------------------------------------------
         rows = []
         for r, ca in zip(results, ca_traces):
-            e2e, rg = calculate_physics_metrics(ca)
+            metrics = calculate_physics_metrics(ca)
+            e2e = metrics["end_to_end"]
+            rg = metrics["radius_of_gyration"]
             row: dict = {
                 "replica_id": r["id"],
                 "seed": r["seed"],

@@ -16,7 +16,6 @@ from .pdb import (
     save_pdb,
     get_ground_truth_backbone,
     calculate_physics_metrics,
-    calculate_physics_metrics_rich,
 )
 
 __all__ = [
@@ -24,7 +23,6 @@ __all__ = [
     "save_pdb",
     "get_ground_truth_backbone",
     "calculate_physics_metrics",
-    "calculate_physics_metrics_rich",
     # Workflow helpers (lazily resolved via __getattr__)
     "AA3_TO_1",
     "adjacent_heavy_clash_metrics",

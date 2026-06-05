@@ -248,12 +248,16 @@ def __main__():
             local_clash_metrics = gromacs_result["local_clash_metrics"]
             ring_penetration_metrics = gromacs_result["ring_penetration_metrics"]
             gromacs_info = gromacs_result["gromacs_info"]
-            p_e2e, p_rg = utils.calculate_physics_metrics(pred_ca)
+            p_metrics = utils.calculate_physics_metrics(pred_ca)
+            p_e2e = p_metrics["end_to_end"]
+            p_rg = p_metrics["radius_of_gyration"]
             if true_rmsd_coords is not None:
                 n = min(len(pred_ca), len(true_ca))
                 pred_ca_n = pred_ca[:n]
                 true_ca_n = true_ca[:n]
-                t_e2e, t_rg = utils.calculate_physics_metrics(true_ca_n)
+                t_metrics = utils.calculate_physics_metrics(true_ca_n)
+                t_e2e = t_metrics["end_to_end"]
+                t_rg = t_metrics["radius_of_gyration"]
                 rmsd, rmsd_meta = utils.rmsd_between_structures(
                     coords,
                     labels,
