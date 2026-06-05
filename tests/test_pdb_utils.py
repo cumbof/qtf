@@ -59,7 +59,8 @@ def test_returns_floats():
 
 
 # ---------------------------------------------------------------------------
-# save_pdb
+# save_pdb (B5: unified signature; sequence=1-letter string, resnames
+# optional 3-letter mapping)
 # ---------------------------------------------------------------------------
 
 
@@ -69,7 +70,7 @@ def test_save_pdb_creates_file():
     with tempfile.NamedTemporaryFile(suffix=".pdb", delete=False) as f:
         fname = f.name
     try:
-        save_pdb(coords, labels, "A", filename=fname, energy=-42.0)
+        save_pdb(coords, labels, filename=fname, energy=-42.0, sequence="A")
         assert os.path.exists(fname)
     finally:
         os.unlink(fname)
@@ -81,7 +82,7 @@ def test_save_pdb_remark_contains_energy():
     with tempfile.NamedTemporaryFile(suffix=".pdb", delete=False, mode="w") as f:
         fname = f.name
     try:
-        save_pdb(coords, labels, "A", filename=fname, energy=-42.0)
+        save_pdb(coords, labels, filename=fname, energy=-42.0, sequence="A")
         with open(fname) as fh:
             content = fh.read()
         assert "REMARK" in content
@@ -96,7 +97,7 @@ def test_save_pdb_atom_lines():
     with tempfile.NamedTemporaryFile(suffix=".pdb", delete=False) as f:
         fname = f.name
     try:
-        save_pdb(coords, labels, "G", filename=fname)
+        save_pdb(coords, labels, filename=fname, sequence="G")
         with open(fname) as fh:
             atom_lines = [line for line in fh if line.startswith("ATOM")]
         assert len(atom_lines) == 3
@@ -110,7 +111,7 @@ def test_save_pdb_atom_names_in_output():
     with tempfile.NamedTemporaryFile(suffix=".pdb", delete=False) as f:
         fname = f.name
     try:
-        save_pdb(coords, labels, "A", filename=fname)
+        save_pdb(coords, labels, filename=fname, sequence="A")
         with open(fname) as fh:
             content = fh.read()
         assert "N" in content
@@ -125,9 +126,62 @@ def test_save_pdb_default_energy_zero():
     with tempfile.NamedTemporaryFile(suffix=".pdb", delete=False) as f:
         fname = f.name
     try:
-        save_pdb(coords, labels, "G", filename=fname)
+        save_pdb(coords, labels, filename=fname, sequence="G")
         with open(fname) as fh:
             content = fh.read()
         assert "0.000" in content
+    finally:
+        os.unlink(fname)
+
+
+def test_save_pdb_end_record():
+    """A well-formed PDB must terminate with an `END` record (the
+    folder-method behavior that has now been unified in the free
+    function)."""
+    coords = np.array([[0.0, 0.0, 0.0]])
+    labels = [(0, "CA", "C")]
+    with tempfile.NamedTemporaryFile(suffix=".pdb", delete=False) as f:
+        fname = f.name
+    try:
+        save_pdb(coords, labels, filename=fname, sequence="G")
+        with open(fname) as fh:
+            lines = [line.rstrip("\n") for line in fh if line.strip()]
+        assert lines[-1] == "END"
+    finally:
+        os.unlink(fname)
+
+
+def test_save_pdb_include_hydrogens_false_filters():
+    """`include_hydrogens=False` must drop H atoms."""
+    coords = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+    labels = [(0, "CA", "C"), (0, "H", "H")]
+    with tempfile.NamedTemporaryFile(suffix=".pdb", delete=False) as f:
+        fname = f.name
+    try:
+        save_pdb(coords, labels, filename=fname, sequence="G", include_hydrogens=False)
+        with open(fname) as fh:
+            atom_lines = [line for line in fh if line.startswith("ATOM")]
+        assert len(atom_lines) == 1
+    finally:
+        os.unlink(fname)
+
+
+def test_save_pdb_resnames_override_sequence():
+    """When the caller supplies `resnames`, that mapping wins over
+    the `sequence` fallback."""
+    coords = np.array([[0.0, 0.0, 0.0]])
+    labels = [(0, "CA", "C")]
+    with tempfile.NamedTemporaryFile(suffix=".pdb", delete=False) as f:
+        fname = f.name
+    try:
+        # Sequence says A (ALA) but resnames says MSE (selenomethionine)
+        save_pdb(
+            coords, labels, filename=fname,
+            sequence="A", resnames={0: "MSE"},
+        )
+        with open(fname) as fh:
+            content = fh.read()
+        assert "MSE" in content
+        assert " ALA " not in content
     finally:
         os.unlink(fname)

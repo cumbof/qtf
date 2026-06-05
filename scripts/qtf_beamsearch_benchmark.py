@@ -35,8 +35,15 @@ import numpy as np
 import pandas as pd
 
 from qtf.core.folder import QuantumBiophysicsFolder
+from qtf.analysis.stability import kabsch_rmsd  # noqa: F401  (B5: was duplicated)
 from qtf.utils import workflow as utils
 from qtf.utils import gromacs as qtf_gromacs
+from qtf.utils.workflow import (  # noqa: F401  (B5: was duplicated)
+    AA3_TO_1,
+    adjacent_heavy_clash_metrics,
+    nonlocal_heavy_clash_metrics,
+    pdb_id_from_path,
+)
 
 
 def _jsonify(x):
@@ -49,33 +56,6 @@ def _jsonify(x):
 
 def deg(vals):
     return [np.deg2rad(v) for v in vals]
-
-
-def kabsch_rmsd(P, Q):
-    """
-    Calculates RMSD between two coordinate sets after optimal alignment.
-    Returns RMSD only.
-    """
-    if P.shape != Q.shape:
-        raise ValueError(f"Shape mismatch: {P.shape} vs {Q.shape}")
-
-    P_centered = P - np.mean(P, axis=0)
-    Q_centered = Q - np.mean(Q, axis=0)
-
-    H = np.dot(P_centered.T, Q_centered)
-    V, S, Wt = np.linalg.svd(H)
-
-    d = (np.linalg.det(V) * np.linalg.det(Wt)) < 0.0
-    if d:
-        V[:, -1] = -V[:, -1]
-
-    R = np.dot(V, Wt)
-
-    P_rotated = np.dot(P_centered, R)
-    diff = P_rotated - Q_centered
-    rms = np.sqrt(np.mean(np.sum(diff**2, axis=1)))
-
-    return float(rms)
 
 
 def core_ca_slice(coords: np.ndarray) -> np.ndarray:
@@ -127,13 +107,6 @@ def get_tuning_settings():
         "pi_stack_scale": float(os.getenv("QTF_PI_STACK_SCALE", "1.0")),
     }
 
-def pdb_id_from_path(p: Optional[str]) -> Optional[str]:
-    if p is None:
-        return None
-    s = str(p).strip()
-    if not s:
-        return None
-    return Path(s).stem.upper()
 
 def infer_protein_name(explicit_name: Optional[str], reference_pdb: Optional[str], sequence: str) -> str:
     """
@@ -341,115 +314,6 @@ def dedup_states_by_backbone(
     out = list(best.values())
     out.sort(key=lambda s: s.energy)
     return out
-
-
-def nonlocal_heavy_clash_metrics(coords: np.ndarray, labels: List[Tuple[int, str, str]], min_allowed_A: float = 1.75):
-    """
-    Find the closest heavy-atom contact between residues separated by at least 2.
-
-    This is a cheap post-filter for beam ranking. It removes obvious steric
-    overlaps that would show up as fake bonds in viewers even when the score is
-    otherwise low.
-    """
-    coords = np.asarray(coords, dtype=float)
-    res_ids = np.array([int(r) for r, _, _ in labels], dtype=int)
-    heavy_mask = np.array([str(elem).upper() != "H" and not str(atom).upper().startswith("H") for _, atom, elem in labels], dtype=bool)
-
-    idx = np.where(heavy_mask)[0]
-    if idx.size < 2:
-        return {
-            "clash_min_heavy_dist": np.nan,
-            "clash_flag": False,
-            "clash_pair": "",
-        }
-
-    best_dist = float("inf")
-    best_pair = ""
-    for ii, i in enumerate(idx[:-1]):
-        ri = res_ids[i]
-        for j in idx[ii + 1:]:
-            if abs(ri - res_ids[j]) < 2:
-                continue
-            d = float(np.linalg.norm(coords[i] - coords[j]))
-            if d < best_dist:
-                best_dist = d
-                best_pair = f"{labels[i][0]}:{labels[i][1]}-{labels[j][0]}:{labels[j][1]}"
-
-    if best_dist == float("inf"):
-        return {
-            "clash_min_heavy_dist": np.nan,
-            "clash_flag": False,
-            "clash_pair": "",
-        }
-
-    return {
-        "clash_min_heavy_dist": float(best_dist),
-        "clash_flag": bool(best_dist < float(min_allowed_A)),
-        "clash_pair": best_pair,
-    }
-
-
-def adjacent_heavy_clash_metrics(coords: np.ndarray, labels: List[Tuple[int, str, str]], min_allowed_A: float = 1.35, threshold_frac: float = 0.55):
-    """
-    Find the closest heavy-atom contact between adjacent residues.
-
-    This is a narrower post-filter for the local peptide-bond region and is
-    meant to catch false local overlaps that can still survive the score.
-    """
-    coords = np.asarray(coords, dtype=float)
-    res_ids = np.array([int(r) for r, _, _ in labels], dtype=int)
-    atom_names = [str(atom) for _, atom, _ in labels]
-    heavy_mask = np.array([str(elem).upper() != "H" and not str(atom).upper().startswith("H") for _, atom, elem in labels], dtype=bool)
-
-    elem_radii = {"C": 1.70, "N": 1.55, "O": 1.52, "S": 1.80}
-    radii = np.array([elem_radii.get(str(elem).upper()[0], 1.75) for _, _, elem in labels], dtype=float)
-
-    idx = np.where(heavy_mask)[0]
-    if idx.size < 2:
-        return {
-            "local_clash_min_heavy_dist": np.nan,
-            "local_clash_flag": False,
-            "local_clash_pair": "",
-        }
-
-    best_dist = float("inf")
-    best_pair = ""
-    worst_margin = float("inf")
-    worst_pair = ""
-    any_clash = False
-    for ii, i in enumerate(idx[:-1]):
-        ri = res_ids[i]
-        ai = atom_names[i]
-        for j in idx[ii + 1:]:
-            if abs(ri - res_ids[j]) != 1:
-                continue
-            aj = atom_names[j]
-            if ai == "C" and aj == "N":
-                continue
-            d = float(np.linalg.norm(coords[i] - coords[j]))
-            threshold_A = max(min_allowed_A, threshold_frac * (float(radii[i]) + float(radii[j])))
-            if d < best_dist:
-                best_dist = d
-                best_pair = f"{labels[i][0]}:{labels[i][1]}-{labels[j][0]}:{labels[j][1]}"
-            margin = d - threshold_A
-            if margin < worst_margin:
-                worst_margin = margin
-                worst_pair = f"{labels[i][0]}:{labels[i][1]}-{labels[j][0]}:{labels[j][1]}"
-            if d < threshold_A:
-                any_clash = True
-
-    if best_dist == float("inf"):
-        return {
-            "local_clash_min_heavy_dist": np.nan,
-            "local_clash_flag": False,
-            "local_clash_pair": "",
-        }
-
-    return {
-        "local_clash_min_heavy_dist": float(best_dist),
-        "local_clash_flag": bool(any_clash),
-        "local_clash_pair": worst_pair if any_clash else best_pair,
-    }
 
 
 def main():

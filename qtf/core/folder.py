@@ -1699,14 +1699,25 @@ class QuantumBiophysicsFolder:
         return aa1_to_3.get(str(aa).upper(), 'UNK')
 
     def _format_pdb_atom_line(self, serial, atom_name, res_name, chain_id, resseq, x, y, z, element='C'):
-        return (
-            f"ATOM  {serial:5d} {atom_name:>4} {res_name:>3} {chain_id:1}{resseq:4d}    "
-            f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00           {element:>2}\n"
-        )
+        """Backwards-compatible thin wrapper around the canonical
+        PDB atom-line formatter in :mod:`qtf.utils.pdb`.
+
+        The implementation now lives in ``qtf.utils.pdb._format_atom_line``;
+        this method is kept so external subclasses that override it
+        continue to work (B5).
+        """
+        from qtf.utils.pdb import _format_atom_line as _fmt
+        return _fmt(serial, atom_name, res_name, chain_id, resseq, x, y, z, element)
 
     def save_pdb(self, coords, labels, filename="structure.pdb", energy=0.0, chain_id='A', resseqs=None, resnames=None, remarks=None, include_hydrogens=True):
         """
         Save arbitrary coordinates/labels to a PDB file viewable in PyMOL or Chimera.
+
+        This is a thin wrapper around the canonical
+        :func:`qtf.utils.pdb.save_pdb` (B5). The folder method's
+        signature is preserved for backward compatibility, but the
+        implementation is centralised so fixes and feature work on
+        PDB I/O only have to happen in one place.
 
         Args:
             coords: array-like of shape (N, 3)
@@ -1719,46 +1730,19 @@ class QuantumBiophysicsFolder:
             remarks: optional iterable of additional REMARK strings
             include_hydrogens: if False, omit atoms whose element/name is hydrogen
         """
-        outdir = os.path.dirname(filename)
-        if outdir:
-            os.makedirs(outdir, exist_ok=True)
-
-        chain_out = (chain_id or 'A')[:1]
-        coords = np.asarray(coords, dtype=float)
-
-        with open(filename, 'w') as f:
-            if energy is not None:
-                f.write(f"REMARK   1 ENERGY: {float(energy):.3f}\n")
-            if remarks:
-                for idx, remark in enumerate(remarks, start=2):
-                    f.write(f"REMARK {idx:3d} {remark}\n")
-
-            serial = 1
-            for pos, (res_id, atom_name, elem) in zip(coords, labels):
-                if (not include_hydrogens) and (str(elem).upper() == "H" or str(atom_name).upper().startswith("H")):
-                    continue
-                res_id = int(res_id)
-                if resnames is None:
-                    aa = self.sequence[res_id] if 0 <= res_id < len(self.sequence) else 'X'
-                    res_name = self._aa1_to_3(aa)
-                elif isinstance(resnames, dict):
-                    res_name = str(resnames.get(res_id, 'UNK'))
-                else:
-                    res_name = str(resnames[res_id])
-
-                if resseqs is None:
-                    resseq = res_id + 1
-                elif isinstance(resseqs, dict):
-                    resseq = int(resseqs.get(res_id, res_id + 1))
-                else:
-                    resseq = int(resseqs[res_id])
-
-                f.write(self._format_pdb_atom_line(
-                    serial, atom_name, res_name, chain_out, resseq,
-                    float(pos[0]), float(pos[1]), float(pos[2]), str(elem)
-                ))
-                serial += 1
-            f.write('END\n')
+        from qtf.utils.pdb import save_pdb as _save_pdb
+        _save_pdb(
+            coords=coords,
+            labels=labels,
+            filename=filename,
+            energy=energy,
+            chain_id=chain_id,
+            resseqs=resseqs,
+            resnames=resnames,
+            remarks=remarks,
+            include_hydrogens=include_hydrogens,
+            sequence=self.sequence,
+        )
 
     def save_reduced_pdb(self, ca_coords, filename="structure_ca.pdb", sidechain_centroids=None, energy=0.0,
                          chain_id='A', resseqs=None, resnames=None):

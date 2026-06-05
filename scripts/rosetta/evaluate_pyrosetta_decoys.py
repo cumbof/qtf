@@ -21,18 +21,11 @@ import numpy as np
 import pandas as pd
 
 
-def kabsch_rmsd(P: np.ndarray, Q: np.ndarray) -> float:
-    if P.shape != Q.shape:
-        raise ValueError(f"Shape mismatch: {P.shape} vs {Q.shape}")
-    P_cent = P - P.mean(axis=0)
-    Q_cent = Q - Q.mean(axis=0)
-    H = P_cent.T @ Q_cent
-    V, S, Wt = np.linalg.svd(H)
-    if (np.linalg.det(V) * np.linalg.det(Wt)) < 0.0:
-        V[:, -1] *= -1
-    R = V @ Wt
-    diff = (P_cent @ R) - Q_cent
-    return float(np.sqrt(np.mean(np.sum(diff * diff, axis=1))))
+# `kabsch_rmsd` used to be defined here (B5: duplicate of
+# `qtf.analysis.stability.kabsch_rmsd`). The canonical implementation
+# is now imported and used everywhere; the local copy has been
+# removed.
+from qtf.analysis.stability import kabsch_rmsd  # noqa: E402, F401
 
 
 def parse_pdb_ca_coords(

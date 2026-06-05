@@ -13,6 +13,10 @@ from qtf.core.ensemble import EnsembleFoldingManager
 from qtf.core.folder import QuantumBiophysicsFolder
 from qtf.utils import workflow as utils
 from qtf.utils import gromacs as qtf_gromacs
+from qtf.utils.workflow import (
+    adjacent_heavy_clash_metrics,
+    nonlocal_heavy_clash_metrics,
+)
 
 
 def _jsonify(x):
@@ -30,126 +34,6 @@ def _jsonify(x):
     if isinstance(x, (list, tuple)):
         return [_jsonify(v) for v in x]
     return x
-
-
-
-def core_ca_slice(coords: np.ndarray) -> np.ndarray:
-    """Return CA coordinates excluding flexible terminal residues.
-
-    Uses residues 2..N-1 (1-indexed), i.e. drops the first and last CA.
-    Falls back to all coordinates for very short chains.
-    """
-    arr = np.asarray(coords)
-    if arr.shape[0] > 2:
-        return arr[1:-1]
-    return arr
-
-def core_ca_range_metadata(n_residues: int) -> dict:
-    use_core = n_residues > 2
-    return {
-        "rmsd_ca_excludes_terminal_residues": bool(use_core),
-        "rmsd_ca_start_residue_1indexed": 2 if use_core else 1,
-        "rmsd_ca_end_residue_1indexed": (n_residues - 1) if use_core else n_residues,
-        "rmsd_ca_n_aligned": (n_residues - 2) if use_core else n_residues,
-    }
-
-
-def adjacent_heavy_clash_metrics(coords, labels, min_allowed_A: float = 1.35, threshold_frac: float = 0.55):
-    """Detect the closest heavy-atom contact between adjacent residues."""
-    coords = np.asarray(coords, dtype=float)
-    res_ids = np.array([int(r) for r, _, _ in labels], dtype=int)
-    atom_names = [str(atom) for _, atom, _ in labels]
-    heavy_mask = np.array([str(elem).upper() != "H" and not str(atom).upper().startswith("H") for _, atom, elem in labels], dtype=bool)
-
-    elem_radii = {"C": 1.70, "N": 1.55, "O": 1.52, "S": 1.80}
-    radii = np.array([elem_radii.get(str(elem).upper()[0], 1.75) for _, _, elem in labels], dtype=float)
-
-    idx = np.where(heavy_mask)[0]
-    if idx.size < 2:
-        return {
-            "local_clash_min_heavy_dist": np.nan,
-            "local_clash_flag": False,
-            "local_clash_pair": "",
-        }
-
-    best_dist = float("inf")
-    best_pair = ""
-    worst_margin = float("inf")
-    worst_pair = ""
-    any_clash = False
-    for ii, i in enumerate(idx[:-1]):
-        ri = res_ids[i]
-        ai = atom_names[i]
-        for j in idx[ii + 1:]:
-            if abs(ri - res_ids[j]) != 1:
-                continue
-            aj = atom_names[j]
-            if ai == "C" and aj == "N":
-                continue
-            d = float(np.linalg.norm(coords[i] - coords[j]))
-            threshold_A = max(min_allowed_A, threshold_frac * (float(radii[i]) + float(radii[j])))
-            if d < best_dist:
-                best_dist = d
-                best_pair = f"{labels[i][0]}:{labels[i][1]}-{labels[j][0]}:{labels[j][1]}"
-            margin = d - threshold_A
-            if margin < worst_margin:
-                worst_margin = margin
-                worst_pair = f"{labels[i][0]}:{labels[i][1]}-{labels[j][0]}:{labels[j][1]}"
-            if d < threshold_A:
-                any_clash = True
-
-    if best_dist == float("inf"):
-        return {
-            "local_clash_min_heavy_dist": np.nan,
-            "local_clash_flag": False,
-            "local_clash_pair": "",
-        }
-
-    return {
-        "local_clash_min_heavy_dist": float(best_dist),
-        "local_clash_flag": bool(any_clash),
-        "local_clash_pair": worst_pair if any_clash else best_pair,
-    }
-
-
-def nonlocal_heavy_clash_metrics(coords, labels, min_allowed_A: float = 1.75):
-    """Detect the closest heavy-atom contact between residues separated by at least 2."""
-    coords = np.asarray(coords, dtype=float)
-    res_ids = np.array([int(r) for r, _, _ in labels], dtype=int)
-    heavy_mask = np.array([str(elem).upper() != "H" and not str(atom).upper().startswith("H") for _, atom, elem in labels], dtype=bool)
-
-    idx = np.where(heavy_mask)[0]
-    if idx.size < 2:
-        return {
-            "clash_min_heavy_dist": np.nan,
-            "clash_flag": False,
-            "clash_pair": "",
-        }
-
-    best_dist = float("inf")
-    best_pair = ""
-    for ii, i in enumerate(idx[:-1]):
-        ri = res_ids[i]
-        for j in idx[ii + 1:]:
-            if abs(ri - res_ids[j]) < 2:
-                continue
-            d = float(np.linalg.norm(coords[i] - coords[j]))
-            if d < best_dist:
-                best_dist = d
-                best_pair = f"{labels[i][0]}:{labels[i][1]}-{labels[j][0]}:{labels[j][1]}"
-
-    if best_dist == float("inf"):
-        return {
-            "clash_min_heavy_dist": np.nan,
-            "clash_flag": False,
-            "clash_pair": "",
-        }
-
-    return {
-        "clash_min_heavy_dist": float(best_dist),
-        "clash_flag": bool(best_dist < float(min_allowed_A)),
-        "clash_pair": best_pair,
-    }
 
 
 def __main__():

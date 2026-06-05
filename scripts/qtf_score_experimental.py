@@ -15,18 +15,8 @@ import pandas as pd
 from Bio.PDB import PDBIO, PDBParser, Select
 from qtf.core.folder import QuantumBiophysicsFolder
 from qtf.utils import workflow as utils
+from qtf.utils.workflow import AA3_TO_1, pdb_id_from_path
 
-
-AA3_TO_1 = {
-    'ALA': 'A', 'ARG': 'R', 'ASN': 'N', 'ASP': 'D', 'CYS': 'C',
-    'GLN': 'Q', 'GLU': 'E', 'GLY': 'G', 'HIS': 'H', 'ILE': 'I',
-    'LEU': 'L', 'LYS': 'K', 'MET': 'M', 'PHE': 'F', 'PRO': 'P',
-    'SER': 'S', 'THR': 'T', 'TRP': 'W', 'TYR': 'Y', 'VAL': 'V',
-}
-
-
-def pdb_id_from_path(p) -> str:
-    return Path(str(p)).stem.upper()
 
 class _SelectChainResidues(Select):
     def __init__(self, chain_id: Optional[str], start: Optional[int], end: Optional[int]):
@@ -248,31 +238,11 @@ def make_rebuilt_output_paths(output_dir: Path, spec_name: str, start: Optional[
     )
 
 
-def kabsch_rmsd(P, Q):
-    """
-    Calculates RMSD between two coordinate sets after optimal alignment.
-    Returns RMSD only.
-    """
-    if P.shape != Q.shape:
-        raise ValueError(f"Shape mismatch: {P.shape} vs {Q.shape}")
-
-    P_centered = P - np.mean(P, axis=0)
-    Q_centered = Q - np.mean(Q, axis=0)
-
-    H = np.dot(P_centered.T, Q_centered)
-    V, S, Wt = np.linalg.svd(H)
-
-    d = (np.linalg.det(V) * np.linalg.det(Wt)) < 0.0
-    if d:
-        V[:, -1] = -V[:, -1]
-
-    R = np.dot(V, Wt)
-
-    P_rotated = np.dot(P_centered, R)
-    diff = P_rotated - Q_centered
-
-    rms = np.sqrt(np.mean(np.sum(diff**2, axis=1)))
-    return float(rms)
+# `kabsch_rmsd` and the `core_ca_*` helpers used to be defined here
+# (B5: duplicate of qtf/analysis/stability.py::kabsch_rmsd and
+# qtf/utils/workflow.py::core_ca_*). They are now imported below
+# alongside `pdb_id_from_path` and `AA3_TO_1`.
+from qtf.analysis.stability import kabsch_rmsd  # noqa: E402, F401
 
 
 def core_ca_slice(coords: np.ndarray) -> np.ndarray:
