@@ -141,7 +141,13 @@ Optional extras:
 ```bash
 pip install "qtf[dev]"       # pytest>=7, pytest-cov, ruff, mypy
 pip install "qtf[notebook]"  # jupyter, nbformat  (for running QTF.ipynb)
+pip install "qtf[workflows]" # mdtraj, biopython, openmm, matplotlib workflow tools
 ```
+
+The upstream experiment workflow code is kept inside the package as lowercase
+modules, matching this repository's structure. The main batch runner is available
+at `scripts/qtf_run.py`; supporting workflow modules live under `qtf/`, and the
+small reference panels/PDB inputs live under `experimental_structures/`.
 
 ---
 
