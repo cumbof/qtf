@@ -347,9 +347,9 @@ class TestFoldScoutBudget:
 
         original = folder.energy_function
 
-        def counting_energy(params):
+        def counting_energy(params, **kwargs):
             call_counts.append(1)
-            return original(params)
+            return original(params, **kwargs)
 
         folder.energy_function = counting_energy
         # We only need to check the scouting phase, so abort early by passing
@@ -378,9 +378,9 @@ class TestFoldScoutBudget:
         calls = []
         original = f.energy_function
 
-        def track(params):
+        def track(params, **kwargs):
             calls.append(1)
-            return original(params)
+            return original(params, **kwargs)
 
         f.energy_function = track
         f.fold(max_iter=50, scout_attempts=1)
