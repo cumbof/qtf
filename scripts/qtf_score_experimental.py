@@ -10,8 +10,8 @@ import mdtraj as md
 import numpy as np
 import pandas as pd
 from Bio.PDB import PDBIO, PDBParser, Select
-import qtf.runner as runner
-import qtf.workflow_utils as utils
+from qtf.core.folder import QuantumBiophysicsFolder
+from qtf.utils import workflow as utils
 
 
 AA3_TO_1 = {
@@ -115,7 +115,7 @@ def extract_subset_pdb(
 
 def compute_qtf_angle_vector(
     trimmed_pdb: str,
-    folder: runner.QuantumBiophysicsFolder,
+    folder: QuantumBiophysicsFolder,
     chi_mode: str = "all",
 ) -> Tuple[np.ndarray, Dict[str, float]]:
     """
@@ -180,7 +180,7 @@ def compute_qtf_angle_vector(
     return angle_vec, observed
 
 
-def eval_energy_terms(folder: runner.QuantumBiophysicsFolder, angle_vec: np.ndarray):
+def eval_energy_terms(folder: QuantumBiophysicsFolder, angle_vec: np.ndarray):
     """
     Evaluate the exact stage-3 QTF energy function used in beam search.
     """
@@ -199,7 +199,7 @@ def eval_energy_terms(folder: runner.QuantumBiophysicsFolder, angle_vec: np.ndar
         folder._get_angles = orig_get_angles
 
 
-def build_ca_coords(folder: runner.QuantumBiophysicsFolder, angle_vec: np.ndarray) -> np.ndarray:
+def build_ca_coords(folder: QuantumBiophysicsFolder, angle_vec: np.ndarray) -> np.ndarray:
     """
     Rebuild the structure in QTF geometry and return CA coordinates in Å.
     """
@@ -213,7 +213,7 @@ def build_ca_coords(folder: runner.QuantumBiophysicsFolder, angle_vec: np.ndarra
         folder._get_angles = orig_get_angles
 
 
-def build_full_coords(folder: runner.QuantumBiophysicsFolder, angle_vec: np.ndarray):
+def build_full_coords(folder: QuantumBiophysicsFolder, angle_vec: np.ndarray):
     """
     Rebuild the full structure in QTF geometry and return coordinates, labels, and bonds.
     """

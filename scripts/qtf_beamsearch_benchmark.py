@@ -31,9 +31,9 @@ import mdtraj as md
 import numpy as np
 import pandas as pd
 
-import qtf.runner as runner
-import qtf.workflow_utils as utils
-import qtf.qtf_gromacs as qtf_gromacs
+from qtf.core.folder import QuantumBiophysicsFolder
+from qtf.utils import workflow as utils
+from qtf.utils import gromacs as qtf_gromacs
 
 
 def _jsonify(x):
@@ -262,7 +262,7 @@ def maybe_downsample_options(
     idx = sorted(idx.tolist())
     return [options[i] for i in idx]
 
-def eval_energy_terms(folder: runner.QuantumBiophysicsFolder, angle_vec: np.ndarray) -> Tuple[float, Dict[str, float]]:
+def eval_energy_terms(folder: QuantumBiophysicsFolder, angle_vec: np.ndarray) -> Tuple[float, Dict[str, float]]:
     """
     Evaluate energy_function at stage 3 for a given angle vector by temporarily
     overriding _get_angles. Returns (energy, terms).
@@ -280,7 +280,7 @@ def eval_energy_terms(folder: runner.QuantumBiophysicsFolder, angle_vec: np.ndar
         folder._get_angles = orig_get_angles
 
 
-def build_ca_coords(folder: runner.QuantumBiophysicsFolder, angle_vec: np.ndarray) -> np.ndarray:
+def build_ca_coords(folder: QuantumBiophysicsFolder, angle_vec: np.ndarray) -> np.ndarray:
     """Build full structure and extract CA coordinates."""
     orig_get_angles = folder._get_angles
     try:
@@ -294,7 +294,7 @@ def build_ca_coords(folder: runner.QuantumBiophysicsFolder, angle_vec: np.ndarra
     finally:
         folder._get_angles = orig_get_angles
 
-def build_full_coords(folder: runner.QuantumBiophysicsFolder, angle_vec: np.ndarray):
+def build_full_coords(folder: QuantumBiophysicsFolder, angle_vec: np.ndarray):
     """Build full QTF structure and return coordinates, labels, and bonds."""
     orig_get_angles = folder._get_angles
     try:
@@ -311,7 +311,7 @@ def build_full_coords(folder: runner.QuantumBiophysicsFolder, angle_vec: np.ndar
 
 
 
-def backbone_signature(folder: runner.QuantumBiophysicsFolder, angle_vec: np.ndarray, round_deg: float = 15.0):
+def backbone_signature(folder: QuantumBiophysicsFolder, angle_vec: np.ndarray, round_deg: float = 15.0):
     """
     Signature using ONLY backbone torsions, rounded into bins.
     This preserves sidechain diversity within a backbone family.
@@ -325,7 +325,7 @@ def backbone_signature(folder: runner.QuantumBiophysicsFolder, angle_vec: np.nda
 
 
 def dedup_states_by_backbone(
-    folder: runner.QuantumBiophysicsFolder,
+    folder: QuantumBiophysicsFolder,
     states: List[State],
     round_deg: float = 15.0,
 ) -> List[State]:
@@ -551,7 +551,7 @@ def main():
         "A": [], "G": [],
     }
 
-    folders_by_k: Dict[int, runner.QuantumBiophysicsFolder] = {}
+    folders_by_k: Dict[int, QuantumBiophysicsFolder] = {}
     for k in range(1, L + 1):
         folders_by_k[k] = utils.make_folder(
             sequence=seq[:k],

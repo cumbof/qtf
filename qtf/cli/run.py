@@ -9,9 +9,10 @@ import os, time, json, argparse
 from datetime import datetime
 
 ### qtf imports
-import qtf.runner as runner
-import qtf.workflow_utils as utils
-import qtf.qtf_gromacs as qtf_gromacs
+from qtf.core.ensemble import EnsembleFoldingManager
+from qtf.core.folder import QuantumBiophysicsFolder
+from qtf.utils import workflow as utils
+from qtf.utils import gromacs as qtf_gromacs
 
 
 def _jsonify(x):
@@ -277,7 +278,7 @@ def __main__():
                 rosetta_cen_min=bool(args.rosetta_cen_min),
             )
 
-        manager = runner.EnsembleFoldingManager(folder)
+        manager = EnsembleFoldingManager(folder)
 
         # 2. Run Ensemble
         manager.run_ensemble(n_runs=ensemble_size, max_iter=args.maxiter, prime_strategy=prime_strategy)

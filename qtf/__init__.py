@@ -3,6 +3,9 @@
 A hybrid quantum-classical protein structure prediction package built on
 Qiskit's EfficientSU2 ansatz and a physics-based energy critic.
 
+Use ``qtf-run --help`` for the CLI entry point, and install optional workflow
+dependencies with ``pip install "qtf[workflows]"``.
+
 Quick start
 -----------
 >>> from qtf import QuantumBiophysicsFolder, EnsembleFoldingManager

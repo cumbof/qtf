@@ -11,9 +11,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterable, List
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import qtf.workflow_utils as utils
+from qtf.utils import workflow as utils
 
 
 DEFAULT_PANEL_CSV = "experimental_structures/panel_csvs/protein_panel.csv"
@@ -332,7 +331,7 @@ def _run_grid(args: argparse.Namespace) -> None:
                 writer.writerows(manifest_rows)
 
     try:
-        import qtf.panel_analysis as panel_analysis
+        from qtf.analysis import panel as panel_analysis
 
         panel_analysis.run_panel_analysis(outroot, analysis_dir)
     except Exception as e:

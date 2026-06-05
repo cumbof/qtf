@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from qtf.panel_analysis import collect_panel_results
+from qtf.analysis.panel import collect_panel_results
 
 
 def main() -> None:

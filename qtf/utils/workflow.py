@@ -13,13 +13,21 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-import mdtraj as md
+try:
+    import mdtraj as md
+except ImportError:
+    md = None  # type: ignore[assignment]
 import numpy as np
 import pandas as pd
-from Bio.PDB import PDBIO, PDBParser, Select
+try:
+    from Bio.PDB import PDBIO, PDBParser, Select
+except ImportError:
+    PDBIO = PDBParser = Select = None  # type: ignore[assignment]
 
-import qtf.runner as runner
-import qtf.qtf_gromacs as qtf_gromacs
+from qtf.analysis.stability import kabsch_rmsd
+from qtf.core.folder import QuantumBiophysicsFolder
+from qtf.utils.pdb import calculate_physics_metrics
+from qtf.utils import gromacs as qtf_gromacs
 
 
 Coords = np.ndarray
@@ -37,15 +45,6 @@ AA3_TO_1 = {
 def pdb_id_from_path(p: Optional[str]) -> str:
     return Path(str(p)).stem.upper()
 
-
-def calculate_physics_metrics(coords: np.ndarray) -> Tuple[float, float]:
-    arr = np.asarray(coords, dtype=float)
-    if arr.size == 0:
-        return 0.0, 0.0
-    end_to_end = float(np.linalg.norm(arr[0] - arr[-1]))
-    centroid = np.mean(arr, axis=0)
-    rg = float(np.sqrt(np.mean(np.sum((arr - centroid) ** 2, axis=1))))
-    return end_to_end, rg
 
 
 def adjacent_heavy_clash_metrics(
@@ -244,7 +243,7 @@ def extract_subset_pdb(
 
 def compute_qtf_angle_vector(
     trimmed_pdb: str,
-    folder: runner.QuantumBiophysicsFolder,
+    folder: QuantumBiophysicsFolder,
     chi_mode: str = "all",
 ) -> Tuple[np.ndarray, Dict[str, float]]:
     traj = md.load(trimmed_pdb)
@@ -303,7 +302,7 @@ def compute_qtf_angle_vector(
     return angle_vec, observed
 
 
-def eval_energy_terms(folder: runner.QuantumBiophysicsFolder, angle_vec: np.ndarray):
+def eval_energy_terms(folder: QuantumBiophysicsFolder, angle_vec: np.ndarray):
     dummy_params = np.zeros(folder.n_params, dtype=float)
     orig_get_angles = folder._get_angles
     try:
@@ -316,7 +315,7 @@ def eval_energy_terms(folder: runner.QuantumBiophysicsFolder, angle_vec: np.ndar
         folder._get_angles = orig_get_angles
 
 
-def build_full_coords(folder: runner.QuantumBiophysicsFolder, angle_vec: np.ndarray):
+def build_full_coords(folder: QuantumBiophysicsFolder, angle_vec: np.ndarray):
     orig_get_angles = folder._get_angles
     try:
         folder._get_angles = lambda _params: angle_vec
@@ -340,22 +339,6 @@ def make_rebuilt_output_paths(output_dir: Path, spec_name: str, start: Optional[
         output_dir / f"{stem}_full.pdb",
     )
 
-
-def kabsch_rmsd(P, Q):
-    if P.shape != Q.shape:
-        raise ValueError(f"Shape mismatch: {P.shape} vs {Q.shape}")
-    P_centered = P - np.mean(P, axis=0)
-    Q_centered = Q - np.mean(Q, axis=0)
-    H = np.dot(P_centered.T, Q_centered)
-    V, S, Wt = np.linalg.svd(H)
-    d = (np.linalg.det(V) * np.linalg.det(Wt)) < 0.0
-    if d:
-        V[:, -1] = -V[:, -1]
-    R = np.dot(V, Wt)
-    P_rotated = np.dot(P_centered, R)
-    diff = P_rotated - Q_centered
-    rms = np.sqrt(np.mean(np.sum(diff**2, axis=1)))
-    return float(rms)
 
 
 def core_ca_slice(coords: np.ndarray) -> np.ndarray:
@@ -604,7 +587,7 @@ def score_native_structure(
             "A": [], "G": [],
         }
 
-        folder = runner.QuantumBiophysicsFolder(
+        folder = QuantumBiophysicsFolder(
             sequence=sequence,
             force_field=forcefield,
             chi_mode="selective" if chi_mode == "selective" else "all",
@@ -784,7 +767,7 @@ def make_folder(
     rosetta_cen_min: bool,
     chi_mode: Optional[str] = None,
     selective_chi_map: Optional[Dict[str, List[str]]] = None,
-) -> runner.QuantumBiophysicsFolder:
+) -> QuantumBiophysicsFolder:
     """Construct a QuantumBiophysicsFolder with the shared runtime options."""
     folder_kwargs: Dict[str, Any] = {
         "sequence": sequence,
@@ -800,7 +783,7 @@ def make_folder(
         folder_kwargs["chi_mode"] = chi_mode
     if selective_chi_map is not None:
         folder_kwargs["selective_chi_map"] = selective_chi_map
-    return runner.QuantumBiophysicsFolder(**folder_kwargs)
+    return QuantumBiophysicsFolder(**folder_kwargs)
 
 
 def gromacs_postprocess_structure(
