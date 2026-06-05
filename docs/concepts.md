@@ -58,8 +58,7 @@ D = M·[d·cos(α), d·sin(α)·cos(τ), d·sin(α)·sin(τ)] + C
 
 where **M** is the local reference frame built from **A**, **B**, **C**.
 
-All backbone bond lengths and angles are taken from the relevant force field
-(CHARMM22, AMBER ff14SB, or OPLS-AA) rather than assumed ideal.
+Backbone bond lengths and angles use the QTF geometry tables and Amber-style custom parameterization rather than multiple selectable custom force fields.
 
 ---
 

@@ -61,7 +61,7 @@ are extracted and mapped directly to torsion angles in [−π, π].
 
 - **Logarithmic qubit scaling** — a 10-residue protein (~30 DoF) uses only 5 qubits
 - **Physics-based energy function** with 10 distinct terms (no neural network required)
-- **Three force fields** supported: CHARMM22, AMBER ff14SB, OPLS-AA
+- **Amber-style custom parameterization** plus optional Rosetta and OpenMM backends
 - **Ensemble folding** with reproducible random initialisation and full provenance
 - **Comprehensive ranking** — energy, RMSD vs ground truth, radius of gyration, convergence
 - **Interactive Plotly visualisations** — 3-D backbone overlay, energy landscape, ranking dashboard
@@ -75,7 +75,7 @@ from qtf.analysis import EnsembleRanking
 from qtf.visualization import plot_structure, plot_energy_landscape, plot_ranking
 from qtf.utils import get_ground_truth_backbone
 
-folder  = QuantumBiophysicsFolder("YYDPETGTWY", force_field="amber")
+folder  = QuantumBiophysicsFolder("YYDPETGTWY")
 manager = EnsembleFoldingManager(folder)
 manager.run_ensemble(n_runs=5, max_iter=2000, scout_attempts=50)
 

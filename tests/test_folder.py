@@ -20,16 +20,9 @@ class TestInit:
     def test_n_residues(self, folder_ga):
         assert folder_ga.n_residues == 2
 
-    def test_default_force_field(self, folder_ga):
-        assert folder_ga.force_field == "charmm"
-
-    def test_custom_force_field_amber(self):
-        f = QuantumBiophysicsFolder("A", force_field="amber")
-        assert f.force_field == "amber"
-
-    def test_custom_force_field_opls(self):
-        f = QuantumBiophysicsFolder("A", force_field="opls")
-        assert f.force_field == "opls"
+    def test_force_field_argument_removed(self):
+        with pytest.raises(TypeError):
+            QuantumBiophysicsFolder("A", force_field="amber")
 
     def test_n_qubits_at_least_two(self, folder_ga):
         assert folder_ga.n_qubits >= 2
@@ -66,36 +59,22 @@ class TestInit:
 
 
 class TestBuildCharges:
-    def test_charmm_backbone_N(self):
-        charges = QuantumBiophysicsFolder._build_charges("charmm")
-        assert charges["N"] == pytest.approx(-0.47)
-
     def test_amber_backbone_N(self):
-        charges = QuantumBiophysicsFolder._build_charges("amber")
+        charges = QuantumBiophysicsFolder._build_charges()
         assert charges["N"] == pytest.approx(-0.42)
 
-    def test_opls_backbone_N(self):
-        charges = QuantumBiophysicsFolder._build_charges("opls")
-        assert charges["N"] == pytest.approx(-0.50)
-
-    def test_unknown_ff_falls_back_to_charmm(self):
-        charges_unknown = QuantumBiophysicsFolder._build_charges("unknown_ff")
-        charges_charmm = QuantumBiophysicsFolder._build_charges("charmm")
-        assert charges_unknown == charges_charmm
-
     def test_common_charge_oxt(self):
-        charges = QuantumBiophysicsFolder._build_charges("charmm")
+        charges = QuantumBiophysicsFolder._build_charges()
         assert charges["OXT"] == pytest.approx(-1.0)
 
     def test_common_charge_nz(self):
-        charges = QuantumBiophysicsFolder._build_charges("amber")
+        charges = QuantumBiophysicsFolder._build_charges()
         assert charges["NZ"] == pytest.approx(1.0)
 
-    def test_all_ffs_contain_backbone_atoms(self):
-        for ff in ("charmm", "amber", "opls"):
-            charges = QuantumBiophysicsFolder._build_charges(ff)
-            for atom in ("N", "CA", "C", "O"):
-                assert atom in charges, f"{atom} missing in {ff}"
+    def test_amber_contains_backbone_atoms(self):
+        charges = QuantumBiophysicsFolder._build_charges()
+        for atom in ("N", "CA", "C", "O"):
+            assert atom in charges, f"{atom} missing in amber"
 
 
 # ---------------------------------------------------------------------------

@@ -25,6 +25,10 @@ def _jsonify(x):
             return x.tolist()
     except Exception:
         pass
+    if isinstance(x, dict):
+        return {str(k): _jsonify(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [_jsonify(v) for v in x]
     return x
 
 
@@ -151,7 +155,7 @@ def nonlocal_heavy_clash_metrics(coords, labels, min_allowed_A: float = 1.75):
 def __main__():
     '''
     Main entry point for running Quantum Torsion Folder.
-    Produces per-run outputs in outputs/<sequence>_<forcefield>_<timestamp>/.
+    Produces per-run outputs in run_outputs/quantum_simulations/<sequence>_<backend>_<timestamp>/.
     '''
 
     # start tracking time
@@ -160,8 +164,8 @@ def __main__():
 
     # parse command line arguments
     # example:
-    # python qtf_predictor.py --predict "YYDPETGTWY" --reference_structure "5AWL" --average_reference_backbone False
-    #   --forcefield amber --mode predict_and_compare --ensemble_size 20 --prime_strategy Random --top_k 5
+    # python -m qtf.cli.run --predict "YYDPETGTWY" --reference_structure "5AWL"
+    #   --mode predict_and_compare --ensemble_size 20 --prime_strategy Random --top_k 5
     parser = argparse.ArgumentParser()
 
     parser.add_argument('--predict', default=None, help='target sequence to predict')
@@ -180,8 +184,6 @@ def __main__():
               'Defaults to first model, which automatically works with Xray structures.')
     )
 
-    parser.add_argument('--forcefield', default="amber", choices=["amber", "opls", "charmm", "all"],
-                        help='choice of force field for scoring')
     parser.add_argument('--mode', default="predict_and_compare", choices=["predict_and_compare", "predict_only"],
                         help='which mode to run script in')
 
@@ -197,7 +199,7 @@ def __main__():
                         help='prime strategy for initialization')
     parser.add_argument('--maxiter', default=2000, type=int, help='max iterations for each trajectory')
     parser.add_argument('--energy_backend', default='custom', choices=['custom', 'rosetta', 'openmm'],
-                        help='stage-3 scoring backend used by runner')
+                        help='energy backend used for all optimization stages')
     parser.add_argument('--use_e2e_constraint', default=1, type=int,
                         help='1 to use length-scaled E2E constraint in custom scorer, 0 to disable')
     parser.add_argument('--e2e_scale', default=1.0, type=float,
@@ -216,6 +218,8 @@ def __main__():
     parser.add_argument('--gromacs_maxwarn', default=2, type=int)
     parser.add_argument('--gromacs_rerank', default=None, type=int,
                         help='1 to rerank final minimized outputs by GROMACS potential energy when available')
+    parser.add_argument('--output_root', default=os.path.join("run_outputs", "quantum_simulations"),
+                        help='root directory for predictor outputs')
 
     args = parser.parse_args()
     if args.gromacs_minimize is None:
@@ -237,46 +241,26 @@ def __main__():
     top_k = args.top_k
     top_frac = args.top_frac
     
-    # iterate over force fields (if "all" is selected) or just the specified one
-    force_fields = []
-    if args.forcefield == "all":
-        force_fields = ["amber", "opls", "charmm"]
-    else:
-        force_fields = [args.forcefield]    
-    for ff in force_fields:
-        force_field = ff 
+    for _ in [None]:
 
         # output directories (DO NOT chdir; write explicitly)
-        outputs_root = "outputs"
+        outputs_root = args.output_root
         os.makedirs(outputs_root, exist_ok=True)
-        job_output_dir = os.path.join(outputs_root, f"{sequence}_{force_field}_{timestamp}")
+        job_output_dir = os.path.join(outputs_root, f"{sequence}_{args.energy_backend}_{timestamp}")
         os.makedirs(job_output_dir, exist_ok=True)
         print(f"Writing outputs to: {job_output_dir}")
 
         # 1. Initialize Folder & Manager
         print(f"--- DIAGNOSING BACKBONE: {sequence} ---")
-        if force_field == "all":
-            folder = utils.make_folder(
-                sequence=sequence,
-                force_field=["amber", "opls", "charmm"],
-                energy_backend=args.energy_backend,
-                use_e2e_constraint=bool(args.use_e2e_constraint),
-                e2e_scale=args.e2e_scale,
-                rosetta_repack=bool(args.rosetta_repack),
-                rosetta_fa_min=bool(args.rosetta_fa_min),
-                rosetta_cen_min=bool(args.rosetta_cen_min),
-            )
-        else:
-            folder = utils.make_folder(
-                sequence=sequence,
-                force_field=force_field,
-                energy_backend=args.energy_backend,
-                use_e2e_constraint=bool(args.use_e2e_constraint),
-                e2e_scale=args.e2e_scale,
-                rosetta_repack=bool(args.rosetta_repack),
-                rosetta_fa_min=bool(args.rosetta_fa_min),
-                rosetta_cen_min=bool(args.rosetta_cen_min),
-            )
+        folder = utils.make_folder(
+            sequence=sequence,
+            energy_backend=args.energy_backend,
+            use_e2e_constraint=bool(args.use_e2e_constraint),
+            e2e_scale=args.e2e_scale,
+            rosetta_repack=bool(args.rosetta_repack),
+            rosetta_fa_min=bool(args.rosetta_fa_min),
+            rosetta_cen_min=bool(args.rosetta_cen_min),
+        )
 
         manager = EnsembleFoldingManager(folder)
 
@@ -338,6 +322,24 @@ def __main__():
                 include_hydrogens=False,
             )
 
+            if true_rmsd_coords is not None:
+                raw_rmsd, raw_rmsd_meta = utils.rmsd_between_structures(
+                    coords,
+                    labels,
+                    true_rmsd_coords,
+                    true_rmsd_labels,
+                    args.rmsd_mode,
+                    args.rmsd_residue_scope,
+                )
+            else:
+                raw_rmsd = np.nan
+                raw_rmsd_meta = utils.rmsd_selection_metadata(
+                    args.rmsd_mode,
+                    args.rmsd_residue_scope,
+                    n_atoms=0,
+                    n_residues=0,
+                )
+
             gromacs_result = utils.gromacs_postprocess_structure(
                 enabled=bool(args.gromacs_minimize),
                 full_pdb_path=full_pdb_path,
@@ -376,8 +378,14 @@ def __main__():
                     args.rmsd_mode,
                     args.rmsd_residue_scope,
                 )
+                gromacs_rmsd = (
+                    rmsd
+                    if bool(args.gromacs_minimize) and gromacs_info.get("gromacs_status") == "ok"
+                    else np.nan
+                )
             else:
                 t_e2e, t_rg, rmsd = np.nan, np.nan, np.nan
+                gromacs_rmsd = np.nan
                 rmsd_meta = utils.rmsd_selection_metadata(
                     args.rmsd_mode,
                     args.rmsd_residue_scope,
@@ -395,9 +403,12 @@ def __main__():
                 "energy_rank": int(rank),
                 "energy": float(res["energy"]),
                 "rmsd_to_reference_A": rmsd,
+                "raw_rmsd_to_reference_A": raw_rmsd,
+                "gromacs_rmsd_to_reference_A": gromacs_rmsd,
                 "rmsd_mode": args.rmsd_mode,
                 "rmsd_residue_scope": args.rmsd_residue_scope,
                 **rmsd_meta,
+                **{f"raw_{k}": v for k, v in raw_rmsd_meta.items()},
                 "pred_e2e_A": float(p_e2e),
                 "pred_rg_A": float(p_rg),
                 "ref_e2e_A": float(t_e2e) if not np.isnan(t_e2e) else np.nan,
@@ -454,6 +465,8 @@ def __main__():
         t_e2e = float(best_row["ref_e2e_A"]) if not np.isnan(best_row["ref_e2e_A"]) else np.nan
         t_rg = float(best_row["ref_rg_A"]) if not np.isnan(best_row["ref_rg_A"]) else np.nan
         rmsd_best = float(best_row["rmsd_to_reference_A"]) if not np.isnan(best_row["rmsd_to_reference_A"]) else np.nan
+        raw_rmsd_best = float(best_row["raw_rmsd_to_reference_A"]) if not np.isnan(best_row["raw_rmsd_to_reference_A"]) else np.nan
+        gromacs_rmsd_best = float(best_row["gromacs_rmsd_to_reference_A"]) if not np.isnan(best_row["gromacs_rmsd_to_reference_A"]) else np.nan
 
         # runtime
         runtime = (time.time() - time_start) / 60.0
@@ -469,6 +482,8 @@ def __main__():
             "Rg Status": ("PUFFY" if (not np.isnan(t_rg) and p_rg > t_rg + 2) else "COMPACT") if args.mode=="predict_and_compare" else None,
 
             "Backbone RMSD (Å)": float(f"{rmsd_best:.3f}") if not np.isnan(rmsd_best) else None,
+            "Raw Backbone RMSD (Å)": float(f"{raw_rmsd_best:.3f}") if not np.isnan(raw_rmsd_best) else None,
+            "GROMACS Backbone RMSD (Å)": float(f"{gromacs_rmsd_best:.3f}") if not np.isnan(gromacs_rmsd_best) else None,
             "RMSD Status": ("GOOD" if (not np.isnan(rmsd_best) and rmsd_best < 2.0) else "BAD") if args.mode=="predict_and_compare" else None,
 
             # run-level meta/settings
@@ -477,7 +492,6 @@ def __main__():
             "Sequence": sequence,
             "mode": args.mode,
             "Reference Structure": ((reference_pdb_path or reference_structure_pdb_id) if (reference_pdb_path or reference_structure_pdb_id) is not None and args.mode != "predict_only" else None),
-            "Force Field": force_field,
             "Prime Strategy": prime_strategy,
             "rmsd_mode": args.rmsd_mode,
             "rmsd_residue_scope": args.rmsd_residue_scope,

@@ -184,7 +184,7 @@ pip install -e ".[dev]"
 A command-line interface is installed automatically with `pip install qtf`:
 
 ```bash
-qtf-run --predict YYDPETGTWY --forcefield amber --ensemble_size 5
+qtf-run --predict YYDPETGTWY --ensemble_size 5
 ```
 
 **Common flags:**
@@ -192,7 +192,6 @@ qtf-run --predict YYDPETGTWY --forcefield amber --ensemble_size 5
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--predict SEQ` | required | Target amino acid sequence |
-| `--forcefield` | `amber` | `amber` \| `opls` \| `charmm` \| `all` (runs all three) |
 | `--ensemble_size N` | `3` | Number of independent replicas |
 | `--maxiter N` | `2000` | Max optimiser iterations per stage |
 | `--prime_strategy` | `Random` | `Random` \| `Helix` \| `Sheet` \| `mixed` |
@@ -202,7 +201,7 @@ qtf-run --predict YYDPETGTWY --forcefield amber --ensemble_size 5
 | `--rmsd_residue_scope` | `core` | `core` (drop first/last residue) \| `all` |
 | `--top_k N` | `1` | Save and compare the N lowest-energy models |
 | `--top_frac F` | None | Save the top fraction F (0–1) of models (overrides `--top_k`) |
-| `--energy_backend` | `custom` | Stage-3 scorer: `custom` \| `rosetta` \| `openmm` |
+| `--energy_backend` | `custom` | Energy backend for all stages: `custom` \| `rosetta` \| `openmm` |
 | `--mode` | `predict_and_compare` | `predict_and_compare` \| `predict_only` |
 
 Outputs are written to `outputs/<SEQUENCE>_<FF>_<TIMESTAMP>/`:
@@ -226,7 +225,6 @@ from qtf.utils import get_ground_truth_backbone, save_pdb
 # ── 1. Initialise the folder ─────────────────────────────────────────────────
 folder = QuantumBiophysicsFolder(
     sequence="YYDPETGTWY",   # Chignolin — a well-studied mini-protein
-    force_field="amber",     # "charmm" (default) | "amber" | "opls"
 )
 
 # ── 2. Run an ensemble of independent replicas folding ──────────────────────
@@ -384,15 +382,13 @@ The `LandscapeTracker` object records the energy value at every function evaluat
 
 ### Force Fields
 
-Three approximate force fields are supported for backbone and side-chain partial charges:
+The custom QTF backend uses a single Amber-style partial-charge parameterization:
 
-| Force Field | `force_field=` | Backbone N charge | C=O charges | Notes |
-|-------------|---------------|------------------|------------|-------|
-| CHARMM22 | `"charmm"` (default) | −0.47 | +0.51 / −0.51 | Strong backbone dipoles; balanced Cα |
-| AMBER ff14SB | `"amber"` | −0.42 | +0.60 / −0.57 | Very polar carbonyl; Cα neutral (0.00) |
-| OPLS-AA | `"opls"` | −0.50 | +0.50 / −0.50 | Highly symmetric backbone; stronger hydroxyl O |
+| Custom parameterization | Backbone N charge | C=O charges | Notes |
+|-------------|------------------|------------|-------|
+| AMBER ff14SB approx. | −0.42 | +0.60 / −0.57 | Very polar carbonyl; Cα neutral (0.00) |
 
-All three force fields share:
+The custom parameterization uses:
 - A common set of ionic/charged-group charges: carboxylate oxygens, guanidinium nitrogens, lysine NZ, etc.
 - The Kyte–Doolittle hydrophobicity scale (independent of partial charges).
 - Bondi van der Waals radii for heavy atoms.
@@ -597,7 +593,7 @@ This ensures that:
 ```python
 from qtf import QuantumBiophysicsFolder, EnsembleFoldingManager
 
-folder = QuantumBiophysicsFolder("ACDEFGHIKLMNPQRSTVWY", force_field="charmm")
+folder = QuantumBiophysicsFolder("ACDEFGHIKLMNPQRSTVWY")
 manager = EnsembleFoldingManager(folder)
 
 manager.run_ensemble(
@@ -923,7 +919,6 @@ print(f"Radius of gyration  : {rg:.2f} Å")
 ```python
 class QuantumBiophysicsFolder(
     sequence: str,
-    force_field: str = "charmm",
     use_e2e_constraint: bool = True,
     e2e_scale: float = 1.0,
     energy_backend: str = "custom",
@@ -935,10 +930,9 @@ class QuantumBiophysicsFolder(
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `sequence` | str | — | Single-letter amino acid sequence (case-insensitive) |
-| `force_field` | str | `"charmm"` | One of `"charmm"`, `"amber"`, `"opls"` |
 | `use_e2e_constraint` | bool | `True` | Enable/disable the length-aware end-to-end constraint |
 | `e2e_scale` | float | `1.0` | Multiplier for the E2E constraint strength |
-| `energy_backend` | str | `"custom"` | Scoring backend for Stage 3: `"custom"` (built-in), `"rosetta"` (PyRosetta, optional), `"openmm"` (OpenMM, optional) |
+| `energy_backend` | str | `"custom"` | Scoring backend for all optimizer stages: `"custom"` (built-in), `"rosetta"` (PyRosetta, optional), `"openmm"` (OpenMM, optional) |
 
 **Key attributes (post-construction):**
 
@@ -946,7 +940,6 @@ class QuantumBiophysicsFolder(
 |-----------|------|-------------|
 | `sequence` | str | Upper-cased amino acid sequence |
 | `n_residues` | int | Number of residues |
-| `force_field` | str | Active force field name |
 | `dof_map` | list[dict] | Ordered degrees of freedom (`res`, `type`) |
 | `total_angles` | int | Total number of torsion angles N |
 | `n_qubits` | int | ⌈log₂ N⌉ — number of qubits in the circuit |
@@ -1174,8 +1167,8 @@ QTF is designed for **exact reproducibility** given the same sequence and run pa
 
 ```python
 # These two managers will produce byte-identical results
-folder1 = QuantumBiophysicsFolder("ACGT", force_field="amber")
-folder2 = QuantumBiophysicsFolder("ACGT", force_field="amber")
+folder1 = QuantumBiophysicsFolder("ACGT")
+folder2 = QuantumBiophysicsFolder("ACGT")
 
 m1, m2 = EnsembleFoldingManager(folder1), EnsembleFoldingManager(folder2)
 m1.run_ensemble(n_runs=3, max_iter=500)
@@ -1185,15 +1178,15 @@ for i in range(3):
     assert m1.results[i]["energy"] == m2.results[i]["energy"]  # ✓
 ```
 
-To **isolate the effect of force field** on folding outcome:
+To isolate the effect of energy backend on folding outcome:
 
 ```python
-for ff in ("charmm", "amber", "opls"):
-    folder = QuantumBiophysicsFolder("YYDPETGTWY", force_field=ff)
+for backend in ("custom", "rosetta", "openmm"):
+    folder = QuantumBiophysicsFolder("YYDPETGTWY", energy_backend=backend)
     manager = EnsembleFoldingManager(folder)
     manager.run_ensemble(n_runs=5, max_iter=2000, scout_attempts=50)
     # All three runs start from the same initial geometries,
-    # so differences in results are due to the force field alone.
+    # so differences in results are due to the scoring backend.
 ```
 
 ---
@@ -1241,14 +1234,7 @@ logging.getLogger("qtf.core.ensemble").setLevel(logging.INFO)
 1. **Hydrophobicity Scale**:
    Kyte, J., & Doolittle, R. F. (1982). A simple method for displaying the hydropathic character of a protein. *Journal of Molecular Biology*, 157(1), 105–132. https://doi.org/10.1016/0022-2836(82)90515-0
 
-2. **CHARMM22 Force Field**:
-   MacKerell, A. D. Jr., et al. (1998). All-atom empirical potential for molecular modeling and dynamics studies of proteins. *Journal of Physical Chemistry B*, 102(18), 3586–3616. https://doi.org/10.1021/jp973084f
-
-3. **AMBER ff14SB Force Field**:
-   Cornell, W. D., et al. (1995). A second generation force field for the simulation of proteins, nucleic acids, and organic molecules. *Journal of the American Chemical Society*, 117(19), 5179–5197. https://doi.org/10.1021/ja00124a002
-
-4. **OPLS-AA Force Field**:
-   Jorgensen, W. L., Maxwell, D. S., & Tirado-Rives, J. (1996). Development and testing of the OPLS all-atom force field on conformational energetics and properties of organic liquids. *Journal of the American Chemical Society*, 118(45), 11225–11236. https://doi.org/10.1021/ja9621760
+2. **AMBER Force Field**:
 
 5. **van der Waals Radii**:
    Bondi, A. (1964). van der Waals volumes and radii. *Journal of Physical Chemistry*, 68(3), 441–451. https://doi.org/10.1021/j100785a001

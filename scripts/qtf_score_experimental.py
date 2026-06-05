@@ -2,9 +2,12 @@
 import argparse
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import mdtraj as md
 import numpy as np
@@ -324,7 +327,6 @@ def score_one(
     chain: Optional[str],
     start: Optional[int],
     end: Optional[int],
-    forcefield: str,
     chi_mode: str,
     rmsd_mode: str = "ca",
     rmsd_residue_scope: str = "core",
@@ -350,7 +352,6 @@ def score_one(
         chain=chain,
         start=start,
         end=end,
-        forcefield=forcefield,
         chi_mode=chi_mode,
         rmsd_mode=rmsd_mode,
         rmsd_residue_scope=rmsd_residue_scope,
@@ -389,7 +390,6 @@ def main():
     ap.add_argument("--chain", default=None)
     ap.add_argument("--residue_start", type=int, default=None)
     ap.add_argument("--residue_end", type=int, default=None)
-    ap.add_argument("--forcefield", default="amber", choices=["amber", "charmm", "opls"])
     ap.add_argument("--chi_mode", default="selective", choices=["beam", "selective", "all"])
     ap.add_argument("--rmsd_mode", default="ca", choices=["ca", "heavy"],
                     help="RMSD atom selection: all CA atoms or all heavy atoms")
@@ -437,7 +437,6 @@ def main():
                     chain=spec.get("chain") or None,
                     start=start,
                     end=end,
-                    forcefield=spec.get("forcefield", args.forcefield),
                     chi_mode=spec.get("chi_mode", args.chi_mode),
                     rmsd_mode=args.rmsd_mode,
                     rmsd_residue_scope=args.rmsd_residue_scope,
@@ -471,7 +470,6 @@ def main():
                 chain=args.chain,
                 start=args.residue_start,
                 end=args.residue_end,
-                forcefield=args.forcefield,
                 chi_mode=args.chi_mode,
                 rmsd_mode=args.rmsd_mode,
                 rmsd_residue_scope=args.rmsd_residue_scope,

@@ -349,7 +349,8 @@ def core_ca_slice(coords: np.ndarray) -> np.ndarray:
 
 
 def core_ca_rmsd(P: np.ndarray, Q: np.ndarray) -> float:
-    return kabsch_rmsd(core_ca_slice(P), core_ca_slice(Q))
+    rmsd, _ = kabsch_rmsd(core_ca_slice(P), core_ca_slice(Q))
+    return float(rmsd)
 
 
 def rmsd_selection_metadata(
@@ -519,7 +520,8 @@ def rmsd_between_structures(
         n_matched=len(model_common_arr),
         n_missing=len(missing),
     )
-    return kabsch_rmsd(model_common_arr, ref_common_arr), meta
+    rmsd, _ = kabsch_rmsd(model_common_arr, ref_common_arr)
+    return float(rmsd), meta
 
 
 def core_ca_range_metadata(n_residues: int) -> Dict[str, object]:
@@ -555,7 +557,6 @@ def score_native_structure(
     chain: Optional[str],
     start: Optional[int],
     end: Optional[int],
-    forcefield: str,
     chi_mode: str,
     rmsd_mode: str = "ca",
     rmsd_residue_scope: str = "core",
@@ -589,7 +590,6 @@ def score_native_structure(
 
         folder = QuantumBiophysicsFolder(
             sequence=sequence,
-            force_field=forcefield,
             chi_mode="selective" if chi_mode == "selective" else "all",
             selective_chi_map=selective_chi_map,
             energy_backend=energy_backend,
@@ -698,7 +698,7 @@ def score_native_structure(
         reference_pdb_id = pdb_id_from_path(pdb_path)
         reference_pdb_path = str(pdb_path)
         experiment_id = (
-            f"{protein_name}_ff-{forcefield}_chi-{chi_mode}"
+            f"{protein_name}_chi-{chi_mode}"
             f"_backend-{energy_backend}_e2e-{int(bool(use_e2e_constraint))}"
             f"_hb-{tuning['hbond_scale']}_sasa-{tuning['sasa_scale']}"
             f"_vdwr-{tuning['vdw_rep_scale']}_vdwa-{tuning['vdw_attr_scale']}"
@@ -715,7 +715,6 @@ def score_native_structure(
             "residue_start": start if start is not None else pdb_resseqs[0],
             "residue_end": end if end is not None else pdb_resseqs[-1],
             "sequence": sequence,
-            "forcefield": forcefield,
             "chi_mode": chi_mode,
             "rmsd_mode": rmsd_mode,
             "rmsd_residue_scope": rmsd_residue_scope,
@@ -758,7 +757,6 @@ def score_native_structure(
 def make_folder(
     *,
     sequence: str,
-    force_field: Any,
     energy_backend: str,
     use_e2e_constraint: bool,
     e2e_scale: float,
@@ -771,7 +769,6 @@ def make_folder(
     """Construct a QuantumBiophysicsFolder with the shared runtime options."""
     folder_kwargs: Dict[str, Any] = {
         "sequence": sequence,
-        "force_field": force_field,
         "energy_backend": energy_backend,
         "use_e2e_constraint": bool(use_e2e_constraint),
         "e2e_scale": float(e2e_scale),

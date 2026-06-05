@@ -8,17 +8,14 @@ QTF evaluates ten energy terms at every objective call. The total energy is the
 
 ## Force fields
 
-Three force-field presets are available, each providing bond lengths, bond angles,
-partial charges, and van der Waals parameters appropriate for that force field.
+The custom QTF backend uses a single Amber-style parameterization for partial charges and related coarse force-field constants.
 
 | Identifier | Full name | Use case |
 |:-----------|:----------|:---------|
-| `"charmm"` | CHARMM22 | Default; well-tested for small peptides |
-| `"amber"`  | AMBER ff14SB | Modern backbone/side-chain parameters |
-| `"opls"`   | OPLS-AA  | United-atom representation; fast |
+| `"amber"` | AMBER ff14SB approx. | Custom QTF backend parameterization |
 
 ```python
-folder = QuantumBiophysicsFolder("YYDPETGTWY", force_field="amber")
+folder = QuantumBiophysicsFolder("YYDPETGTWY")
 ```
 
 ---

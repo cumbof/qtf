@@ -13,7 +13,7 @@ Quick start
 >>> from qtf.visualization import plot_structure, plot_energy_landscape, plot_ranking
 >>> from qtf.utils import get_ground_truth_backbone
 >>>
->>> folder = QuantumBiophysicsFolder("YYDPETGTWY", force_field="amber")
+>>> folder = QuantumBiophysicsFolder("YYDPETGTWY")
 >>> manager = EnsembleFoldingManager(folder)
 >>> manager.run_ensemble(n_runs=3)
 >>>

@@ -10,7 +10,7 @@ interpreting the results collectively.
 ```python
 from qtf import QuantumBiophysicsFolder, EnsembleFoldingManager
 
-folder  = QuantumBiophysicsFolder("YYDPETGTWY", force_field="amber")
+folder  = QuantumBiophysicsFolder("YYDPETGTWY")
 manager = EnsembleFoldingManager(folder)
 
 manager.run_ensemble(

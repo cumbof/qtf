@@ -117,12 +117,14 @@ class EnsembleFoldingManager:
             )
 
             logger.info("  Replica %d final energy: %.4f", i + 1, final_energy)
+            energy_terms = dict(getattr(self.folder, "last_energy_terms", {}) or {})
             self.results.append(
                 {
                     "id": i,
                     "seed": replica_seed,
                     "type": strat,
                     "energy": final_energy,
+                    "energy_terms": energy_terms,
                     "coords": coords,
                     "labels": labels,
                     "bonds": bonds,

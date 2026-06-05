@@ -25,7 +25,6 @@ from qtf.utils import get_ground_truth_backbone, save_pdb
 ```python
 folder = QuantumBiophysicsFolder(
     sequence="YYDPETGTWY",   # Chignolin — a well-studied mini-protein
-    force_field="amber",     # "charmm" (default) | "amber" | "opls"
 )
 
 print(f"Residues      : {folder.n_residues}")

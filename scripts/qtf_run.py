@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterable, List
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from qtf.utils import workflow as utils
 
@@ -121,19 +122,19 @@ def write_run_settings(path: Path, settings: Dict[str, str | float]) -> None:
 
 
 def _run_beam(argv: List[str]) -> None:
-    import qtf.qtf_beamsearch_benchmark as beam_mod
+    from scripts import qtf_beamsearch_benchmark as beam_mod
 
     _dispatch_module(beam_mod, ["qtf_beamsearch_benchmark.py", *argv])
 
 
 def _run_predict(argv: List[str]) -> None:
-    import qtf.qtf_predictor as predictor_mod
+    from qtf.cli import run as predictor_mod
 
     _dispatch_module(predictor_mod, ["qtf_predictor.py", *argv])
 
 
 def _run_score_native(argv: List[str]) -> None:
-    import qtf.qtf_score_experimental as score_mod
+    from scripts import qtf_score_experimental as score_mod
 
     _dispatch_module(score_mod, ["qtf_score_experimental.py", *argv])
 
@@ -168,11 +169,10 @@ def _run_grid(args: argparse.Namespace) -> None:
                 else:
                     pdb_path = str(Path(pdb_path).resolve())
             chain = str(row.get("chain", "")).strip()
-            forcefield = str(row.get("forcefield", "amber")).strip() or "amber"
             chi_mode = str(row.get("chi_mode", "selective")).strip() or "selective"
 
             exp_id = (
-                f"{name}_ff-{forcefield}_chi-{chi_mode}"
+                f"{name}_chi-{chi_mode}"
                 f"_win-{args.window_deg}_step-{args.step_deg}"
                 f"_bw-{args.beam_width}_scopts-{args.max_sidechain_opts_per_residue}"
                 f"_rmsd-{args.rmsd_mode}_scope-{args.rmsd_residue_scope}"
@@ -212,7 +212,6 @@ def _run_grid(args: argparse.Namespace) -> None:
                 "sequence": seq,
                 "pdb_path": pdb_path,
                 "chain": chain,
-                "forcefield": forcefield,
                 "chi_mode": chi_mode,
                 "beam_width": args.beam_width,
                 "window_deg": args.window_deg,
@@ -243,7 +242,6 @@ def _run_grid(args: argparse.Namespace) -> None:
                     beam_argv = [
                         "--protein_name", name,
                         "--sequence", seq,
-                        "--forcefield", forcefield,
                         "--beam_width", str(args.beam_width),
                         "--window_deg", str(args.window_deg),
                         "--step_deg", str(args.step_deg),
@@ -269,7 +267,6 @@ def _run_grid(args: argparse.Namespace) -> None:
                     native_argv = [
                         "--name", name,
                         "--pdb_path", pdb_path,
-                        "--forcefield", forcefield,
                         "--chi_mode", chi_mode,
                         "--rmsd_mode", args.rmsd_mode,
                         "--rmsd_residue_scope", args.rmsd_residue_scope,
@@ -304,7 +301,6 @@ def _run_grid(args: argparse.Namespace) -> None:
                 "reference_pdb_path": pdb_path,
                 "reference_pdb_id": Path(pdb_path).stem.upper(),
                 "sequence": seq,
-                "forcefield": forcefield,
                 "chi_mode": chi_mode,
                 "window_deg": args.window_deg,
                 "step_deg": args.step_deg,

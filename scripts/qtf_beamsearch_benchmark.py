@@ -23,9 +23,12 @@ import argparse
 import hashlib
 import json
 import os
+import sys
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Any
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import mdtraj as md
 import numpy as np
@@ -453,7 +456,6 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sequence", required=True)
     ap.add_argument("--protein_name", default=None, help="optional stable protein identifier for metadata")
-    ap.add_argument("--forcefield", default="amber")
     ap.add_argument("--beam_width", type=int, default=1000)
     ap.add_argument("--window_deg", type=int, default=15)
     ap.add_argument("--step_deg", type=int, default=15)
@@ -467,13 +469,13 @@ def main():
                     help="Residue range used for RMSD: core excludes the first and last residues")
     ap.add_argument("--average_reference_backbone", action="store_true")
     ap.add_argument("--native_thresh", type=float, default=2.0, help="RMSD threshold (Å) for native-like")
-    ap.add_argument("--outdir", default="beamsearch_outputs")
+    ap.add_argument("--outdir", default=os.path.join("run_outputs", "exhaustive_search"))
     ap.add_argument("--save_partial", action="store_true", help="save beam survivors at each residue depth to CSV")
     ap.add_argument("--chi_mode", default="selective", choices=["chi1_only", "selective", "all"])
     ap.add_argument("--max_sidechain_opts_per_residue", type=int, default=9,
                     help="Max sampled local torsion choices per residue. 0 means exhaustive local enumeration and can explode for 125/5/all.")
     ap.add_argument("--energy_backend", default="custom", choices=["custom", "rosetta", "openmm"],
-                    help="Stage-3 scorer: custom QTF energy, PyRosetta-backed score, or OpenMM-backed score.")
+                    help="Energy backend: custom QTF energy, PyRosetta-backed score, or OpenMM-backed score.")
     ap.add_argument("--use_e2e_constraint", type=int, default=1,
                     help="1 to use length-scaled E2E constraint in custom scorer, 0 to disable.")
     ap.add_argument("--e2e_scale", type=float, default=1.0,
@@ -520,7 +522,7 @@ def main():
     reference_pdb_id = pdb_id_from_path(args.reference_pdb)
     reference_pdb_path = str(args.reference_pdb) if args.reference_pdb else None
     experiment_id = (
-        f"{protein_name}_ff-{args.forcefield}_chi-{args.chi_mode}"
+        f"{protein_name}_chi-{args.chi_mode}"
         f"_rmsd-{args.rmsd_mode}_scope-{args.rmsd_residue_scope}"
         f"_backend-{args.energy_backend}_e2e-{args.use_e2e_constraint}"
         f"_hb-{tuning['hbond_scale']}_sasa-{tuning['sasa_scale']}"
@@ -555,7 +557,6 @@ def main():
     for k in range(1, L + 1):
         folders_by_k[k] = utils.make_folder(
             sequence=seq[:k],
-            force_field=args.forcefield,
             chi_mode=args.chi_mode,
             selective_chi_map=selective_chi_map,
             energy_backend=args.energy_backend,
@@ -645,7 +646,6 @@ def main():
                     "reference_pdb_path": reference_pdb_path,
                     "experiment_id": experiment_id,
                     "sequence": seq,
-                    "forcefield": args.forcefield,
                     "chi_mode": args.chi_mode,
                     "depth": depth,
                     "rmsd_mode": args.rmsd_mode,
@@ -752,7 +752,6 @@ def main():
             "reference_pdb_path": reference_pdb_path,
             "experiment_id": experiment_id,
             "sequence": seq,
-            "forcefield": args.forcefield,
             "chi_mode": args.chi_mode,
             "rmsd_mode": args.rmsd_mode,
             "hbond_scale": tuning["hbond_scale"],
@@ -849,7 +848,6 @@ def main():
         "reference_pdb_path": reference_pdb_path,
         "experiment_id": experiment_id,
         "sequence": seq,
-            "forcefield": args.forcefield,
             "beam_width": args.beam_width,
             "window_deg": args.window_deg,
             "step_deg": args.step_deg,

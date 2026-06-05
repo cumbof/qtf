@@ -12,7 +12,7 @@ Architecture
 References
 ----------
 * Kyte & Doolittle (1982) hydrophobicity scale.
-* CHARMM22 / AMBER ff14SB / OPLS-AA partial charges (approximate).
+* AMBER ff14SB partial charges (approximate).
 * Bondi (1964) van der Waals radii.
 * Engh & Huber (1991) bond/angle parameters.
 """
@@ -177,7 +177,6 @@ class QuantumBiophysicsFolder:
     def __init__(
         self,
         sequence: str,
-        force_field: str = "charmm",
         chi_mode: str = "all",
         selective_chi_map: dict | None = None,
         energy_backend: str | None = None,
@@ -192,20 +191,17 @@ class QuantumBiophysicsFolder:
         ----------
         sequence:
             Single-letter amino acid sequence (e.g. ``"MAGTWY"``).
-        force_field:
-            One of ``"charmm"`` (default), ``"amber"``, or ``"opls"``.
         """
         self.sequence = sequence.upper()
         self.n_residues = len(self.sequence)
-        self.force_field = force_field.lower()
 
-        logger.info("Initialising QuantumBiophysicsFolder | FF=%s | seq=%s", self.force_field.upper(), self.sequence)
+        logger.info("Initialising QuantumBiophysicsFolder | seq=%s", self.sequence)
 
         self.HYDROPHOBICITY = self._HYDROPHOBICITY
         self.VDW_RADII = self._VDW_RADII
         self.SIDE_CHAIN_TOPO = self._SIDE_CHAIN_TOPO
 
-        self.CHARGES = self._build_charges(self.force_field)
+        self.CHARGES = self._build_charges()
         self.chi_mode = chi_mode
         self.selective_chi_map = selective_chi_map or {}
         self.LJ_TYPE_PARAMS = self._LJ_TYPE_PARAMS
@@ -323,7 +319,7 @@ class QuantumBiophysicsFolder:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _build_charges(force_field: str) -> dict[str, float]:
+    def _build_charges() -> dict[str, float]:
         common: dict[str, float] = {
             "OXT": -1.0,
             "NZ": 1.0, "NH1": 0.5, "NH2": 0.5,
@@ -332,30 +328,13 @@ class QuantumBiophysicsFolder:
             "SG": -0.1, "SD": -0.1,
             "HE2": 0.4, "ND1": -0.4,
         }
-        charmm: dict[str, float] = {
-            "N": -0.47, "H": 0.31, "CA": 0.07, "C": 0.51, "O": -0.51,
-            "OG": -0.4, "HG": 0.4, "OG1": -0.4, "HG1": 0.4, "OH": -0.4, "HH": 0.4,
-            "NE1": -0.3, "HE1": 0.3,
-        }
         amber: dict[str, float] = {
             "N": -0.42, "H": 0.27, "CA": 0.00, "C": 0.60, "O": -0.57,
             "OG": -0.6, "HG": 0.4, "OG1": -0.6, "HG1": 0.4, "OH": -0.5, "HH": 0.4,
             "NE1": -0.4, "HE1": 0.3,
         }
-        opls: dict[str, float] = {
-            "N": -0.50, "H": 0.30, "CA": 0.14, "C": 0.50, "O": -0.50,
-            "OG": -0.7, "HG": 0.4, "OG1": -0.7, "HG1": 0.4, "OH": -0.7, "HH": 0.4,
-            "NE1": -0.4, "HE1": 0.35,
-        }
         charges = common.copy()
-        if force_field == "amber":
-            charges.update(amber)
-        elif force_field == "opls":
-            charges.update(opls)
-        else:
-            if force_field not in ("charmm",):
-                logger.warning("Unknown force field '%s'. Defaulting to CHARMM.", force_field)
-            charges.update(charmm)
+        charges.update(amber)
         return charges
 
     def _allowed_chis_for_residue(self, res_idx, aa, available_chis):
@@ -432,7 +411,7 @@ class QuantumBiophysicsFolder:
         for the supplied torsions so saved PDBs and RMSDs reflect the same
         structure Rosetta evaluated.
         """
-        if self.current_stage == 3 and self.stage3_backend == "rosetta":
+        if self.stage3_backend == "rosetta":
             self._score_stage3_rosetta(angle_vector, return_terms=True)
             if self._last_rosetta_pose is not None and self.last_energy_terms.get("rosetta_error", 1.0) == 0.0:
                 return self._pose_to_coords_labels_bonds(self._last_rosetta_pose)
@@ -642,13 +621,13 @@ class QuantumBiophysicsFolder:
         PyRosetta full-atom pose used for scoring/refinement.
         """
         angle_vec = self._get_angles(params)
-        if self.current_stage == 3 and self.stage3_backend == "rosetta":
+        if self.stage3_backend == "rosetta":
             # Force one final score call at res_3.x so _last_rosetta_pose is
             # synchronized with the optimizer's final parameter vector.
             self._score_stage3_rosetta(angle_vec, return_terms=True)
             if self._last_rosetta_pose is not None and self.last_energy_terms.get("rosetta_error", 1.0) == 0.0:
                 return self._pose_to_coords_labels_bonds(self._last_rosetta_pose)
-        if self.current_stage == 3 and self.stage3_backend == "openmm":
+        if self.stage3_backend == "openmm":
             self._score_stage3_openmm(angle_vec, return_terms=True)
             if self._last_openmm_coords is not None and self.last_energy_terms.get("openmm_error", 1.0) == 0.0:
                 return self._last_openmm_coords, self._last_openmm_labels, []
@@ -723,6 +702,7 @@ class QuantumBiophysicsFolder:
             terms["rosetta_cen_weight"] = float(self.rosetta_cen_weight)
             terms["rosetta_fa_weight"] = float(self.rosetta_fa_weight)
             terms["rosetta_total"] = float(total)
+            terms["total"] = float(total)
             terms["rosetta_error"] = 0.0
             self._last_rosetta_pose = fa_pose.clone()
             self._last_rosetta_ca = self._pose_ca_coords(fa_pose)
@@ -741,9 +721,12 @@ class QuantumBiophysicsFolder:
             terms["rosetta_cen_weight"] = float(self.rosetta_cen_weight)
             terms["rosetta_fa_weight"] = float(self.rosetta_fa_weight)
             terms["rosetta_total"] = float(total)
+            terms["total"] = float(total)
             terms["rosetta_error"] = 1.0
             terms["rosetta_message_hash"] = float(abs(hash(str(exc))) % 1000000)
         self.last_energy_terms = {k: float(v) for k, v in terms.items()}
+        if self.tracker is not None:
+            self.tracker.log(float(total))
         return float(total)
 
     def _score_stage3_openmm(self, angle_vec, return_terms=False):
@@ -810,6 +793,7 @@ class QuantumBiophysicsFolder:
 
             terms["openmm_potential_kj_mol"] = potential_kj
             terms["openmm_potential_kcal_mol"] = float(potential_kj / 4.184)
+            terms["total"] = float(potential_kj)
             terms["openmm_status_ok"] = 1.0
             terms["openmm_minimize"] = 1.0 if self.openmm_do_minimize else 0.0
             terms["openmm_error"] = 0.0
@@ -836,6 +820,7 @@ class QuantumBiophysicsFolder:
             total = 1.0e6
             terms["openmm_potential_kj_mol"] = float(total)
             terms["openmm_potential_kcal_mol"] = float(total / 4.184)
+            terms["total"] = float(total)
             terms["openmm_status_ok"] = 0.0
             terms["openmm_minimize"] = 1.0 if self.openmm_do_minimize else 0.0
             terms["openmm_error"] = 1.0
@@ -849,6 +834,8 @@ class QuantumBiophysicsFolder:
             self._last_openmm_coords = None
             self._last_openmm_labels = None
         self.last_energy_terms = {k: float(v) for k, v in terms.items()}
+        if self.tracker is not None:
+            self.tracker.log(float(total))
         return float(total)
 
     def _get_angles(self, params: np.ndarray) -> np.ndarray:
@@ -1177,9 +1164,9 @@ class QuantumBiophysicsFolder:
             constraint_strength = 5.0
 
         angle_vec = self._get_angles(params)
-        if self.current_stage == 3 and self.stage3_backend == "rosetta":
+        if self.stage3_backend == "rosetta":
             return self._score_stage3_rosetta(angle_vec, return_terms=return_terms)
-        if self.current_stage == 3 and self.stage3_backend == "openmm":
+        if self.stage3_backend == "openmm":
             return self._score_stage3_openmm(angle_vec, return_terms=return_terms)
 
         coords, _, _ = self.build_full_structure(angle_vec)
@@ -1670,8 +1657,16 @@ class QuantumBiophysicsFolder:
                          tol=1e-6, options={"maxiter": max_iter, "disp": False})
         logger.info("  Final energy: %.2f", res_3.fun)
 
+        self.energy_function(res_3.x, return_terms=True)
         coords, labels, bonds = self._final_output_structure_from_params(res_3.x)
-        return coords, labels, bonds, self.tracker, res_3.x, res_3.fun
+        final_energy = self.last_energy_terms.get(
+            "total",
+            self.last_energy_terms.get(
+                "rosetta_total",
+                self.last_energy_terms.get("openmm_potential_kj_mol", float(res_3.fun)),
+            ),
+        )
+        return coords, labels, bonds, self.tracker, res_3.x, float(final_energy)
 
     def compute_sidechain_centroids(self, coords, labels):
         """
@@ -1793,4 +1788,3 @@ class QuantumBiophysicsFolder:
 # ==========================================
 # 4. ORCHESTRATOR: ENSEMBLE MANAGER
 # ==========================================
-
