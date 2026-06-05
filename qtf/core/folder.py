@@ -88,6 +88,20 @@ class QuantumBiophysicsFolder:
     """Hybrid quantum-classical protein folder."""
 
     # ------------------------------------------------------------------
+    # Defaults for stage-aware attributes.
+    #
+    # Declaring these at class level (not only in ``__init__``) means
+    # that ``folder.energy_function(...)`` is safe to call on an
+    # instance whose ``__init__`` has been bypassed -- e.g. by a
+    # user-supplied gradient, a checkpoint restart that constructs
+    # the folder from a pickled state, or a unit test that exercises
+    # the energy function in isolation. Without the class-level
+    # default, ``energy_function`` would raise ``AttributeError``
+    # when reading ``self.current_stage``.
+    # ------------------------------------------------------------------
+    current_stage: int = 1  # 1 = helix/sheet-only cost; see fold() for 2, 3.
+
+    # ------------------------------------------------------------------
     # Force-field tables
     # ------------------------------------------------------------------
     _HYDROPHOBICITY: dict[str, float] = {

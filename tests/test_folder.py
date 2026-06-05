@@ -178,6 +178,48 @@ class TestEnergyFunction:
         assert len(tracker.history) >= 1
         folder_ga.tracker = None  # reset
 
+    def test_callable_before_fold(self):
+        """``energy_function`` must work on a freshly-built folder that
+        has never run ``fold()``.
+
+        The function reads ``self.current_stage`` to pick the
+        stage-1/2/3 force constants. ``current_stage`` has to be
+        available from the moment the folder is constructed; it is
+        declared as a class-level default of ``1`` precisely so that
+        a user-supplied gradient, a checkpoint restart, or a test
+        can call ``energy_function`` without first going through
+        ``fold()``.
+        """
+        from qtf.core.folder import QuantumBiophysicsFolder
+
+        folder = QuantumBiophysicsFolder("GA")
+        # Pin the contract: current_stage defaults to 1 on a fresh
+        # instance and is read by energy_function as a stage switch.
+        assert folder.current_stage == 1
+        # Now actually call energy_function. It must not raise
+        # AttributeError on a folder that has never been folded.
+        params = np.zeros(folder.n_params)
+        result = folder.energy_function(params)
+        assert np.isfinite(result)
+
+    def test_callable_when_current_stage_missing_from_instance_dict(self):
+        """Defence in depth: even if ``current_stage`` is somehow missing
+        from the instance ``__dict__`` (e.g. pickling edge case, a
+        user ``del``'d it, or a mock that bypassed ``__init__``),
+        the class-level default of ``1`` keeps ``energy_function``
+        callable."""
+        from qtf.core.folder import QuantumBiophysicsFolder
+
+        folder = QuantumBiophysicsFolder("GA")
+        # Simulate a "current_stage is missing" situation by deleting
+        # the instance attribute. The class-level default must take
+        # over.
+        del folder.__dict__["current_stage"]
+        assert folder.current_stage == 1  # resolves via class default
+        params = np.zeros(folder.n_params)
+        result = folder.energy_function(params)
+        assert np.isfinite(result)
+
 
 # ---------------------------------------------------------------------------
 # get_smart_initialization
