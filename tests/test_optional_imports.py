@@ -122,11 +122,12 @@ def test_panel_lazy_pandas_proxy_resolves_to_real_pandas():
 
 
 def test_panel_lazy_pyplot_proxy_resolves_to_real_pyplot():
+    pytest.importorskip("matplotlib")
     from qtf.analysis import panel
     # First attribute access triggers the import.
     fig = panel.plt.figure()
     panel.plt.close(fig)
-    # After first access, the proxy is replaced.
+    # After first access, the proxy is replaced by the real module.
     assert panel.plt is not panel._LazyPyplot  # type: ignore[attr-defined]
 
 
