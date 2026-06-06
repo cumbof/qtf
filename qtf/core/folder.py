@@ -1695,8 +1695,17 @@ class QuantumBiophysicsFolder:
         logger.info("Stage 1: Mechanical Collapse (high force)…")
         self.tracker.mark_stage("Stage1")
         self.current_stage = 1
+        # COBYLA emits a warning ("Invalid MAXFUN; it should be at
+        # least num_vars + 2; it is set to N") whenever ``maxiter`` is
+        # below ``n_params + 2``. For small ``max_iter`` budgets (e.g.
+        # the smoke-test ``max_iter=10`` used by
+        # ``TestFoldScoutBudget``) this floor is violated, the warning
+        # leaks into the ensemble output, and the user is left
+        # wondering whether the run is broken. Enforce the floor
+        # explicitly so the warning is structurally impossible.
+        safe_maxiter = max(int(max_iter), int(self.n_params) + 2)
         res_1 = minimize(self.energy_function, init_params, method="COBYLA",
-                         options={"maxiter": max_iter, "rhobeg": 1.0})
+                         options={"maxiter": safe_maxiter, "rhobeg": 1.0})
         logger.info("  Collapse energy: %.2f", res_1.fun)
 
         logger.info("Stage 2: Physics Refinement (high force)…")

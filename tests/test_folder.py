@@ -471,6 +471,59 @@ class TestFoldScoutBudget:
         result = f.fold(max_iter=10, scout_attempts=1)
         assert len(result) == 6
 
+    def test_cobyla_maxfun_warning_not_emitted(self):
+        """B10: a small-budget ``fold()`` (max_iter=10) must not leak
+        SciPy's ``COBYLA: Invalid MAXFUN`` warning.
+
+        The warning is structurally impossible once we enforce the
+        ``max(max_iter, n_params + 2)`` floor on the COBYLA
+        ``maxiter`` option; this test pins that contract.
+        """
+        import warnings as _warnings
+
+        for max_iter in (10, 50, 100):
+            f = QuantumBiophysicsFolder("G")
+            with _warnings.catch_warnings(record=True) as caught:
+                _warnings.simplefilter("always")
+                f.fold(max_iter=max_iter, scout_attempts=1)
+            cobyla_warnings = [
+                w for w in caught
+                if "cobyla" in str(w.filename).lower()
+                and "maxfun" in str(w.message).lower()
+            ]
+            assert not cobyla_warnings, (
+                f"fold(max_iter={max_iter}) leaked COBYLA MAXFUN warning(s): "
+                f"{[str(w.message) for w in cobyla_warnings]}"
+            )
+
+    def test_cobyla_maxiter_floor_applied(self):
+        """B10: the COBYLA ``maxiter`` option passed to ``scipy.optimize.minimize``
+        must be at least ``n_params + 2`` even when ``max_iter`` is below
+        that floor."""
+        import numpy as np
+        from scipy.optimize import minimize as _sp_minimize
+
+        captured = {}
+
+        def spy_minimize(fun, x0, method=None, options=None, *a, **kw):
+            if method == "COBYLA":
+                captured["options"] = dict(options or {})
+            return _sp_minimize(fun, x0, method=method, options=options, *a, **kw)
+
+        import qtf.core.folder as _folder_mod
+        _folder_mod.minimize = spy_minimize
+        try:
+            f = QuantumBiophysicsFolder("G")
+            f.fold(max_iter=1, scout_attempts=1)
+        finally:
+            _folder_mod.minimize = _sp_minimize
+
+        opts = captured.get("options", {})
+        assert opts, "COBYLA was never called"
+        assert opts["maxiter"] >= f.n_params + 2, (
+            f"COBYLA maxiter={opts['maxiter']} below n_params+2={f.n_params + 2}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # _get_angles — global phase removal
