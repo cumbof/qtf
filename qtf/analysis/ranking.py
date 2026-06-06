@@ -18,12 +18,55 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
-import pandas as pd
 
 from qtf.analysis.stability import StabilityAnalyzer, kabsch_rmsd
 from qtf.utils.pdb import calculate_physics_metrics
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Lazy proxy for :mod:`pandas`.
+#
+# ``pandas`` is a default QTF dependency, but importing it at module
+# load time forces every user of ``qtf.analysis.ranking`` to pay the
+# import cost (~50 ms cold). The ``from_ensemble`` builder touches
+# ``pd.DataFrame`` and ``pd.Series`` at runtime; we resolve them on
+# first attribute access via the :class:`_LazyPandas` proxy below and
+# cache the real module in ``globals()`` for subsequent fast access.
+#
+# The ``from __future__ import annotations`` header above means the
+# ``pd.DataFrame`` type hint is a string and is *not* evaluated at
+# class definition time, so the ``@dataclass`` decorator never
+# reaches for ``pd`` during import.
+# ---------------------------------------------------------------------------
+
+
+class _LazyPandas:
+    """Proxy module that defers the :mod:`pandas` import to first use.
+
+    Behaves like a module: ``pd.DataFrame(...)`` triggers
+    ``__getattr__("DataFrame")``, which imports :mod:`pandas` and
+    returns the real attribute. The real module is cached in
+    ``globals()`` on first access so the proxy is replaced after the
+    first call.
+    """
+
+    def __getattr__(self, name: str):
+        try:
+            import pandas as pd
+        except ImportError as exc:
+            raise ImportError(
+                "pandas is required by qtf.analysis.ranking but could "
+                "not be imported. pandas is a default QTF dependency; "
+                "install it with `pip install pandas`. The original "
+                "ImportError is chained below."
+            ) from exc
+        globals()["pd"] = pd
+        return getattr(pd, name)
+
+
+pd = _LazyPandas()
 
 
 @dataclass

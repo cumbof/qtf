@@ -9,11 +9,40 @@ Three main entry points
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+
+
+def _require_plotly() -> Tuple["object", "object"]:
+    """Lazily import :mod:`plotly`.
+
+    Plotly is a default QTF dependency, but importing it at module
+    load time forces every user of ``qtf.visualization`` to pay the
+    import cost and to surface a bare ``ModuleNotFoundError`` if the
+    install is broken. The plot functions call this helper instead,
+    so a missing plotly is reported with a clear, actionable error
+    pointing at the install command.
+
+    Returns
+    -------
+    (go, make_subplots)
+        The two :mod:`plotly` symbols the rest of the module needs.
+    """
+    try:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+    except ImportError as exc:
+        raise ImportError(
+            "plotly is required for the QTF visualization helpers "
+            "(plot_structure, plot_energy_landscape, plot_ranking) but "
+            "could not be imported. plotly is a default QTF dependency; "
+            "if it is genuinely missing, install it with "
+            "`pip install plotly`. If it is installed but still raises, "
+            "the install is broken (e.g. a version conflict); the "
+            "original ImportError is chained below."
+        ) from exc
+    return go, make_subplots
 
 from qtf.analysis.stability import kabsch_rmsd
 
@@ -43,7 +72,7 @@ def plot_structure(
     ca_label: str = "CA",
     show_all: bool = True,
     title: str = "Predicted Protein Structures",
-) -> go.Figure:
+) -> "object":  # plotly.graph_objects.Figure
     """Interactive 3-D backbone overlay.
 
     Parameters
@@ -66,6 +95,7 @@ def plot_structure(
     -------
     :class:`plotly.graph_objects.Figure`
     """
+    go, _ = _require_plotly()
     fig = go.Figure()
 
     def _get_ca(result: dict) -> np.ndarray:
@@ -182,7 +212,7 @@ def plot_energy_landscape(
     replica_ids: Optional[list[int]] = None,
     clip_range: tuple[float, float] = (-1000.0, 2000.0),
     title: str = "Optimisation Energy Landscape",
-) -> go.Figure:
+) -> "object":  # plotly.graph_objects.Figure
     """Plot energy-vs-evaluation-step traces for selected replicas.
 
     Parameters
@@ -224,9 +254,9 @@ def plot_energy_landscape(
                 seen_stage_names[sname] = stage_colours[min(idx, len(stage_colours) - 1)]
     stage_colour_map: dict[str, str] = seen_stage_names
 
+    go, _ = _require_plotly()
     fig = go.Figure()
     stage_lines_added: set[str] = set()
-
     for rid in replica_ids:
         result = result_map.get(rid)
         if result is None:
@@ -290,7 +320,7 @@ def plot_energy_landscape(
 def plot_ranking(
     ranking,
     title: str = "Ensemble Ranking",
-) -> go.Figure:
+) -> "object":  # plotly.graph_objects.Figure
     """Interactive two-panel figure: ranking bar chart + statistics table.
 
     Parameters
@@ -307,6 +337,7 @@ def plot_ranking(
     df = ranking.stats_df.copy()
     has_gt = not df["rmsd_vs_gt"].isna().all()
 
+    go, make_subplots = _require_plotly()
     fig = make_subplots(
         rows=2, cols=1,
         row_heights=[0.55, 0.45],

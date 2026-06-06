@@ -6,8 +6,61 @@ import json
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import matplotlib.pyplot as plt
-import pandas as pd
+
+# ---------------------------------------------------------------------------
+# Lazy proxies for the heavy optional dependencies.
+#
+# ``pandas`` is a default QTF dependency but is heavy; ``matplotlib``
+# is in the ``[workflows]`` extra and may not be installed at all.
+# Importing either at module load time forces every user of
+# ``qtf.analysis.panel`` to pay the cost and to surface a bare
+# ``ModuleNotFoundError`` if the install is broken. The two proxy
+# classes below resolve the real module on first attribute access
+# and cache it in ``globals()`` so subsequent attribute access is
+# the normal fast path.
+# ---------------------------------------------------------------------------
+
+
+class _LazyPandas:
+    """Proxy module that defers the :mod:`pandas` import to first use."""
+
+    def __getattr__(self, name: str):
+        try:
+            import pandas as pd
+        except ImportError as exc:
+            raise ImportError(
+                "pandas is required by qtf.analysis.panel but could "
+                "not be imported. pandas is a default QTF dependency; "
+                "install it with `pip install pandas`. The original "
+                "ImportError is chained below."
+            ) from exc
+        globals()["pd"] = pd
+        return getattr(pd, name)
+
+
+class _LazyPyplot:
+    """Proxy module that defers the :mod:`matplotlib.pyplot` import to
+    first use. ``matplotlib`` is in the ``[workflows]`` extra, so this
+    is the *expected* failure mode on a minimal install."""
+
+    def __getattr__(self, name: str):
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError as exc:
+            raise ImportError(
+                "matplotlib is required by qtf.analysis.panel but "
+                "could not be imported. matplotlib lives in the "
+                "`[workflows]` extra; install it with "
+                "`pip install \"qtf[workflows]\"` (or "
+                "`conda install -c conda-forge matplotlib`). The "
+                "original ImportError is chained below."
+            ) from exc
+        globals()["plt"] = plt
+        return getattr(plt, name)
+
+
+pd = _LazyPandas()
+plt = _LazyPyplot()
 
 PARAM_COLS: List[str] = [
     "hbond_scale", "sasa_scale", "vdw_rep_scale", "vdw_attr_scale", "rotamer_scale", "pi_stack_scale",
