@@ -42,16 +42,51 @@ except ImportError:
     _rosetta = None   # type: ignore[assignment]
     _PYROSETTA_AVAILABLE = False
 
-try:
-    import openmm as _mm
-    from openmm import unit as _unit
-    from openmm.app import ForceField as _ForceField, HBonds as _HBonds
-    from openmm.app import Modeller as _Modeller, NoCutoff as _NoCutoff
-    from openmm.app import PDBFile as _PDBFile
-    _OPENMM_AVAILABLE = True
-except Exception:
-    _mm = _unit = _ForceField = _HBonds = _Modeller = _NoCutoff = _PDBFile = None  # type: ignore
-    _OPENMM_AVAILABLE = False
+
+def _load_openmm() -> tuple[tuple, bool]:
+    """Best-effort import of :mod:`openmm` and the symbols QTF needs.
+
+    Returns a 2-tuple ``((mm, unit, ForceField, HBonds, Modeller,
+    NoCutoff, PDBFile), available)``. The symbols are all ``None`` and
+    ``available`` is ``False`` only when :mod:`openmm` is genuinely
+    not installed (``ModuleNotFoundError``).
+
+    A non-``ModuleNotFoundError`` exception -- the typical signature
+    of a *broken* openmm install (mismatched CUDA runtime, missing
+    shared library, failed C++ extension load, etc.) -- is **logged
+    and re-raised** so that the user is not misled into a
+    ``pip install qtf[workflows]`` loop when the real fix is to
+    reinstall the existing openmm package.
+    """
+    try:
+        import openmm as mm
+        from openmm import unit
+        from openmm.app import (
+            ForceField,
+            HBonds,
+            Modeller,
+            NoCutoff,
+            PDBFile,
+        )
+        return (
+            (mm, unit, ForceField, HBonds, Modeller, NoCutoff, PDBFile),
+            True,
+        )
+    except ModuleNotFoundError:
+        return (None, None, None, None, None, None, None), False
+    except Exception as exc:
+        logger.error(
+            "OpenMM import failed (install is broken, not missing): %s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        raise
+
+
+(
+    (_mm, _unit, _ForceField, _HBonds, _Modeller, _NoCutoff, _PDBFile),
+    _OPENMM_AVAILABLE,
+) = _load_openmm()
 
 _PYROSETTA_INIT_DONE = False
 
@@ -490,7 +525,14 @@ class QuantumBiophysicsFolder:
         if self._openmm_ready:
             return
         if not _OPENMM_AVAILABLE:
-            raise RuntimeError("OpenMM is not installed, but QTF_STAGE3_BACKEND=openmm was requested.")
+            raise ImportError(
+                "OpenMM is required for the 'openmm' stage-3 backend but it is "
+                "not importable. Install it with `pip install \"qtf[workflows]\"` "
+                "(or `conda install -c conda-forge openmm`); if OpenMM is already "
+                "installed, the import failure means the install is broken (CUDA "
+                "mismatch, missing shared library, failed C++ extension load, etc.) "
+                "and the original error was logged at module-import time."
+            )
         self._openmm_ready = True
 
     def _build_rosetta_pose_from_angles(self, angle_vec):
