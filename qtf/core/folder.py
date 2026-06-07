@@ -23,15 +23,12 @@ import hashlib
 import logging
 
 import numpy as np
-from qiskit import transpile
-from qiskit.circuit.library import efficient_su2
 from qiskit.quantum_info import Statevector
 from scipy.optimize import minimize
 from qiskit.circuit.library import EfficientSU2 as efficient_su2
 from qiskit import transpile, QuantumCircuit
 from qiskit_aer import AerSimulator
 from qiskit.circuit import ParameterVector
-from qiskit_ibm_runtime import QiskitRuntimeService
     
 
 from qtf.core.tracker import LandscapeTracker
@@ -64,10 +61,6 @@ _TOPOLOGY_SEED_ANGLE: float = 0.1
 # optimiser.  Value of 1.0 Å corresponds to roughly one bond length of
 # distortion before saturation kicks in.
 _HUBER_DELTA_GEOM: float = 1.0
-
-
-#service = QiskitRuntimeService(token="YOUR_TOKEN")
-#backend = service.backend("ibm_Miami")
 
 
 class QuantumBiophysicsFolder:
@@ -144,7 +137,8 @@ class QuantumBiophysicsFolder:
         "DEFAULT": [("CB", "CA", 1.53, 1.91, "chi1")],
     }
 
-    def __init__(self, sequence: str, force_field: str = "charmm") -> None:
+    #def __init__(self, sequence: str, force_field: str = "charmm") -> None:
+    def __init__(self, sequence, force_field="charmm", mode="statevector",backend=None, shots=4096, ansatz="efficient_su2"):
         """
         Parameters
         ----------
@@ -152,10 +146,20 @@ class QuantumBiophysicsFolder:
             Single-letter amino acid sequence (e.g. ``"MAGTWY"``).
         force_field:
             One of ``"charmm"`` (default), ``"amber"``, or ``"opls"``.
+        mode:
+            Quantum backend mode, either ``"statevector"`` or ``"sampler"``.
+        backend:
+            Quantum backend instance (e.g., from IBM Quantum).
+        shots:
+            Number of shots for the sampler mode.
         """
         self.sequence = sequence.upper()
         self.n_residues = len(self.sequence)
         self.force_field = force_field.lower()
+        self.mode    = mode
+        self.backend = backend
+        self.shots   = shots
+        self.ansatz_type = ansatz
 
         logger.info("Initialising QuantumBiophysicsFolder | FF=%s | seq=%s", self.force_field.upper(), self.sequence)
 
@@ -253,10 +257,11 @@ class QuantumBiophysicsFolder:
 
             return qc
 
-        self.ansatz = efficient_su2(self.n_qubits, reps=self.reps, entanglement="circular")
-        #self.ansatz   = build_brickwork_ansatz(self.n_qubits, self.reps)
+        if self.ansatz_type == "brickwork":
+            self.ansatz = build_brickwork_ansatz(self.n_qubits, self.reps)
+        else:
+            self.ansatz = efficient_su2(self.n_qubits, reps=self.reps, entanglement="circular")
         self.n_params = self.ansatz.num_parameters
-
         self.current_stage = 1
         self._cache_initialized = False
         self._initialize_topology_cache()
@@ -331,7 +336,7 @@ class QuantumBiophysicsFolder:
         phases = (phases - np.angle(psi[0]) + np.pi) % (2 * np.pi) - np.pi
         return phases
         """
-    def _get_angles(self, params, mode: str = "statevector", backend=None, shots: int = 4096):
+    def _get_angles(self, params):
         if self.ansatz is None:
             raise RuntimeError("Qiskit not available.")
 
@@ -340,37 +345,34 @@ class QuantumBiophysicsFolder:
         bound_circuit = self.ansatz.assign_parameters(param_dict)
 
         # ── MODE 1: STATEVECTOR ────────────────────────────────────────────────
-        if mode == "statevector":
+        if self.mode == "statevector":
             sv     = Statevector(bound_circuit).data
-            angles = np.angle(sv)                        # complex amplitudes → angles in [-π, π]
-            return angles[:self.total_angles]            # trim to what we need
+            angles = np.angle(sv)
+            return angles[:self.total_angles]
 
         # ── MODE 2: SHOT-BASED ─────────────────────────────────────────────────
-        if mode == "sampler":
-            if backend is None:
-                backend = AerSimulator()                 # default noiseless shot sim
+        if self.mode == "sampler":
+            backend = self.backend if self.backend is not None else AerSimulator()
             n        = self.n_qubits
             n_states = 2 ** n
-            # Measure in Z basis only
+
             qc = bound_circuit.copy()
             qc.measure_all()
             tqc    = transpile(qc, backend)
-            counts = backend.run(tqc, shots=shots).result().get_counts()
+            counts = backend.run(tqc, shots=self.shots).result().get_counts()
 
-            # Counts → probability vector of length 2^n
             pvec  = np.zeros(n_states, dtype=float)
             total = sum(counts.values())
             for bitstring, c in counts.items():
-                bs       = bitstring.replace(" ", "")[::-1]   # qubit-0 = LSB
-                idx      = int(bs, 2)
+                bs        = bitstring.replace(" ", "")[::-1]
+                idx       = int(bs, 2)
                 pvec[idx] += c / total
 
-            # CDF of prob vector → mapped to [-π, π]
-            cdf    = np.cumsum(pvec)                     # length 2^n, range [0, 1]
-            angles = 2.0 * np.pi * cdf - np.pi          # → [-π, π]
+            cdf    = np.cumsum(pvec)
+            angles = 2.0 * np.pi * cdf - np.pi
+            return angles[:self.total_angles]
 
-            return angles[:self.total_angles]            # trim to what we need
-        raise ValueError(f"Unknown mode: '{mode}'. Use 'statevector' or 'sampler'.")
+        raise ValueError(f"Unknown mode: '{self.mode}'. Use 'statevector' or 'sampler'.")
 
     @staticmethod
     def _nerf_step(
@@ -630,10 +632,7 @@ class QuantumBiophysicsFolder:
             constraint_strength = 5.0
 
         # Pick ONE of these:
-        angle_vec = self._get_angles(params)                                    # statevector (default)
-        # angle_vec = self._get_angles(params, mode="sampler", shots=4096)      # shot-based
-        # angle_vec = self._get_angles(params, mode="sampler",                  # real hardware
-        #                 backend=your_backend, shots=4096)
+        angle_vec = self._get_angles(params)                                    
         coords, _, _ = self.build_full_structure(angle_vec)
         total_energy = 0.0
 
@@ -1036,12 +1035,6 @@ class QuantumBiophysicsFolder:
 
         # Statevector (default)
         angle_vec = self._get_angles(res_3.x)
-
-        # Shot-based
-        # angle_vec = self._get_angles(res_3.x, mode="sampler", shots=4096)
-
-        # Real hardware
-        # angle_vec = self._get_angles(res_3.x, mode="sampler", backend=your_backend, shots=4096)
 
         coords, labels, bonds = self.build_full_structure(angle_vec)
         return coords, labels, bonds, self.tracker, res_3.x, res_3.fun
