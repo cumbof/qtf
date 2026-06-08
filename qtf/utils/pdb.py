@@ -37,7 +37,7 @@ _AA1_TO_3 = {
 # the same files as the EBI mirror.
 
 # Keep the version in sync with qtf.__version__.
-_USER_AGENT = "QTF/0.3.10 (+https://github.com/cumbof/QTF)"
+_USER_AGENT = "QTF/0.3.11 (+https://github.com/cumbof/QTF)"
 
 _PDB_DOWNLOAD_URL_TEMPLATE = "https://files.rcsb.org/download/{pdb_id}.pdb"
 

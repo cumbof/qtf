@@ -443,9 +443,11 @@ class QuantumBiophysicsFolder:
         mapped = np.asarray(angle_vector, dtype=float).copy()
         for j, dof in enumerate(self.dof_map[:len(mapped)]):
             if str(dof.get("type")) == "omega":
-                raw = float(np.clip(mapped[j], -np.pi, np.pi))
-                mapped[j] = self.OMEGA_CENTER + (raw / np.pi) * self.OMEGA_HALF_WIDTH
-                mapped[j] = self._bounded_omega(mapped[j])
+                raw = mapped[j]
+                if np.isfinite(raw):
+                    raw = float(np.clip(raw, -np.pi, np.pi))
+                    mapped[j] = self.OMEGA_CENTER + (raw / np.pi) * self.OMEGA_HALF_WIDTH
+                    mapped[j] = self._bounded_omega(mapped[j])
         return mapped
 
     def _angle_dict_from_vector(self, angle_vector):
@@ -1234,6 +1236,12 @@ class QuantumBiophysicsFolder:
             constraint_strength = 5.0
 
         angle_vec = self._get_angles(params)
+        if not np.isfinite(angle_vec).all():
+            n_bad = int(np.count_nonzero(~np.isfinite(angle_vec)))
+            penalty = 1e6 + 1e3 * n_bad
+            if return_terms:
+                return {"non_finite_penalty": penalty}
+            return penalty
         if self.stage3_backend == "rosetta":
             return self._score_stage3_rosetta(angle_vec, return_terms=return_terms)
         if self.stage3_backend == "openmm":

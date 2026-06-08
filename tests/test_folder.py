@@ -964,3 +964,71 @@ class TestBondGraphVDWExclusions:
         terms = f.last_energy_terms
         assert np.isfinite(terms["vdw_repulsion"])
         assert terms["vdw_repulsion"] >= 0.0
+
+
+# ---------------------------------------------------------------------------
+# NaN / Inf robustness in energy_function
+# ---------------------------------------------------------------------------
+
+
+class TestNonFiniteAngles:
+    """energy_function must return a finite penalty for NaN / Inf angle vectors."""
+
+    def test_nan_angles_returns_penalty(self, monkeypatch):
+        f = QuantumBiophysicsFolder("GA")
+        orig_get_angles = f._get_angles
+
+        def _nan_angles(params):
+            return np.full(orig_get_angles(params).shape, np.nan)
+
+        monkeypatch.setattr(f, "_get_angles", _nan_angles)
+        e = f.energy_function(np.zeros(f.n_params))
+        assert np.isfinite(e)
+        assert e > 1e5
+
+    def test_inf_angles_returns_penalty(self, monkeypatch):
+        f = QuantumBiophysicsFolder("GA")
+        orig_get_angles = f._get_angles
+
+        def _inf_angles(params):
+            return np.full(orig_get_angles(params).shape, np.inf)
+
+        monkeypatch.setattr(f, "_get_angles", _inf_angles)
+        e = f.energy_function(np.zeros(f.n_params))
+        assert np.isfinite(e)
+        assert e > 1e5
+
+    def test_mixed_nan_inf_returns_penalty(self, monkeypatch):
+        f = QuantumBiophysicsFolder("GA")
+        orig_get_angles = f._get_angles
+
+        def _mixed_angles(params):
+            a = orig_get_angles(params)
+            a[0] = np.nan
+            a[-1] = np.inf
+            return a
+
+        monkeypatch.setattr(f, "_get_angles", _mixed_angles)
+        e = f.energy_function(np.zeros(f.n_params))
+        assert np.isfinite(e)
+        assert e > 1e5
+
+    def test_return_terms_includes_non_finite_key(self, monkeypatch):
+        f = QuantumBiophysicsFolder("GA")
+        orig_get_angles = f._get_angles
+
+        def _nan_angles(params):
+            return np.full(orig_get_angles(params).shape, np.nan)
+
+        monkeypatch.setattr(f, "_get_angles", _nan_angles)
+        terms = f.energy_function(np.zeros(f.n_params), return_terms=True)
+        assert isinstance(terms, dict)
+        assert "non_finite_penalty" in terms
+        assert terms["non_finite_penalty"] > 1e5
+
+    def test_normal_angles_unchanged(self):
+        """The guard must not affect the normal path (no monkeypatch)."""
+        f = QuantumBiophysicsFolder("GA")
+        params = np.zeros(f.n_params)
+        e = f.energy_function(params)
+        assert np.isfinite(e)
