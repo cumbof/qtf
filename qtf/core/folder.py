@@ -251,7 +251,7 @@ class QuantumBiophysicsFolder:
         self.SIDE_CHAIN_TOPO = self._SIDE_CHAIN_TOPO
 
         self.CHARGES = self._build_charges()
-        self.chi_mode = chi_mode
+        self._chi_mode = chi_mode
         self.selective_chi_map = selective_chi_map or {}
         self.LJ_TYPE_PARAMS = self._LJ_TYPE_PARAMS
 
@@ -302,7 +302,7 @@ class QuantumBiophysicsFolder:
             if i < self.n_residues - 1 and self.sequence[i + 1] == "P":
                 self.dof_map.append({"res": i, "type": "omega"})
 
-        self.total_angles = len(self.dof_map)
+        self._total_angles = len(self.dof_map)
 
         # ------------------------------------------------------------------
         # Quantum circuit
@@ -362,6 +362,20 @@ class QuantumBiophysicsFolder:
         self._last_openmm_labels = None
         self.tracker: LandscapeTracker | None = None
         self.last_energy_terms: dict[str, float] = {}
+
+    # ------------------------------------------------------------------
+    # Read-only topological properties
+    # ------------------------------------------------------------------
+
+    @property
+    def total_angles(self) -> int:
+        """Number of torsion-angle degrees of freedom (read-only)."""
+        return self._total_angles
+
+    @property
+    def chi_mode(self) -> str:
+        """Side-chain chi angle sampling mode (read-only)."""
+        return self._chi_mode
 
     # ------------------------------------------------------------------
     # Internal helpers
