@@ -547,3 +547,50 @@ def test_get_ground_truth_backbone_creates_cache_dir(tmp_path, monkeypatch):
     assert coords.shape == (1, 3)
     assert fresh.is_dir()
     assert (fresh / "7XYZ.pdb").exists()
+
+
+# ---------------------------------------------------------------------------
+# pdb_id_from_path
+# ---------------------------------------------------------------------------
+
+
+class TestPdbIdFromPath:
+    """Verify that pdb_id_from_path extracts valid 4-char PDB IDs."""
+
+    def test_valid_pdb_id_from_path(self):
+        from qtf.utils.workflow import pdb_id_from_path
+        assert pdb_id_from_path("/data/pdbs/5awl.pdb") == "5AWL"
+
+    def test_valid_pdb_id_uppercased(self):
+        from qtf.utils.workflow import pdb_id_from_path
+        assert pdb_id_from_path("/data/pdbs/5awL.pdb") == "5AWL"
+
+    def test_valid_pdb_id_no_ext(self):
+        from qtf.utils.workflow import pdb_id_from_path
+        assert pdb_id_from_path("1XYZ") == "1XYZ"
+
+    def test_none_returns_empty(self):
+        from qtf.utils.workflow import pdb_id_from_path
+        assert pdb_id_from_path(None) == ""
+
+    def test_invalid_stem_returns_empty(self):
+        from qtf.utils.workflow import pdb_id_from_path
+        assert pdb_id_from_path("/data/pdbs/my_protein.pdb") == ""
+
+    def test_pdb_id_starts_with_zero_returns_empty(self):
+        from qtf.utils.workflow import pdb_id_from_path
+        assert pdb_id_from_path("0ABC.pdb") == ""
+
+    def test_short_stem_returns_empty(self):
+        from qtf.utils.workflow import pdb_id_from_path
+        assert pdb_id_from_path("5A.pdb") == ""
+
+    def test_long_stem_returns_empty(self):
+        from qtf.utils.workflow import pdb_id_from_path
+        assert pdb_id_from_path("5ABCD.pdb") == ""
+
+    def test_local_pdb_path_with_subdirs(self):
+        from qtf.utils.workflow import pdb_id_from_path
+        assert pdb_id_from_path(
+            "/home/user/experimental_structures/pdb_files/6LYT.pdb"
+        ) == "6LYT"

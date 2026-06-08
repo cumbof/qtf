@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import urllib.request
 from pathlib import Path
@@ -42,8 +43,15 @@ AA3_TO_1 = {
 }
 
 
+_PDB_ID_PATTERN = re.compile(r"^[1-9][A-Z0-9]{3}$")
+
+
 def pdb_id_from_path(p: Optional[str]) -> str:
-    return Path(str(p)).stem.upper()
+    if p is None:
+        return ""
+    stem = Path(str(p)).stem.upper()
+    m = _PDB_ID_PATTERN.match(stem)
+    return m.group() if m else ""
 
 
 
