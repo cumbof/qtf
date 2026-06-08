@@ -93,7 +93,7 @@ def test_run_ensemble_populates_results(folder_ga, zero_structure):
     with patch.object(folder_ga, "fold", return_value=fake_result) as mock_fold:
         with patch.object(folder_ga, "get_smart_initialization", return_value=fake_params):
             manager = EnsembleFoldingManager(folder_ga)
-            manager.run_ensemble(n_runs=2)
+            manager.run_ensemble(n_runs=2, max_workers=1)
 
     assert len(manager.results) == 2
     assert mock_fold.call_count == 2
@@ -108,7 +108,7 @@ def test_run_ensemble_result_keys(folder_ga, zero_structure):
     with patch.object(folder_ga, "fold", return_value=fake_result):
         with patch.object(folder_ga, "get_smart_initialization", return_value=fake_params):
             manager = EnsembleFoldingManager(folder_ga)
-            manager.run_ensemble(n_runs=1)
+            manager.run_ensemble(n_runs=1, max_workers=1)
 
     result = manager.results[0]
     for key in ("id", "seed", "energy", "coords", "labels", "bonds", "params", "tracker"):
@@ -124,7 +124,7 @@ def test_run_ensemble_stores_energy(folder_ga, zero_structure):
     with patch.object(folder_ga, "fold", return_value=fake_result):
         with patch.object(folder_ga, "get_smart_initialization", return_value=fake_params):
             manager = EnsembleFoldingManager(folder_ga)
-            manager.run_ensemble(n_runs=1)
+            manager.run_ensemble(n_runs=1, max_workers=1)
 
     assert manager.results[0]["energy"] == pytest.approx(99.5)
 
@@ -139,8 +139,8 @@ def test_run_ensemble_resets_results_each_call(folder_ga, zero_structure):
     with patch.object(folder_ga, "fold", return_value=fake_result):
         with patch.object(folder_ga, "get_smart_initialization", return_value=fake_params):
             manager = EnsembleFoldingManager(folder_ga)
-            manager.run_ensemble(n_runs=3)
-            manager.run_ensemble(n_runs=1)
+            manager.run_ensemble(n_runs=3, max_workers=1)
+            manager.run_ensemble(n_runs=1, max_workers=1)
 
     assert len(manager.results) == 1
 
@@ -173,7 +173,7 @@ def test_run_ensemble_continues_after_failure(folder_ga, zero_structure, tmp_pat
         with patch.object(folder_ga, "get_smart_initialization", return_value=fake_params):
             manager = EnsembleFoldingManager(folder_ga)
             ckpt = tmp_path / "ckpt.json"
-            manager.run_ensemble(n_runs=4, checkpoint_path=str(ckpt))
+            manager.run_ensemble(n_runs=4, checkpoint_path=str(ckpt), max_workers=1)
 
     # Three of four replicas succeeded
     assert len(manager.results) == 3
@@ -210,7 +210,7 @@ def test_run_ensemble_keyboard_interrupt_propagates_after_preserving_results(
             manager = EnsembleFoldingManager(folder_ga)
             ckpt = tmp_path / "ckpt.json"
             with pytest.raises(KeyboardInterrupt):
-                manager.run_ensemble(n_runs=5, checkpoint_path=str(ckpt))
+                manager.run_ensemble(n_runs=5, checkpoint_path=str(ckpt), max_workers=1)
 
     # The first replica's result survived the abort
     assert len(manager.results) == 1
@@ -238,13 +238,13 @@ def test_run_ensemble_last_error_reset_at_start(folder_ga, zero_structure):
     manager = EnsembleFoldingManager(folder_ga)
     with patch.object(folder_ga, "fold", side_effect=fail):
         with patch.object(folder_ga, "get_smart_initialization", return_value=fake_params):
-            manager.run_ensemble(n_runs=3)
+            manager.run_ensemble(n_runs=3, max_workers=1)
     assert isinstance(manager.last_error, RuntimeError)
 
     # Second call: no failure -> last_error should be cleared
     with patch.object(folder_ga, "fold", return_value=ok_result):
         with patch.object(folder_ga, "get_smart_initialization", return_value=fake_params):
-            manager.run_ensemble(n_runs=1)
+            manager.run_ensemble(n_runs=1, max_workers=1)
     assert manager.last_error is None
 
 
@@ -267,7 +267,7 @@ def test_run_ensemble_checkpoint_is_metadata_only(folder_ga, zero_structure, tmp
         with patch.object(folder_ga, "get_smart_initialization", return_value=fake_params):
             manager = EnsembleFoldingManager(folder_ga)
             ckpt = tmp_path / "ckpt.json"
-            manager.run_ensemble(n_runs=1, checkpoint_path=str(ckpt))
+            manager.run_ensemble(n_runs=1, checkpoint_path=str(ckpt), max_workers=1)
 
     payload_text = ckpt.read_text()
     for forbidden in ("\"coords\"", "\"params\"", "\"tracker\"", "\"labels\"", "\"bonds\""):
@@ -407,3 +407,39 @@ def test_prime_circuit_default_overwrite_is_false(folder_ga):
     sig = _inspect.signature(EnsembleFoldingManager.prime_circuit)
     assert "overwrite" in sig.parameters
     assert sig.parameters["overwrite"].default is False
+
+
+# ---------------------------------------------------------------------------
+# max_workers / parallel path
+# ---------------------------------------------------------------------------
+
+
+def test_run_ensemble_accepts_max_workers(folder_ga, zero_structure):
+    """The run_ensemble method must accept a max_workers parameter."""
+    coords, labels, bonds = zero_structure
+    tracker = LandscapeTracker()
+    fake_params = np.zeros(folder_ga.n_params)
+    fake_result = (coords, labels, bonds, tracker, fake_params, -10.0)
+
+    with patch.object(folder_ga, "fold", return_value=fake_result):
+        with patch.object(folder_ga, "get_smart_initialization", return_value=fake_params):
+            manager = EnsembleFoldingManager(folder_ga)
+            manager.run_ensemble(n_runs=2, max_iter=5, scout_attempts=2, max_workers=1)
+
+    assert len(manager.results) == 2
+
+
+def test_max_workers_defaults_to_none():
+    """The signature must expose max_workers=None as default (auto)."""
+    import inspect
+    sig = inspect.signature(EnsembleFoldingManager.run_ensemble)
+    assert sig.parameters["max_workers"].default is None
+
+
+def test_worker_exists_and_accepts_expected_args():
+    """Verify _run_one_replica signature is correct."""
+    import inspect
+    from qtf.core.ensemble import _run_one_replica
+    sig = inspect.signature(_run_one_replica)
+    for param in ("folder_kwargs", "replica_seed", "index", "strat", "max_iter", "scout_attempts"):
+        assert param in sig.parameters, f"Missing parameter: {param}"
