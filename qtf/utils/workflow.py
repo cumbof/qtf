@@ -20,6 +20,7 @@ except ImportError:
     md = None  # type: ignore[assignment]
 import numpy as np
 import pandas as pd
+from scipy.stats import circmean
 try:
     from Bio.PDB import PDBIO, PDBParser, Select
 except ImportError:
@@ -277,7 +278,10 @@ def compute_qtf_angle_vector(
         atom_quads, values = fn(traj)
         if values.size == 0:
             continue
-        vals = values[0]
+        if values.ndim == 2 and values.shape[0] > 1:
+            vals = circmean(np.mod(values, 2 * np.pi), axis=0)
+        else:
+            vals = values[0]
         for quad, val in zip(atom_quads, vals):
             res_idx = topo.atom(int(quad[1])).residue.index
             angle_map[(res_idx, name)] = float(val)
@@ -286,7 +290,11 @@ def compute_qtf_angle_vector(
     omega_quads, omega_values = md.compute_omega(traj)
     fixed_omegas = np.full(max(0, folder.n_residues - 1), np.pi, dtype=float)
     if omega_values.size:
-        for quad, val in zip(omega_quads, omega_values[0]):
+        if omega_values.ndim == 2 and omega_values.shape[0] > 1:
+            omega_vals = circmean(np.mod(omega_values, 2 * np.pi), axis=0)
+        else:
+            omega_vals = omega_values[0]
+        for quad, val in zip(omega_quads, omega_vals):
             res_idx = topo.atom(int(quad[1])).residue.index
             if 0 <= res_idx < len(fixed_omegas):
                 fixed_omegas[res_idx] = float(val)

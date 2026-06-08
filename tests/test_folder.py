@@ -1138,3 +1138,51 @@ class TestAerSim:
         extras = cfg["project"]["optional-dependencies"]
         assert "gpu" in extras
         assert any("qiskit-aer-gpu" in dep for dep in extras["gpu"])
+
+
+# ---------------------------------------------------------------------------
+# Circular statistics (scipy.stats.circmean / circstd)
+# ---------------------------------------------------------------------------
+
+
+class TestCircularStats:
+    """Verify that circular statistics replace linear averaging for dihedral
+    angles — 179° and -179° average to 180° (π rad), not 0°."""
+
+    def test_circmean_on_single_value(self):
+        """Single angle → identity."""
+        from scipy.stats import circmean
+        angle = 0.5
+        assert circmean([angle]) == pytest.approx(angle)
+
+    def test_circmean_179_and_minus179(self):
+        """(179°, -179°) must average to ≈180° (π), never 0°."""
+        from scipy.stats import circmean
+        deg = np.deg2rad
+        angles = [deg(179.0), deg(-179.0)]
+        result = circmean(np.mod(angles, 2 * np.pi))
+        assert result == pytest.approx(deg(180.0), abs=0.02)
+
+    def test_compute_qtf_angle_vector_single_frame(self, tmp_path):
+        """Single-frame PDB must return finite angles (no regression)."""
+        pytest.importorskip("mdtraj")
+        pdb_content = (
+            "ATOM      1  N   ALA A   1       0.000   0.000   0.000  1.00  0.00           N\n"
+            "ATOM      2  CA  ALA A   1       1.458   0.000   0.000  1.00  0.00           C\n"
+            "ATOM      3  C   ALA A   1       2.000   1.428   0.000  1.00  0.00           C\n"
+            "ATOM      4  O   ALA A   1       1.272   2.409   0.000  1.00  0.00           O\n"
+            "ATOM      5  CB  ALA A   1       2.000  -0.762   1.210  1.00  0.00           C\n"
+            "ATOM      6  N   GLY A   2       3.310   1.539   0.000  1.00  0.00           N\n"
+            "ATOM      7  CA  GLY A   2       4.000   2.824   0.000  1.00  0.00           C\n"
+            "ATOM      8  C   GLY A   2       5.500   2.664   0.000  1.00  0.00           C\n"
+            "ATOM      9  O   GLY A   2       6.087   1.596   0.000  1.00  0.00           O\n"
+        )
+        pdb_file = tmp_path / "test_traj.pdb"
+        pdb_file.write_text(pdb_content)
+
+        from qtf.utils.workflow import compute_qtf_angle_vector
+        f = QuantumBiophysicsFolder("AG")
+        vec, observed = compute_qtf_angle_vector(str(pdb_file), f, chi_mode="all")
+        assert len(vec) == f.total_angles
+        assert all(np.isfinite(vec))
+        assert len(observed) > 0
