@@ -36,7 +36,7 @@ def _jsonify(x):
     return x
 
 
-def __main__():
+def __main__(argv=None):
     '''
     Main entry point for running Quantum Torsion Folder.
     Produces per-run outputs in run_outputs/quantum_simulations/<sequence>_<backend>_<timestamp>/.
@@ -105,7 +105,7 @@ def __main__():
     parser.add_argument('--output_root', default=os.path.join("run_outputs", "quantum_simulations"),
                         help='root directory for predictor outputs')
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.gromacs_minimize is None:
         args.gromacs_minimize = 1
     if args.gromacs_rerank is None:
@@ -422,8 +422,8 @@ def __main__():
         print(f"- {summary_json_path}")
 
 
-def main():
-    __main__()
+def main(argv=None):
+    __main__(argv)
 
 
 if __name__ == "__main__":

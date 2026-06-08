@@ -352,7 +352,7 @@ def load_panel(panel_path: str) -> List[Dict]:
     raise ValueError("panel must be .json or .csv")
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(description="Score experimental PDB structures with the QTF energy function.")
     ap.add_argument("--panel", help="JSON or CSV with columns/name,pdb_path,chain,residue_start,residue_end")
     ap.add_argument("--name")
@@ -380,7 +380,7 @@ def main():
     ap.add_argument("--gromacs_maxwarn", type=int, default=2)
     ap.add_argument("--out_csv", required=True)
     ap.add_argument("--out_json", default=None)
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     if args.gromacs_minimize is None:
         args.gromacs_minimize = 1
 

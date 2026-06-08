@@ -316,7 +316,7 @@ def dedup_states_by_backbone(
     return out
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--sequence", required=True)
     ap.add_argument("--protein_name", default=None, help="optional stable protein identifier for metadata")
@@ -361,7 +361,7 @@ def main():
     ap.add_argument("--hard_clash_reject_A", type=float, default=0.75,
                     help="Reject beam candidates whose QTF hard-clash minimum distance is below this Angstrom threshold. 0 disables.")
     ap.add_argument("--random_seed", type=int, default=123)
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     if args.gromacs_minimize is None:
         args.gromacs_minimize = 1
     if args.gromacs_rerank is None:

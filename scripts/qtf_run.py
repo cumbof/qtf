@@ -37,22 +37,13 @@ ROTAMER_SCALE = [1.00]
 PI_STACK_SCALE = [0.10]
 
 
-@contextmanager
-def _patched_argv(argv: List[str]):
-    old = sys.argv
-    sys.argv = argv
-    try:
-        yield
-    finally:
-        sys.argv = old
-
-
 def _dispatch_module(module, argv: List[str]) -> None:
-    forwarded = list(argv)
-    if len(forwarded) > 1 and forwarded[1] == "--":
-        forwarded = [forwarded[0], *forwarded[2:]]
-    with _patched_argv(forwarded):
-        module.main()
+    """Dispatch to module.main(argv=...) without mutating sys.argv."""
+    # argv[0] is a synthetic script name; strip it.
+    args = argv[1:] if len(argv) > 1 else []
+    if args and args[0] == "--":
+        args = args[1:]
+    module.main(argv=args)
 
 
 @contextmanager
