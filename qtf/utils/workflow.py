@@ -164,29 +164,31 @@ def nonlocal_heavy_clash_metrics(coords: Coords, labels: Labels, min_allowed_A: 
     }
 
 
-class _SelectChainResidues(Select):
-    def __init__(self, chain_id: Optional[str], start: Optional[int], end: Optional[int]):
-        self.chain_id = chain_id
-        self.start = start
-        self.end = end
+if Select is not None:
 
-    def accept_model(self, model):
-        return 1 if model.id == 0 else 0
+    class _SelectChainResidues(Select):
+        def __init__(self, chain_id: Optional[str], start: Optional[int], end: Optional[int]):
+            self.chain_id = chain_id
+            self.start = start
+            self.end = end
 
-    def accept_chain(self, chain):
-        if self.chain_id is None:
+        def accept_model(self, model):
+            return 1 if model.id == 0 else 0
+
+        def accept_chain(self, chain):
+            if self.chain_id is None:
+                return 1
+            return 1 if chain.id == self.chain_id else 0
+
+        def accept_residue(self, residue):
+            if residue.id[0] != " ":
+                return 0
+            resseq = residue.id[1]
+            if self.start is not None and resseq < self.start:
+                return 0
+            if self.end is not None and resseq > self.end:
+                return 0
             return 1
-        return 1 if chain.id == self.chain_id else 0
-
-    def accept_residue(self, residue):
-        if residue.id[0] != " ":
-            return 0
-        resseq = residue.id[1]
-        if self.start is not None and resseq < self.start:
-            return 0
-        if self.end is not None and resseq > self.end:
-            return 0
-        return 1
 
 
 def extract_subset_pdb(
