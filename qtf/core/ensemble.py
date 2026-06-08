@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import tempfile
+import warnings
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -299,15 +300,36 @@ class EnsembleFoldingManager:
     # Result access
     # ------------------------------------------------------------------
 
-    def get_results(self) -> list[dict]:
-        """Return all replica results, sorted by ascending energy."""
-        return sorted(self.results, key=lambda x: x["energy"])
+    def get_results(self, ranked: bool = False) -> list[dict]:
+        """Return all replica results.
+
+        Parameters
+        ----------
+        ranked:
+            If *True*, results are sorted by ascending energy (lowest first).
+            Default is *False* — results are returned in insertion order.
+
+        Returns
+        -------
+        list[dict]
+            The full list of result dicts.
+        """
+        if ranked:
+            return sorted(self.results, key=lambda x: x["energy"])
+        return self.results
 
     def get_ranked_results(self):
-        """Return all ensemble results sorted by energy (ascending)."""
-        if not self.results:
-            return []
-        return sorted(self.results, key=lambda x: x['energy'])
+        """Return all ensemble results sorted by energy (ascending).
+
+        .. deprecated::
+            Use :meth:`get_results` with ``ranked=True`` instead.
+        """
+        warnings.warn(
+            "get_ranked_results() is deprecated; use get_results(ranked=True) instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.get_results(ranked=True)
 
     def select_top(self, top_k=None, top_frac=None):
         """
@@ -326,7 +348,7 @@ class EnsembleFoldingManager:
         list[dict]
             Ranked subset of self.results.
         """
-        ranked = self.get_ranked_results()
+        ranked = self.get_results(ranked=True)
         if not ranked:
             return []
         if top_frac is not None:

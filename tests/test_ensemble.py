@@ -51,7 +51,7 @@ def test_get_results_sorted_ascending(folder_ga):
         {"id": 1, "energy": 2.0},
         {"id": 2, "energy": 8.0},
     ]
-    sorted_results = manager.get_results()
+    sorted_results = manager.get_results(ranked=True)
     energies = [r["energy"] for r in sorted_results]
     assert energies == sorted(energies)
 
@@ -67,6 +67,22 @@ def test_get_results_does_not_mutate_original(folder_ga):
 def test_get_results_empty(folder_ga):
     manager = EnsembleFoldingManager(folder_ga)
     assert manager.get_results() == []
+
+
+def test_get_results_ranked_false_returns_insertion_order(folder_ga):
+    manager = EnsembleFoldingManager(folder_ga)
+    manager.results = [
+        {"id": 0, "energy": 5.0},
+        {"id": 1, "energy": 2.0},
+    ]
+    assert manager.get_results(ranked=False)[0]["id"] == 0
+
+
+def test_get_ranked_results_emits_deprecation_warning(folder_ga):
+    manager = EnsembleFoldingManager(folder_ga)
+    manager.results = [{"id": 0, "energy": 1.0}]
+    with pytest.warns(DeprecationWarning, match="get_results.*ranked=True"):
+        _ = manager.get_ranked_results()
 
 
 # ---------------------------------------------------------------------------

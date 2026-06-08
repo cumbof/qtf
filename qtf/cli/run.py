@@ -152,7 +152,7 @@ def __main__(argv=None):
         manager.run_ensemble(n_runs=ensemble_size, max_iter=args.maxiter, prime_strategy=prime_strategy)
 
         # 3. Rank Ensemble by Energy and select low-energy candidates
-        ranked_results = manager.get_ranked_results()
+        ranked_results = manager.get_results(ranked=True)
         selected_results = manager.select_top(top_k=top_k, top_frac=top_frac)
             
         if not ranked_results:
