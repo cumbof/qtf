@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qtf"
-version = "0.3.14"
+version = "0.3.15"
 description = "Quantum Torsion Folding: a hybrid quantum-classical protein structure prediction package"
 readme = "README.md"
 license = { text = "MIT" }
@@ -33,6 +33,7 @@ dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
     "qiskit>=1.0",
+    "qiskit-aer>=0.14",
     "plotly>=5.18",
     "pandas>=2.0",
 ]
@@ -54,8 +55,9 @@ workflows = [
     "biopython>=1.80",
     "openmm>=8.0",
 ]
-accelerate = [
+gpu = [
     "numba>=0.58",
+    "qiskit-aer-gpu>=0.14",
 ]
 docs = [
     "mkdocs>=1.5",

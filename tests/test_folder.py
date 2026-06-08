@@ -1076,3 +1076,65 @@ class TestAccelerate:
         assert np.isfinite(e_accel)
         assert np.isfinite(e_pure)
         assert e_accel == pytest.approx(e_pure, abs=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# GPU-accelerated statevector (qiskit-aer)
+# ---------------------------------------------------------------------------
+
+
+class TestAerSim:
+    """Verify the optional Aer-based statevector simulation."""
+
+    @staticmethod
+    def _circuit():
+        """Return a small 4-qubit EfficientSU2 circuit bound to zero parameters."""
+        from qiskit.circuit.library import efficient_su2
+        ansatz = efficient_su2(4, reps=1, entanglement="circular")
+        param_dict = dict(zip(ansatz.parameters, [0.0] * ansatz.num_parameters))
+        return ansatz.assign_parameters(param_dict)
+
+    def test_statevector_data_has_correct_shape(self):
+        from qtf.utils.aer_sim import statevector_data
+        c = self._circuit()
+        psi = statevector_data(c)
+        assert isinstance(psi, np.ndarray)
+        assert psi.dtype == np.complex128
+        assert psi.shape == (16,)  # 2⁴
+
+    def test_statevector_data_is_normalized(self):
+        from qtf.utils.aer_sim import statevector_data
+        c = self._circuit()
+        psi = statevector_data(c)
+        assert np.abs(np.sum(np.abs(psi) ** 2) - 1.0) < 1e-12
+
+    def test_statevector_data_matches_Statevector(self):
+        from qtf.utils.aer_sim import statevector_data
+        from qiskit.quantum_info import Statevector
+        c = self._circuit()
+        fast = statevector_data(c)
+        ref = Statevector(c).data
+        np.testing.assert_allclose(fast, ref, atol=1e-12)
+
+    def test_statevector_data_via_public_api(self, monkeypatch):
+        """Verify folder's _get_angles still works through the aer_sim layer."""
+        f = QuantumBiophysicsFolder("GA")
+        rng = np.random.default_rng(7)
+        params = rng.uniform(-0.8, 0.8, f.n_params)
+        e = f.energy_function(params)
+        assert np.isfinite(e)
+
+    def test_aer_available_flag(self):
+        from qtf.utils.aer_sim import aer_available, gpu_available, backend_info
+        assert aer_available()  # qiskit-aer is a hard dependency
+        gpu_available()  # may be False without CUDA — that's fine
+        bi = backend_info()
+        assert bi["aer"] is True
+
+    def test_gpu_extra_dependency_listed(self):
+        import tomllib
+        with open("pyproject.toml", "rb") as f:
+            cfg = tomllib.load(f)
+        extras = cfg["project"]["optional-dependencies"]
+        assert "gpu" in extras
+        assert any("qiskit-aer-gpu" in dep for dep in extras["gpu"])

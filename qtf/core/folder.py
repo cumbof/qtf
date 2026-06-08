@@ -27,11 +27,11 @@ from pathlib import Path
 
 import numpy as np
 from qiskit.circuit.library import efficient_su2
-from qiskit.quantum_info import Statevector
 from scipy.optimize import minimize
 
 from qtf.core.tracker import LandscapeTracker
 from qtf.utils import gromacs as qtf_gromacs
+from qtf.utils.aer_sim import statevector_data as _statevector_data
 
 try:
     import pyrosetta
@@ -949,7 +949,7 @@ class QuantumBiophysicsFolder:
         """
         param_dict = dict(zip(self.ansatz.parameters, params))
         bound_circuit = self.ansatz.assign_parameters(param_dict)
-        psi = Statevector(bound_circuit).data
+        psi = _statevector_data(bound_circuit)
         phases = np.angle(psi)[: self.total_angles]
         # Remove global phase: pin phases[0] to 0 and wrap into (-π, π].
         phases = (phases - np.angle(psi[0]) + np.pi) % (2 * np.pi) - np.pi
