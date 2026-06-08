@@ -1186,3 +1186,98 @@ class TestCircularStats:
         assert len(vec) == f.total_angles
         assert all(np.isfinite(vec))
         assert len(observed) > 0
+
+
+# ---------------------------------------------------------------------------
+# Configurable ansatz
+# ---------------------------------------------------------------------------
+
+
+class TestAnsatz:
+    """Verify the ansatz parameter accepts strings and custom circuits."""
+
+    def test_default_ansatz_has_circular_entanglement(self):
+        """Default ansatz must be an EfficientSU2 with circular entanglement."""
+        f = QuantumBiophysicsFolder("GAV")
+        circ = f.ansatz
+        assert circ.num_qubits >= 2
+        assert circ.num_parameters == f.n_params
+        # The circuit should have CX gates (entanglement)
+        ops = {instr.operation.name for instr in circ.data}
+        assert "cx" in ops
+
+    def test_string_efficient_su2_matches_default(self):
+        ref = QuantumBiophysicsFolder("GAV")
+        f = QuantumBiophysicsFolder("GAV", ansatz="efficient_su2")
+        assert f.n_qubits == ref.n_qubits
+        assert f.n_params == ref.n_params
+
+    def test_string_su2_alias_matches_default(self):
+        ref = QuantumBiophysicsFolder("GAV")
+        f = QuantumBiophysicsFolder("GAV", ansatz="su2")
+        assert f.n_qubits == ref.n_qubits
+        assert f.n_params == ref.n_params
+
+    def test_string_real_amplitudes(self):
+        f = QuantumBiophysicsFolder("GAV", ansatz="real_amplitudes")
+        assert f.ansatz.num_qubits >= 2
+        assert f.ansatz.num_parameters == f.n_params
+
+    def test_string_ra_alias(self):
+        f = QuantumBiophysicsFolder("GAV", ansatz="ra")
+        assert f.ansatz.num_qubits >= 2
+        assert f.ansatz.num_parameters == f.n_params
+
+    def test_n_params_matches_ansatz(self):
+        f = QuantumBiophysicsFolder("GAV", ansatz="real_amplitudes")
+        assert f.ansatz.num_parameters == f.n_params
+
+    def test_total_angles_independent_of_ansatz(self):
+        ref = QuantumBiophysicsFolder("GAV")
+        f = QuantumBiophysicsFolder("GAV", ansatz="real_amplitudes")
+        assert f.total_angles == ref.total_angles
+
+    def test_energy_function_works_with_real_amplitudes(self):
+        f = QuantumBiophysicsFolder("GA", ansatz="real_amplitudes")
+        e = f.energy_function(np.zeros(f.n_params))
+        assert np.isfinite(e)
+
+    def test_custom_quantum_circuit(self):
+        from qiskit.circuit import QuantumCircuit
+        from qiskit.circuit.library import RealAmplitudes
+        nq = 4
+        custom = RealAmplitudes(nq, reps=2, entanglement="linear")
+        f = QuantumBiophysicsFolder("GAV", ansatz=custom)
+        assert f.n_qubits == nq
+        assert f.ansatz is custom
+        assert f.n_params == custom.num_parameters
+
+    def test_custom_circuit_energy_evaluates(self):
+        from qiskit.circuit.library import EfficientSU2
+        custom = EfficientSU2(4, reps=1, entanglement="linear")
+        f = QuantumBiophysicsFolder("GA", ansatz=custom)
+        e = f.energy_function(np.zeros(f.n_params))
+        assert np.isfinite(e)
+
+    def test_custom_too_few_qubits_raises(self):
+        from qiskit.circuit import QuantumCircuit
+        from qiskit.circuit.library import RealAmplitudes
+        custom = RealAmplitudes(2, reps=1, entanglement="linear")
+        with pytest.raises(ValueError, match="need at least"):
+            QuantumBiophysicsFolder("GAV", ansatz=custom)
+
+    def test_custom_no_parameters_raises(self):
+        from qiskit.circuit import QuantumCircuit
+        qc = QuantumCircuit(4)
+        qc.h(0)
+        qc.cx(0, 1)
+        with pytest.raises(ValueError, match="at least one parameter"):
+            QuantumBiophysicsFolder("GAV", ansatz=qc)
+
+    def test_invalid_string_raises(self):
+        with pytest.raises(ValueError, match="Unknown ansatz"):
+            QuantumBiophysicsFolder("GAV", ansatz="nonexistent")
+
+    def test_invalid_type_raises(self):
+        with pytest.raises(TypeError):
+            QuantumBiophysicsFolder("GAV", ansatz=42)

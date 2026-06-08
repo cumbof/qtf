@@ -2,8 +2,9 @@
 
 Architecture
 ------------
-1. **Quantum Actor**: a parameterised EfficientSU2 circuit whose statevector
-   phases encode backbone/side-chain torsion angles.
+1. **Quantum Actor**: a parameterised quantum circuit (EfficientSU2 by
+   default) whose statevector phases encode backbone/side-chain torsion
+   angles.
 2. **Classical Critic**: a physics-based energy function (hydrophobicity, H-bonds,
    electrostatics, sterics, Ramachandran bias, geometry integrity).
 3. **Optimisation Loop**: COBYLA + SLSQP in three progressive stages (collapse →
@@ -26,7 +27,6 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
-from qiskit.circuit.library import efficient_su2
 from scipy.optimize import minimize
 
 from qtf.core.tracker import LandscapeTracker
@@ -249,12 +249,27 @@ class QuantumBiophysicsFolder:
         rosetta_repack: bool | None = None,
         rosetta_fa_min: bool | None = None,
         rosetta_cen_min: bool | None = None,
+        ansatz: str | None = None,
     ) -> None:
         """
         Parameters
         ----------
         sequence:
             Single-letter amino acid sequence (e.g. ``"MAGTWY"``).
+        ansatz:
+            Quantum circuit ansatz.  ``None`` (default) → ``EfficientSU2``
+            with ``circular`` entanglement.  A string selects a built-in
+            Qiskit circuit-library ansatz:
+
+            - ``"efficient_su2"`` (or ``"su2"``)
+            - ``"real_amplitudes"`` (or ``"ra"``)
+
+            You can also pass a fully constructed
+            ``qiskit.circuit.QuantumCircuit`` with ``num_parameters > 0``.
+            When a custom circuit is provided the qubit count is taken
+            from the circuit (``n_qubits`` = ``circuit.num_qubits``) and
+            must be ≥ ``ceil(log2(total_angles))`` so that the statevector
+            has enough amplitude slots for all torsion-angle DOFs.
         """
         self.sequence = sequence.upper()
         self.n_residues = len(self.sequence)
@@ -320,11 +335,54 @@ class QuantumBiophysicsFolder:
         self._total_angles = len(self.dof_map)
 
         # ------------------------------------------------------------------
-        # Quantum circuit
+        # Quantum circuit (ansatz)
         # ------------------------------------------------------------------
-        self.n_qubits = max(2, int(np.ceil(np.log2(self.total_angles))))
-        self.reps = int(np.ceil(self.total_angles / self.n_qubits)) + 2
-        self.ansatz = efficient_su2(self.n_qubits, reps=self.reps, entanglement="circular")
+        min_qubits = max(2, int(np.ceil(np.log2(self.total_angles))))
+
+        if ansatz is None:
+            from qiskit.circuit.library import efficient_su2
+            self.n_qubits = min_qubits
+            self.reps = int(np.ceil(self.total_angles / self.n_qubits)) + 2
+            self.ansatz = efficient_su2(
+                self.n_qubits, reps=self.reps, entanglement="circular",
+            )
+        elif isinstance(ansatz, str):
+            from qiskit.circuit.library import EfficientSU2, RealAmplitudes
+            name = ansatz.lower().replace("-", "_")
+            self.n_qubits = min_qubits
+            self.reps = int(np.ceil(self.total_angles / self.n_qubits)) + 2
+            if name in ("efficient_su2", "su2"):
+                self.ansatz = EfficientSU2(
+                    self.n_qubits, reps=self.reps, entanglement="circular",
+                )
+            elif name in ("real_amplitudes", "ra"):
+                self.ansatz = RealAmplitudes(
+                    self.n_qubits, reps=self.reps, entanglement="circular",
+                )
+            else:
+                raise ValueError(
+                    f"Unknown ansatz name {ansatz!r}; "
+                    f"choose from 'efficient_su2', 'real_amplitudes'"
+                )
+        else:
+            from qiskit.circuit import QuantumCircuit
+            if not isinstance(ansatz, QuantumCircuit):
+                raise TypeError(
+                    f"ansatz must be a string, a QuantumCircuit, or None; "
+                    f"got {type(ansatz).__name__}"
+                )
+            if ansatz.num_parameters == 0:
+                raise ValueError(
+                    "Custom ansatz circuit must have at least one parameter"
+                )
+            if ansatz.num_qubits < min_qubits:
+                raise ValueError(
+                    f"Custom ansatz has {ansatz.num_qubits} qubit(s); "
+                    f"need at least {min_qubits} for {self.total_angles} angles"
+                )
+            self.n_qubits = ansatz.num_qubits
+            self.ansatz = ansatz
+
         self.n_params = self.ansatz.num_parameters
 
         self.current_stage = 1

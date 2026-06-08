@@ -1,7 +1,7 @@
 """QTF — Quantum Torsion Folding.
 
 A hybrid quantum-classical protein structure prediction package built on
-Qiskit's EfficientSU2 ansatz and a physics-based energy critic.
+Qiskit's parameterised quantum circuits and a physics-based energy critic.
 
 Use ``qtf-run --help`` for the CLI entry point, and install optional workflow
 dependencies with ``pip install "qtf[workflows]"``.
@@ -36,4 +36,4 @@ __all__ = [
     "LandscapeTracker",
 ]
 
-__version__ = "0.3.13"
+__version__ = "0.3.18"
