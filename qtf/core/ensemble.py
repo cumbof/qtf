@@ -12,7 +12,6 @@ import json
 import logging
 import os
 import tempfile
-import warnings
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -317,19 +316,6 @@ class EnsembleFoldingManager:
         if ranked:
             return sorted(self.results, key=lambda x: x["energy"])
         return self.results
-
-    def get_ranked_results(self):
-        """Return all ensemble results sorted by energy (ascending).
-
-        .. deprecated::
-            Use :meth:`get_results` with ``ranked=True`` instead.
-        """
-        warnings.warn(
-            "get_ranked_results() is deprecated; use get_results(ranked=True) instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.get_results(ranked=True)
 
     def select_top(self, top_k=None, top_frac=None):
         """

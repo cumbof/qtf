@@ -78,12 +78,6 @@ def test_get_results_ranked_false_returns_insertion_order(folder_ga):
     assert manager.get_results(ranked=False)[0]["id"] == 0
 
 
-def test_get_ranked_results_emits_deprecation_warning(folder_ga):
-    manager = EnsembleFoldingManager(folder_ga)
-    manager.results = [{"id": 0, "energy": 1.0}]
-    with pytest.warns(DeprecationWarning, match="get_results.*ranked=True"):
-        _ = manager.get_ranked_results()
-
 
 # ---------------------------------------------------------------------------
 # run_ensemble (with mocked fold)
