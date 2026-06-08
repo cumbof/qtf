@@ -43,6 +43,42 @@ def test_plot_structure_custom_title(ranking_for_plots):
     assert fig.layout.title.text == "My Title"
 
 
+def test_plot_structure_truncated(folder_ga, zero_structure):
+    """Prediction with more Cα atoms than ground truth → residue-ID intersection."""
+    full_coords, full_labels, _ = zero_structure
+    # Ground truth: only residue 1 (one Cα at res_id=1).
+    gt_mask = [i for i, lbl in enumerate(full_labels) if lbl[0] == 1]
+    gt_ca = np.array([full_coords[i] for i in gt_mask if full_labels[i][1] == "CA"])
+    gt_labels = [full_labels[i] for i in gt_mask]
+
+    # Prediction: full GA (two Cα at res_ids 0 and 1).
+    pred_coords = full_coords.copy()
+    pred_labels = full_labels
+
+    from qtf.analysis.ranking import EnsembleRanking
+    from qtf.core.tracker import LandscapeTracker
+
+    tracker = LandscapeTracker()
+    tracker.log(1.0)
+    tracker.mark_stage("Stage1")
+    results = [{
+        "id": 0, "seed": 0, "energy": 1.0,
+        "coords": pred_coords, "labels": pred_labels,
+        "bonds": [], "params": np.zeros(folder_ga.n_params),
+        "tracker": tracker,
+    }]
+    ranking = EnsembleRanking.from_ensemble(results)
+
+    # Alignment must use the common residue ID (res_id=1 only).
+    with pytest.warns(UserWarning, match="only 1 match ground-truth"):
+        fig = plot_structure(ranking, ground_truth_ca=gt_ca,
+                             ground_truth_labels=gt_labels)
+    assert isinstance(fig, go.Figure)
+    assert len(fig.data) == 2  # 1 aligned replica + ground truth
+    # The aligned CA trace should have exactly 1 point (the intersection).
+    assert len(fig.data[0].x) == 1
+
+
 # ---------------------------------------------------------------------------
 # plot_energy_landscape
 # ---------------------------------------------------------------------------

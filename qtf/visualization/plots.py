@@ -9,7 +9,8 @@ Three main entry points
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+import warnings
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -69,6 +70,7 @@ _PALETTE = {
 def plot_structure(
     ranking,
     ground_truth_ca: Optional[np.ndarray] = None,
+    ground_truth_labels: Optional[List] = None,
     ca_label: str = "CA",
     show_all: bool = True,
     title: str = "Predicted Protein Structures",
@@ -83,6 +85,14 @@ def plot_structure(
         Optional ``(N_residues, 3)`` ground-truth Cα coordinates.  When
         provided, all predicted structures are Kabsch-aligned to it before
         display.
+    ground_truth_labels:
+        Optional label list for the ground-truth structure (same format as
+        ``result["labels"]``).  When provided, alignment is performed on
+        the **residue-ID intersection** between prediction and ground truth
+        rather than naively truncating arrays by index.  This correctly
+        handles structures that differ in length, e.g. a prediction missing
+        the N-terminal methionine or a loop that is unresolved in the
+        experimental PDB.
     ca_label:
         Atom label used to filter Cα atoms from ``labels`` (default ``"CA"``).
     show_all:
@@ -98,10 +108,16 @@ def plot_structure(
     go, _ = _require_plotly()
     fig = go.Figure()
 
-    def _get_ca(result: dict) -> np.ndarray:
+    def _ca_with_ids(result: dict) -> Tuple[np.ndarray, List[int]]:
         coords = result["coords"]
         labels = result["labels"]
-        return np.array([coords[i] for i, lbl in enumerate(labels) if lbl[1] == ca_label])
+        ca_coords = []
+        ca_ids = []
+        for i, lbl in enumerate(labels):
+            if lbl[1] == ca_label:
+                ca_coords.append(coords[i])
+                ca_ids.append(lbl[0])
+        return np.array(ca_coords), ca_ids
 
     df = ranking.stats_df
     best_e_id = int(df[df["is_best_energy"]]["replica_id"].iloc[0])
@@ -116,15 +132,52 @@ def plot_structure(
 
     reference = ground_truth_ca  # alignment target
 
+    # Pre-compute ground-truth Cα residue IDs if labels are available
+    _gt_ca_ids = None
+    if reference is not None and ground_truth_labels is not None:
+        _gt_ca_ids = [lbl[0] for lbl in ground_truth_labels if lbl[1] == ca_label]
+        if len(_gt_ca_ids) != len(reference):
+            warnings.warn(
+                f"len(ground_truth_labels) Cα count ({len(_gt_ca_ids)}) "
+                f"does not match ground_truth_ca length ({len(reference)}). "
+                "Falling back to index-based truncation.",
+                UserWarning,
+            )
+            _gt_ca_ids = None
+
     for _, row in df.iterrows():
         rid = int(row["replica_id"])
-        ca = _get_ca(result_map[rid])
+        ca_coords, ca_ids = _ca_with_ids(result_map[rid])
 
         if reference is not None:
-            n = min(len(ca), len(reference))
-            _, ca_aligned = kabsch_rmsd(ca[:n], reference[:n])
+            if _gt_ca_ids is not None:
+                common = sorted(set(ca_ids) & set(_gt_ca_ids))
+                if len(common) < len(ca_ids):
+                    warnings.warn(
+                        f"Replica {rid}: prediction has {len(ca_ids)} Cα "
+                        f"residues but only {len(common)} match ground-truth "
+                        "residue IDs. Aligning on the common subset.",
+                        UserWarning,
+                    )
+                id_to_idx_pred = {r: i for i, r in enumerate(ca_ids)}
+                id_to_idx_gt = {r: i for i, r in enumerate(_gt_ca_ids)}
+                pred_subset = np.array([ca_coords[id_to_idx_pred[r]] for r in common])
+                gt_subset = np.array([reference[id_to_idx_gt[r]] for r in common])
+                _, ca_aligned = kabsch_rmsd(pred_subset, gt_subset)
+            else:
+                n = min(len(ca_coords), len(reference))
+                if n < len(ca_coords):
+                    warnings.warn(
+                        f"Replica {rid}: prediction has {len(ca_coords)} Cα "
+                        f"atoms but ground truth has {len(reference)}. "
+                        "Truncating to the first {n} by array index. "
+                        "Pass ground_truth_labels for proper residue-ID "
+                        "matching.",
+                        UserWarning,
+                    )
+                _, ca_aligned = kabsch_rmsd(ca_coords[:n], reference[:n])
         else:
-            ca_aligned = ca
+            ca_aligned = ca_coords
 
         is_best_e = rid == best_e_id
         is_best_r = rid == best_r_id
