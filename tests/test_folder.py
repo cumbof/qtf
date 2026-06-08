@@ -1032,3 +1032,47 @@ class TestNonFiniteAngles:
         params = np.zeros(f.n_params)
         e = f.energy_function(params)
         assert np.isfinite(e)
+
+
+# ---------------------------------------------------------------------------
+# Numba acceleration
+# ---------------------------------------------------------------------------
+
+
+class TestAccelerate:
+    """Verify the optional Numba-accelerated kernels."""
+
+    def test_accelerate_flag_reflects_availability(self):
+        from qtf.core.folder import _ACCELERATE_AVAILABLE
+        assert _ACCELERATE_AVAILABLE is True  # numba is installed in this env
+
+    def test_accelerated_distance_matrix_matches_numpy(self):
+        from qtf.utils.accelerate import distance_matrix as dm
+        rng = np.random.default_rng(42)
+        coords = rng.uniform(-10, 10, (20, 3))
+        fast = dm(coords)
+        diffs = coords[:, None, :] - coords[None, :, :]
+        ref = np.sqrt(np.sum(diffs ** 2, axis=-1)) + 1e-9
+        np.testing.assert_allclose(fast, ref, atol=1e-10)
+
+    def test_accelerated_energy_equals_non_accelerated(self, monkeypatch):
+        """With njit-kernels disabled, energy must match the pure-numpy path."""
+        from qtf.core.folder import _ACCELERATE_AVAILABLE
+        if not _ACCELERATE_AVAILABLE:
+            pytest.skip("numba not installed")
+
+        f = QuantumBiophysicsFolder("GAV")
+        rng = np.random.default_rng(7)
+        params = rng.uniform(-0.8, 0.8, f.n_params)
+
+        # Baseline: accelerated path (enabled by default when numba is present)
+        e_accel = f.energy_function(params)
+
+        # Disable acceleration via monkeypatch
+        import qtf.core.folder as folder_mod
+        monkeypatch.setattr(folder_mod, "_ACCELERATE_AVAILABLE", False)
+        e_pure = f.energy_function(params)
+
+        assert np.isfinite(e_accel)
+        assert np.isfinite(e_pure)
+        assert e_accel == pytest.approx(e_pure, abs=1e-6)

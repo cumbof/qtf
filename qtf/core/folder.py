@@ -92,6 +92,21 @@ _PYROSETTA_INIT_DONE = False
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Optional Numba acceleration
+# ---------------------------------------------------------------------------
+try:
+    from qtf.utils.accelerate import (
+        distance_matrix as _dist_accel,
+        electrostatic_energy as _elec_accel,
+        vdw_repulsion as _vdw_accel,
+        sasa_energy as _sasa_accel,
+    )
+
+    _ACCELERATE_AVAILABLE = True
+except ImportError:
+    _ACCELERATE_AVAILABLE = False
+
 # Coulomb's law prefactor: 332.0637 kcal mol⁻¹ Å e⁻²
 # (charges in elementary charges, distances in Ångströms, energy in kcal/mol)
 _COULOMB_PREFACTOR: float = 332.0637
@@ -1273,8 +1288,11 @@ class QuantumBiophysicsFolder:
             terms[name] += v
             total_energy += v
 
-        diffs = coords[:, None, :] - coords[None, :, :]
-        D = np.sqrt(np.sum(diffs ** 2, axis=-1)) + 1e-9
+        if _ACCELERATE_AVAILABLE:
+            D = _dist_accel(coords)
+        else:
+            diffs = coords[:, None, :] - coords[None, :, :]
+            D = np.sqrt(np.sum(diffs ** 2, axis=-1)) + 1e-9
 
         ca_indices = [i for i, lbl in enumerate(self.static_labels) if lbl[1] == "CA"]
         if len(ca_indices) >= 2:
@@ -1287,7 +1305,9 @@ class QuantumBiophysicsFolder:
                 deviation = max(0.0, abs(dist_ends - target_e2e) - slack_e2e)
                 add_term("constraint", self.e2e_scale * constraint_strength * (deviation ** 2))
 
-        if np.sum(self.mask_hydrophobic) > 0:
+        if _ACCELERATE_AVAILABLE:
+            add_term("sasa", _sasa_accel(D, self.mask_hydrophobic, gamma))
+        elif np.sum(self.mask_hydrophobic) > 0:
             hydro_dists = D[self.mask_hydrophobic, :]
             weights = 1.0 / (1.0 + np.exp(1.0 * (hydro_dists - 6.0)))
             neighbor_counts = np.sum(weights, axis=1) - 1.0
@@ -1337,7 +1357,13 @@ class QuantumBiophysicsFolder:
             e_hbond += np.sum(-25.0 * radial_term * angular_term * ang_mask)
         add_term("hbond", e_hbond)
 
-        add_term("electrostatics", self._electrostatic_energy(D))
+        if _ACCELERATE_AVAILABLE:
+            add_term("electrostatics", _elec_accel(
+                self.q_vector, D, self.mask_non_bonded,
+                _COULOMB_PREFACTOR, _DIELECTRIC,
+            ))
+        else:
+            add_term("electrostatics", self._electrostatic_energy(D))
 
         e_disulf = 0.0
         if len(self.idx_SG_atoms) > 1:
@@ -1356,29 +1382,36 @@ class QuantumBiophysicsFolder:
                 e_disulf += np.sum(40.0 * overload[penalty_mask] ** 2)
         add_term("disulfide", e_disulf)
 
-        Sigma_mat = self.vdw_radii_vector[:, None] + self.vdw_radii_vector[None, :]
-        heavy_mat = self.mask_heavy[:, None] & self.mask_heavy[None, :]
-        vdw_mask = np.triu(self.mask_non_bonded_vdw & heavy_mat, k=1)
-        vdw_14_mask = np.triu(self.mask_non_bonded_vdw_14 & heavy_mat, k=1)
+        if _ACCELERATE_AVAILABLE:
+            Sigma_mat = self.vdw_radii_vector[:, None] + self.vdw_radii_vector[None, :]
+            heavy_mat = self.mask_heavy[:, None] & self.mask_heavy[None, :]
+            vdw_mask = np.triu(self.mask_non_bonded_vdw & heavy_mat, k=1)
+            vdw_14_mask = np.triu(self.mask_non_bonded_vdw_14 & heavy_mat, k=1)
+            add_term("vdw_repulsion", _vdw_accel(D, Sigma_mat, vdw_mask, vdw_14_mask, 0.35))
+        else:
+            Sigma_mat = self.vdw_radii_vector[:, None] + self.vdw_radii_vector[None, :]
+            heavy_mat = self.mask_heavy[:, None] & self.mask_heavy[None, :]
+            vdw_mask = np.triu(self.mask_non_bonded_vdw & heavy_mat, k=1)
+            vdw_14_mask = np.triu(self.mask_non_bonded_vdw_14 & heavy_mat, k=1)
 
-        def _add_vdw(mask: np.ndarray, scale: float) -> None:
-            if not np.any(mask):
-                return
-            r_vdw = D[mask]
-            s_vdw = Sigma_mat[mask]
-            collision_mask = r_vdw < s_vdw
-            if not np.any(collision_mask):
-                return
-            r_col = r_vdw[collision_mask]
-            s_col = s_vdw[collision_mask]
-            term = (s_col / (r_col + 0.1)) ** 12
-            high_e = term > 50.0
-            if np.any(high_e):
-                term[high_e] = 50.0 + np.log(term[high_e] - 49.0)
-            add_term("vdw_repulsion", scale * np.sum(0.1 * term))
+            def _add_vdw(mask: np.ndarray, scale: float) -> None:
+                if not np.any(mask):
+                    return
+                r_vdw = D[mask]
+                s_vdw = Sigma_mat[mask]
+                collision_mask = r_vdw < s_vdw
+                if not np.any(collision_mask):
+                    return
+                r_col = r_vdw[collision_mask]
+                s_col = s_vdw[collision_mask]
+                term = (s_col / (r_col + 0.1)) ** 12
+                high_e = term > 50.0
+                if np.any(high_e):
+                    term[high_e] = 50.0 + np.log(term[high_e] - 49.0)
+                add_term("vdw_repulsion", scale * np.sum(0.1 * term))
 
-        _add_vdw(vdw_mask, 1.0)
-        _add_vdw(vdw_14_mask, 0.35)
+            _add_vdw(vdw_mask, 1.0)
+            _add_vdw(vdw_14_mask, 0.35)
 
         angle_dict = {f"{x['res']}_{x['type']}": val for x, val in zip(self.dof_map, angle_vec)}
         add_term("rotamer", self._calculate_rotamer_energy(angle_dict))
