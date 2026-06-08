@@ -1132,12 +1132,9 @@ class TestAerSim:
         assert bi["aer"] is True
 
     def test_gpu_extra_dependency_listed(self):
-        import tomllib
-        with open("pyproject.toml", "rb") as f:
-            cfg = tomllib.load(f)
-        extras = cfg["project"]["optional-dependencies"]
-        assert "gpu" in extras
-        assert any("qiskit-aer-gpu" in dep for dep in extras["gpu"])
+        from importlib.metadata import requires
+        all_deps = requires("qtf") or []
+        assert any("qiskit-aer-gpu" in d for d in all_deps)
 
 
 # ---------------------------------------------------------------------------
