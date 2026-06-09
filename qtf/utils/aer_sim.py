@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 _HAS_AER: bool = False
 _GPU_AVAILABLE: bool = False
 _backend = None
+_AER_FAILED: bool = False
 
 
 def _init_backend() -> None:
@@ -77,17 +78,23 @@ def statevector_data(circuit) -> np.ndarray:
     """
     _init_backend()
 
-    if _backend is not None:
+    if _backend is not None and not _AER_FAILED:
         try:
             qc = circuit.copy()
             qc.save_statevector()
             result = _backend.run(qc).result()
             return _extract(result, qc)
         except Exception as exc:
+            _silence_aer_failure()
             logger.warning("Aer run failed (%s); falling back to Statevector", exc)
 
     from qiskit.quantum_info import Statevector
     return Statevector(circuit).data
+
+
+def _silence_aer_failure() -> None:
+    global _AER_FAILED
+    _AER_FAILED = True
 
 
 def _extract(result, circuit) -> np.ndarray:
