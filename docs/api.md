@@ -1,83 +1,101 @@
 # API Reference
 
-Full auto-generated API documentation for all public classes and functions.
+Full auto-generated API documentation, organized by subpackage.
+All content is rendered from Python docstrings via [mkdocstrings](https://mkdocstrings.github.io/);
+no manual syncing needed — add a new public function or class and it appears on the next build.
 
 ---
 
-## Core
+## Package: `qtf`
 
-### QuantumBiophysicsFolder
-
-::: qtf.core.folder.QuantumBiophysicsFolder
-
----
-
-### EnsembleFoldingManager
-
-::: qtf.core.ensemble.EnsembleFoldingManager
+::: qtf
+    options:
+      heading_level: 3
 
 ---
 
-### LandscapeTracker
+## Core Subpackage: `qtf.core`
 
-::: qtf.core.tracker.LandscapeTracker
+### `qtf.core.folder`
 
----
+::: qtf.core.folder
+    options:
+      heading_level: 4
 
-## Analysis
+### `qtf.core.ensemble`
 
-### EnsembleRanking
+::: qtf.core.ensemble
+    options:
+      heading_level: 4
 
-::: qtf.analysis.ranking.EnsembleRanking
+### `qtf.core.tracker`
 
----
-
-### kabsch_rmsd
-
-::: qtf.analysis.stability.kabsch_rmsd
-
----
-
-### StabilityAnalyzer
-
-::: qtf.analysis.stability.StabilityAnalyzer
+::: qtf.core.tracker
+    options:
+      heading_level: 4
 
 ---
 
-## Visualisation
+## Analysis Subpackage: `qtf.analysis`
 
-### plot_structure
+### `qtf.analysis.stability`
 
-::: qtf.visualization.plots.plot_structure
+::: qtf.analysis.stability
+    options:
+      heading_level: 4
 
----
+### `qtf.analysis.ranking`
 
-### plot_energy_landscape
+::: qtf.analysis.ranking
+    options:
+      heading_level: 4
 
-::: qtf.visualization.plots.plot_energy_landscape
+### `qtf.analysis.panel`
 
----
-
-### plot_ranking
-
-::: qtf.visualization.plots.plot_ranking
-
----
-
-## Utilities
-
-### save_pdb
-
-::: qtf.utils.pdb.save_pdb
+::: qtf.analysis.panel
+    options:
+      heading_level: 4
 
 ---
 
-### get_ground_truth_backbone
+## Visualisation Subpackage: `qtf.visualization`
 
-::: qtf.utils.pdb.get_ground_truth_backbone
+### `qtf.visualization.plots`
+
+::: qtf.visualization.plots
+    options:
+      heading_level: 4
 
 ---
 
-### calculate_physics_metrics
+## Utilities Subpackage: `qtf.utils`
 
-::: qtf.utils.pdb.calculate_physics_metrics
+### `qtf.utils.pdb`
+
+::: qtf.utils.pdb
+    options:
+      heading_level: 4
+
+### `qtf.utils.workflow`
+
+::: qtf.utils.workflow
+    options:
+      heading_level: 4
+
+### `qtf.utils.aer_sim`
+
+::: qtf.utils.aer_sim
+    options:
+      heading_level: 4
+
+### `qtf.utils.accelerate`
+
+::: qtf.utils.accelerate
+    options:
+      heading_level: 4
+
+### `qtf.utils.gromacs`
+
+::: qtf.utils.gromacs
+    options:
+      heading_level: 4
