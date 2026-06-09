@@ -35,20 +35,30 @@ run the test suite, and follow the project's code conventions.
 ## Running tests
 
 ```bash
-# Run all 116 tests
+# Run the full suite
 pytest -q
 
 # Run with coverage report
 pytest --cov=qtf --cov-report=term-missing
 
-# Run a specific test file
+# Run all tests in a specific file
 pytest tests/test_folder.py -v
 
-# Run only tests matching a keyword
-pytest -k "rmsd" -v
+# Run a single test by its node id
+pytest tests/test_folder.py::TestAnsatz::test_custom_quantum_circuit -v
+
+# Run all tests in a class
+pytest tests/test_folder.py::TestAnsatz -v
+
+# Run only tests matching a keyword expression
+pytest -k "ansatz or rmsd" -v
 ```
 
-All tests must pass before opening a pull request.
+The full test suite runs
+
+--8<-- "includes/test_count.md"
+
+individual tests. All must pass before opening a pull request.
 
 ---
 
@@ -81,12 +91,23 @@ QTF/
 │   │   └── tracker.py       # LandscapeTracker
 │   ├── analysis/
 │   │   ├── ranking.py       # EnsembleRanking
-│   │   └── stability.py     # kabsch_rmsd, StabilityAnalyzer
+│   │   ├── stability.py     # kabsch_rmsd, StabilityAnalyzer
+│   │   └── panel.py         # Panel/grid analysis pipeline
 │   ├── visualization/
 │   │   └── plots.py         # plot_structure, plot_energy_landscape, plot_ranking
-│   └── utils/
-│       └── pdb.py           # save_pdb, get_ground_truth_backbone, calculate_physics_metrics
-├── tests/                   # pytest test suite (116 tests)
+│   ├── utils/
+│   │   ├── pdb.py           # save_pdb, get_ground_truth_backbone, calculate_physics_metrics
+│   │   ├── workflow.py      # make_folder, score_native_structure, gromacs postprocess, RMSD utils
+│   │   ├── aer_sim.py       # GPU/CPU statevector simulation backend
+│   │   ├── accelerate.py    # Numba-jitted distance matrix, electrostatic, VDW, SASA kernels
+│   │   └── gromacs.py       # GROMACS minimisation wrapper and PDB utilities
+│   └── cli/
+│       ├── fold.py          # qtf-fold: quantum folding prediction
+│       ├── bench.py         # qtf-bench: beam-search benchmark
+│       ├── eval.py          # qtf-eval: score experimental structures
+│       ├── grid_search.py   # qtf-grid-search: parameter grid sweep
+│       └── relax.py         # qtf-relax: GROMACS relaxation
+├── tests/                   # pytest test suite
 ├── docs/                    # MkDocs documentation source
 ├── .github/
 │   └── workflows/

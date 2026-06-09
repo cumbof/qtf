@@ -8,6 +8,7 @@
 | `numpy` | 1.24            | Array mathematics, distance matrices, linear algebra |
 | `scipy` | 1.10            | COBYLA and SLSQP optimisers |
 | `qiskit`| 1.0             | `EfficientSU2` ansatz; exact statevector simulation |
+| `qiskit-aer` | 0.14       | GPU/CPU statevector simulation backend |
 | `plotly`| 5.18            | Interactive 3-D and 2-D figures |
 | `pandas`| 2.0             | Per-replica statistics DataFrame |
 
@@ -38,29 +39,19 @@ pip install -e .
 
 ## Optional extras
 
-=== "Development"
+| Extra | Dependencies included | Use case |
+|-------|-----------------------|----------|
+| `[dev]` | `pytest`, `pytest-cov`, `ruff`, `mypy` | Development, linting, testing |
+| `[notebook]` | `jupyter`, `nbformat` | Running `QTF.ipynb` |
+| `[workflows]` | `matplotlib`, `mdtraj`, `biopython`, `openmm` | Energy backends, PDB I/O, minimisation |
+| `[gpu]` | `numba`, `qiskit-aer-gpu` | GPU-accelerated classical & quantum simulation (Linux x86_64) |
+| `[docs]` | `mkdocs`, `mkdocs-material`, `mkdocstrings[python]` | Building this documentation site |
 
-    Includes `pytest`, `pytest-cov`, `ruff`, and `mypy`:
+Install any combination with:
 
-    ```bash
-    pip install -e ".[dev]"
-    ```
-
-=== "Notebook"
-
-    Adds `jupyter` and `nbformat` for running `QTF.ipynb`:
-
-    ```bash
-    pip install -e ".[notebook]"
-    ```
-
-=== "Documentation"
-
-    Installs MkDocs and plugins used to build these pages:
-
-    ```bash
-    pip install -e ".[docs]"
-    ```
+```bash
+pip install -e ".[dev,workflows]"
+```
 
 ---
 
@@ -84,8 +75,14 @@ print(f"Params : {folder.n_params}")
 pytest -q
 ```
 
-All 116 tests should pass. The test suite covers the tracker, stability analysis, PDB
-utilities, the folder, ensemble manager, ranking, and all three visualisation functions.
+The full test suite runs
+
+--8<-- "includes/test_count.md"
+
+individual tests covering the tracker,
+stability analysis, PDB utilities, the folder, ensemble manager, ranking,
+ansatz construction, GPU sim backend, Numba acceleration, parallel ensemble,
+circular statistics, and all three visualisation functions.
 
 ---
 
