@@ -6,7 +6,7 @@ Importing this module never raises: when `numba` is not installed the
 decorated functions remain pure-Python fallbacks so the rest of QTF
 works without change.  Install with::
 
-    pip install "qtf[accelerate]"
+    pip install "qtf[gpu]"
 
 to enable 5-10× speedup on the custom energy function.
 """
