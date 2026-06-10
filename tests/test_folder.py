@@ -1278,3 +1278,69 @@ class TestAnsatz:
     def test_invalid_type_raises(self):
         with pytest.raises(TypeError):
             QuantumBiophysicsFolder("GAV", ansatz=42)
+
+    def test_string_brickwork(self):
+        f = QuantumBiophysicsFolder("GA", ansatz="brickwork")
+        assert f.ansatz is not None
+        assert f.ansatz.num_parameters == f.n_params
+
+    def test_brickwork_energy_evaluates(self):
+        f = QuantumBiophysicsFolder("GA", ansatz="brickwork")
+        e = f.energy_function(np.zeros(f.n_params))
+        assert np.isfinite(e)
+
+    def test_brickwork_total_angles_unchanged(self):
+        ref = QuantumBiophysicsFolder("GAV")
+        f = QuantumBiophysicsFolder("GAV", ansatz="brickwork")
+        assert f.total_angles == ref.total_angles
+
+
+class TestMode:
+    def test_default_mode_is_statevector(self):
+        f = QuantumBiophysicsFolder("GA")
+        assert f.mode == "statevector"
+
+    def test_explicit_statevector_mode(self):
+        f = QuantumBiophysicsFolder("GA", mode="statevector")
+        assert f.mode == "statevector"
+
+    def test_sampler_mode_stored(self):
+        f = QuantumBiophysicsFolder("GA", mode="sampler")
+        assert f.mode == "sampler"
+
+    def test_invalid_mode_raises(self):
+        with pytest.raises(ValueError, match="Unknown mode"):
+            QuantumBiophysicsFolder("GA", mode="invalid_mode")
+
+    def test_shots_stored(self):
+        f = QuantumBiophysicsFolder("GA", shots=2048)
+        assert f.shots == 2048
+
+    def test_backend_stored(self):
+        sentinel = object()
+        f = QuantumBiophysicsFolder("GA", backend=sentinel)
+        assert f.backend is sentinel
+
+    def test_statevector_mode_get_angles(self, folder_ga):
+        params = np.zeros(folder_ga.n_params)
+        angles = folder_ga._get_angles(params)
+        assert angles.shape == (folder_ga.total_angles,)
+        assert np.all(np.isfinite(angles))
+
+    def test_sampler_mode_get_angles(self):
+        f = QuantumBiophysicsFolder("GA", mode="sampler", shots=256)
+        params = np.zeros(f.n_params)
+        angles = f._get_angles(params)
+        assert angles.shape == (f.total_angles,)
+        assert np.all(np.isfinite(angles))
+        assert np.all(angles >= -np.pi) and np.all(angles <= np.pi)
+
+    def test_sampler_and_statevector_agree_coarsely(self):
+        """Sampler angles should lie in (-π, π] like statevector angles."""
+        f_sv = QuantumBiophysicsFolder("GA", mode="statevector")
+        f_sa = QuantumBiophysicsFolder("GA", mode="sampler", shots=512)
+        params = np.random.default_rng(42).uniform(-np.pi, np.pi, f_sv.n_params)
+        sv_angles = f_sv._get_angles(params)
+        sa_angles = f_sa._get_angles(params)
+        assert sv_angles.shape == sa_angles.shape
+        assert np.all(np.isfinite(sa_angles))

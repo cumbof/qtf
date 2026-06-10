@@ -250,6 +250,9 @@ class QuantumBiophysicsFolder:
         rosetta_fa_min: bool | None = None,
         rosetta_cen_min: bool | None = None,
         ansatz: str | None = None,
+        mode: str = "statevector",
+        backend=None,
+        shots: int = 4096,
     ) -> None:
         """
         Parameters
@@ -263,6 +266,8 @@ class QuantumBiophysicsFolder:
 
             - ``"efficient_su2"`` (or ``"su2"``)
             - ``"real_amplitudes"`` (or ``"ra"``)
+            - ``"brickwork"`` — custom brick-layer entanglement with lower
+              circuit depth than circular; suitable for near-term hardware.
 
             You can also pass a fully constructed
             ``qiskit.circuit.QuantumCircuit`` with ``num_parameters > 0``.
@@ -270,11 +275,32 @@ class QuantumBiophysicsFolder:
             from the circuit (``n_qubits`` = ``circuit.num_qubits``) and
             must be ≥ ``ceil(log2(total_angles))`` so that the statevector
             has enough amplitude slots for all torsion-angle DOFs.
+        mode:
+            Quantum simulation mode.  ``"statevector"`` (default) extracts
+            torsion angles from the complex phases of the full statevector.
+            ``"sampler"`` runs a shot-based measurement and derives angles
+            from the empirical probability CDF, enabling execution on real
+            quantum hardware.
+        backend:
+            Quantum backend instance (e.g. from ``qiskit_ibm_runtime``).
+            Used only when ``mode="sampler"``.  If ``None``, an
+            ``AerSimulator`` is used automatically.
+        shots:
+            Number of measurement shots for ``mode="sampler"``.
+            Ignored when ``mode="statevector"``.
         """
+        if mode not in ("statevector", "sampler"):
+            raise ValueError(
+                f"Unknown mode {mode!r}; choose from 'statevector' or 'sampler'"
+            )
+        self.mode = mode
+        self.backend = backend
+        self.shots = int(shots)
+
         self.sequence = sequence.upper()
         self.n_residues = len(self.sequence)
 
-        logger.info("Initialising QuantumBiophysicsFolder | seq=%s", self.sequence)
+        logger.info("Initialising QuantumBiophysicsFolder | seq=%s | mode=%s", self.sequence, self.mode)
 
         self.HYDROPHOBICITY = self._HYDROPHOBICITY
         self.VDW_RADII = self._VDW_RADII
@@ -359,10 +385,12 @@ class QuantumBiophysicsFolder:
                 self.ansatz = RealAmplitudes(
                     self.n_qubits, reps=self.reps, entanglement="circular",
                 )
+            elif name == "brickwork":
+                self.ansatz = self._build_brickwork_ansatz(self.n_qubits, self.reps)
             else:
                 raise ValueError(
                     f"Unknown ansatz name {ansatz!r}; "
-                    f"choose from 'efficient_su2', 'real_amplitudes'"
+                    f"choose from 'efficient_su2', 'real_amplitudes', 'brickwork'"
                 )
         else:
             from qiskit.circuit import QuantumCircuit
@@ -984,11 +1012,12 @@ class QuantumBiophysicsFolder:
         return float(total)
 
     def _get_angles(self, params: np.ndarray) -> np.ndarray:
-        """Map circuit parameters to torsion angles via statevector phases.
+        """Map circuit parameters to torsion angles.
 
-        The 2ⁿ complex amplitudes of the statevector each carry a phase in
-        ``(-π, π]``.  The first ``total_angles`` phases are used as torsion
-        angles after removing the **global phase**.
+        In ``"statevector"`` mode (default) the 2ⁿ complex amplitudes of the
+        statevector each carry a phase in ``(-π, π]``.  The first
+        ``total_angles`` phases are used as torsion angles after removing the
+        **global phase**.
 
         A global rotation ``e^{iα}|ψ⟩`` shifts every amplitude phase by α
         uniformly, but is physically unobservable — it would add a spurious
@@ -1004,14 +1033,115 @@ class QuantumBiophysicsFolder:
         is conventionally undefined (or set to a reference value).  The
         optimiser therefore controls ``K − 1`` independent phase degrees of
         freedom for K total torsion angles.
+
+        In ``"sampler"`` mode a shot-based measurement is performed; the
+        empirical probability distribution is accumulated into a CDF and
+        mapped linearly onto ``(-π, π]``.  This mode supports real quantum
+        hardware by accepting a ``backend`` instance.
         """
         param_dict = dict(zip(self.ansatz.parameters, params))
         bound_circuit = self.ansatz.assign_parameters(param_dict)
+
+        if self.mode == "sampler":
+            return self._get_angles_sampler(bound_circuit)
+
+        # Default: statevector mode
         psi = _statevector_data(bound_circuit)
         phases = np.angle(psi)[: self.total_angles]
         # Remove global phase: pin phases[0] to 0 and wrap into (-π, π].
         phases = (phases - np.angle(psi[0]) + np.pi) % (2 * np.pi) - np.pi
         return self._map_angle_vector_to_physical_ranges(phases)
+
+    def _get_angles_sampler(self, bound_circuit) -> np.ndarray:
+        """Shot-based angle extraction via empirical probability CDF.
+
+        Runs a measurement on ``bound_circuit`` using ``self.backend`` (or an
+        ``AerSimulator`` when no backend is provided), accumulates the shot
+        counts into a probability vector, and maps the cumulative distribution
+        function linearly onto ``(-π, π]`` to produce torsion angles.
+        """
+        from qiskit import transpile
+
+        try:
+            from qiskit_aer import AerSimulator
+        except ImportError as exc:
+            raise ImportError(
+                "qiskit-aer is required for sampler mode. "
+                "Install it with: pip install qiskit-aer"
+            ) from exc
+
+        backend = self.backend if self.backend is not None else AerSimulator()
+        n_states = 2 ** self.n_qubits
+
+        qc = bound_circuit.copy()
+        qc.measure_all()
+        tqc = transpile(qc, backend)
+        counts = backend.run(tqc, shots=self.shots).result().get_counts()
+
+        pvec = np.zeros(n_states, dtype=float)
+        total = sum(counts.values())
+        for bitstring, c in counts.items():
+            bs = bitstring.replace(" ", "")[::-1]
+            idx = int(bs, 2)
+            pvec[idx] += c / total
+
+        cdf = np.cumsum(pvec)
+        angles = 2.0 * np.pi * cdf - np.pi
+        return self._map_angle_vector_to_physical_ranges(angles[: self.total_angles])
+
+    @staticmethod
+    def _build_brickwork_ansatz(n_qubits: int, reps: int):
+        """Build a custom brickwork (brick-layer) ansatz circuit.
+
+        Structure per rep:
+
+        - Layer 1: ``Ry`` + ``Rz`` on every qubit.
+        - Layer 2: ``CX`` on even pairs (0–1, 2–3, 4–5, …).
+        - Layer 3: ``CX`` on odd pairs (1–2, 3–4, 5–6, …).
+
+        This gives full nearest-neighbour connectivity in two CX layers per
+        rep — lower serial depth than circular entanglement and therefore
+        less noise on current hardware.
+
+        Parameters
+        ----------
+        n_qubits:
+            Number of qubits in the circuit.
+        reps:
+            Number of repetitions of the rotation + entanglement block.
+
+        Returns
+        -------
+        qiskit.circuit.QuantumCircuit
+            Parameterised circuit with ``2 * n_qubits * (reps + 1)``
+            free parameters.
+        """
+        from qiskit import QuantumCircuit
+        from qiskit.circuit import ParameterVector
+
+        n_params_total = 2 * n_qubits * (reps + 1)
+        params = ParameterVector("θ", n_params_total)
+        qc = QuantumCircuit(n_qubits)
+        p_idx = 0
+
+        for _ in range(reps):
+            # Single-qubit rotation layer
+            for q in range(n_qubits):
+                qc.ry(params[p_idx], q); p_idx += 1
+                qc.rz(params[p_idx], q); p_idx += 1
+            # Even-pair entanglement: (0,1), (2,3), …
+            for q in range(0, n_qubits - 1, 2):
+                qc.cx(q, q + 1)
+            # Odd-pair entanglement: (1,2), (3,4), …
+            for q in range(1, n_qubits - 1, 2):
+                qc.cx(q, q + 1)
+
+        # Final rotation layer (no entanglement after)
+        for q in range(n_qubits):
+            qc.ry(params[p_idx], q); p_idx += 1
+            qc.rz(params[p_idx], q); p_idx += 1
+
+        return qc
 
     @staticmethod
     def _nerf_step(
