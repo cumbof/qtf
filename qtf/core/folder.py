@@ -454,7 +454,7 @@ class QuantumBiophysicsFolder:
         self._last_rosetta_ca = None
         self.openmm_forcefield = "amber14-all.xml"
         self.openmm_platform = "CPU"
-        self.openmm_do_minimize = _as_bool("0", False)
+        self.openmm_do_minimize = False
         self.openmm_max_iterations = 200
         self.openmm_tolerance = 10.0
         self.openmm_ph = 7.0
