@@ -80,12 +80,12 @@ def load_reference_ca_coords(pdb_path: str) -> np.ndarray:
 
 def get_tuning_settings():
     return {
-        "hbond_scale": float(os.getenv("QTF_HBOND_SCALE", "0.75")),
-        "sasa_scale": float(os.getenv("QTF_SASA_SCALE", "0.7")),
-        "vdw_rep_scale": float(os.getenv("QTF_VDW_REP_SCALE", "0.01")),
-        "vdw_attr_scale": float(os.getenv("QTF_VDW_ATTR_SCALE", "0.1")),
-        "rotamer_scale": float(os.getenv("QTF_ROTAMER_SCALE", "1.0")),
-        "pi_stack_scale": float(os.getenv("QTF_PI_STACK_SCALE", "1.0")),
+        "hbond_scale": 0.75,
+        "sasa_scale": 0.7,
+        "vdw_rep_scale": 0.01,
+        "vdw_attr_scale": 0.1,
+        "rotamer_scale": 1.0,
+        "pi_stack_scale": 1.0,
     }
 
 

@@ -426,24 +426,24 @@ class QuantumBiophysicsFolder:
             return str(value).strip().lower() not in ("0", "false", "no", "off", "none", "")
 
         self.stage3_backend = (
-            energy_backend or os.getenv("QTF_STAGE3_BACKEND", "custom")
+            energy_backend or "custom"
         ).strip().lower()
         if self.stage3_backend not in ("custom", "rosetta", "openmm"):
             raise ValueError("energy_backend must be 'custom', 'rosetta', or 'openmm'")
 
         self.use_e2e_constraint = _as_bool(
             use_e2e_constraint,
-            os.getenv("QTF_USE_E2E_CONSTRAINT", "1").strip().lower()
+            "1"
             not in ("0", "false", "no", "off"),
         )
         self.e2e_scale = float(
-            e2e_scale if e2e_scale is not None else os.getenv("QTF_E2E_SCALE", "1.0")
+            e2e_scale if e2e_scale is not None else "1.0"
         )
-        self.rosetta_flags = os.getenv("QTF_PYROSETTA_FLAGS", "-mute all")
-        self.rosetta_centroid_weights = os.getenv("QTF_ROSETTA_CEN_WTS", "cen_std")
-        self.rosetta_fullatom_weights = os.getenv("QTF_ROSETTA_FA_WTS", "ref2015")
-        self.rosetta_cen_weight = float(os.getenv("QTF_ROSETTA_CEN_WEIGHT", "0.35"))
-        self.rosetta_fa_weight = float(os.getenv("QTF_ROSETTA_FA_WEIGHT", "1.0"))
+        self.rosetta_flags = "-mute all"
+        self.rosetta_centroid_weights = "cen_std"
+        self.rosetta_fullatom_weights = "ref2015"
+        self.rosetta_cen_weight = 0.35
+        self.rosetta_fa_weight = 1.0
         self.rosetta_do_centroid_min = _as_bool(rosetta_cen_min, False)
         self.rosetta_do_fullatom_min = _as_bool(rosetta_fa_min, False)
         self.rosetta_do_repack = _as_bool(rosetta_repack, False)
@@ -452,12 +452,12 @@ class QuantumBiophysicsFolder:
         self._rosetta_scorefxn_fa = None
         self._last_rosetta_pose = None
         self._last_rosetta_ca = None
-        self.openmm_forcefield = os.getenv("QTF_OPENMM_FORCEFIELD", "amber14-all.xml")
-        self.openmm_platform = os.getenv("QTF_OPENMM_PLATFORM", "CPU")
-        self.openmm_do_minimize = _as_bool(os.getenv("QTF_OPENMM_MINIMIZE", "0"), False)
-        self.openmm_max_iterations = int(os.getenv("QTF_OPENMM_MAX_ITERATIONS", "200"))
-        self.openmm_tolerance = float(os.getenv("QTF_OPENMM_TOLERANCE", "10.0"))
-        self.openmm_ph = float(os.getenv("QTF_OPENMM_PH", "7.0"))
+        self.openmm_forcefield = "amber14-all.xml"
+        self.openmm_platform = "CPU"
+        self.openmm_do_minimize = _as_bool("0", False)
+        self.openmm_max_iterations = 200
+        self.openmm_tolerance = 10.0
+        self.openmm_ph = 7.0
         self._openmm_ready = False
         self._last_openmm_coords = None
         self._last_openmm_labels = None
@@ -1813,10 +1813,10 @@ class QuantumBiophysicsFolder:
                 res_map[r] = {}
             res_map[r][atom] = k
 
-        scale = float(os.getenv("QTF_LOCAL_HEAVY_STERIC_SCALE", "10.0"))
-        min_allowed_A = float(os.getenv("QTF_LOCAL_HEAVY_STERIC_MIN_A", "1.35"))
-        threshold_frac = float(os.getenv("QTF_LOCAL_HEAVY_STERIC_FRACTION", "0.55"))
-        overlap_width_A = float(os.getenv("QTF_LOCAL_HEAVY_STERIC_WIDTH_A", "0.50"))
+        scale = 10.0
+        min_allowed_A = 1.35
+        threshold_frac = 0.55
+        overlap_width_A = 0.50
         overlap_width_A = max(overlap_width_A, 1e-3)
 
         energy = 0.0
