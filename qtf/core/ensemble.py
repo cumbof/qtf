@@ -287,7 +287,7 @@ class EnsembleFoldingManager:
             "sequence": self.folder.sequence,
             "chi_mode": self.folder.chi_mode,
             "selective_chi_map": self.folder.selective_chi_map,
-            "energy_backend": self.folder.stage3_backend,
+            "energy_backend": self.folder.stage_backend,
             "use_e2e_constraint": self.folder.use_e2e_constraint,
             "e2e_scale": self.folder.e2e_scale,
             "rosetta_repack": self.folder.rosetta_do_repack,

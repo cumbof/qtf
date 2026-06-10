@@ -15,7 +15,6 @@ Environment variables
 
 from __future__ import annotations
 
-import os
 import logging
 
 import numpy as np
@@ -42,7 +41,7 @@ def _init_backend() -> None:
         logger.debug("qiskit-aer not installed; using in-process Statevector")
         return
 
-    device = os.getenv("QTF_AER_DEVICE", "auto").strip().lower()
+    device = "auto"
 
     if device == "cpu":
         try:
