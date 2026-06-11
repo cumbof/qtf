@@ -157,7 +157,9 @@ Optional extras:
 | `[gpu]` | `numba`, `qiskit-aer-gpu` | GPU-accelerated classical & quantum simulation (Linux x86_64) |
 | `[docs]` | `mkdocs`, `mkdocs-material`, `mkdocstrings[python]` | Building this documentation site
 
-> **Note on optional backends:** QTF's default `custom` energy backend works out of the box — no additional dependencies required.
+> [!NOTE]
+>
+> QTF's default `custom` energy backend works out of the box — no additional dependencies required.
 >
 > - **PyRosetta** (`energy_backend="rosetta"`) is not available directly on PyPI. Install it manually with:
 >   ```bash
