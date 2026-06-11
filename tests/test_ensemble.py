@@ -429,11 +429,11 @@ def test_run_ensemble_accepts_max_workers(folder_ga, zero_structure):
     assert len(manager.results) == 2
 
 
-def test_max_workers_defaults_to_none():
-    """The signature must expose max_workers=None as default (auto)."""
+def test_max_workers_defaults_to_1():
+    """The signature must expose max_workers=1 as default (sequential)."""
     import inspect
     sig = inspect.signature(EnsembleFoldingManager.run_ensemble)
-    assert sig.parameters["max_workers"].default is None
+    assert sig.parameters["max_workers"].default == 1
 
 
 def test_worker_exists_and_accepts_expected_args():
