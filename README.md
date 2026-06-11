@@ -195,7 +195,27 @@ pip install -e ".[dev]"
 
 ## CLI
 
-Five command-line tools are installed automatically with `pip install qtf`:
+Six command-line tools are installed automatically with `pip install qtf`:
+
+### `qtf-run` — Unified dispatcher
+
+All subcommands are also accessible via a single unified entry point:
+
+```bash
+qtf-run fold --predict YYDPETGTWY --ensemble_size 5
+qtf-run bench --sequence YYDPETGTWY --beam_width 1000
+qtf-run eval --name 5AWL --pdb_path 5AWL.pdb --out_csv scores.csv
+qtf-run grid-search --panel_csv protein_panel.csv --outsubdir run1 --window_deg 30
+qtf-run relax --input_pdb structure.pdb --forcefield amber99sb-ildn
+```
+
+| Subcommand | Delegates to |
+|------------|-------------|
+| `fold` | `qtf-fold` |
+| `bench` | `qtf-bench` |
+| `eval` | `qtf-eval` |
+| `grid-search` | `qtf-grid-search` |
+| `relax` | `qtf-relax` |
 
 ### `qtf-fold` — Quantum folding prediction
 
@@ -259,11 +279,6 @@ Energy-minimise a PDB structure with GROMACS.
 ```bash
 qtf-relax --input_pdb structure.pdb --forcefield amber99sb-ildn
 ```
-
-### Legacy `qtf-run`
-
-The original single-entry-point `qtf-run` is still available for backward
-compatibility but is deprecated in favour of the five focused subcommands above.
 
 ---
 
