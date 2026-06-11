@@ -431,6 +431,18 @@ class QuantumBiophysicsFolder:
         if self.stage_backend not in ("custom", "rosetta", "openmm"):
             raise ValueError("energy_backend must be 'custom', 'rosetta', or 'openmm'")
 
+        if self.stage_backend == "rosetta" and not _PYROSETTA_AVAILABLE:
+            raise ImportError(
+                "PyRosetta is not installed. Install it with:\n"
+                "    pip install pyrosetta "
+                "--find-links https://west.rosettacommons.org/pyrosetta/quarterly/release"
+            )
+        if self.stage_backend == "openmm" and not _OPENMM_AVAILABLE:
+            raise ImportError(
+                "OpenMM is not installed. Install it with: "
+                "conda install -c conda-forge openmm"
+            )
+
         self.use_e2e_constraint = _as_bool(
             use_e2e_constraint,
             "1"

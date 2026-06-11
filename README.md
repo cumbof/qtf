@@ -157,6 +157,18 @@ Optional extras:
 | `[gpu]` | `numba`, `qiskit-aer-gpu` | GPU-accelerated classical & quantum simulation (Linux x86_64) |
 | `[docs]` | `mkdocs`, `mkdocs-material`, `mkdocstrings[python]` | Building this documentation site
 
+> **Note on optional backends:** QTF's default `custom` energy backend works out of the box — no additional dependencies required.
+>
+> - **PyRosetta** (`energy_backend="rosetta"`) is not available directly on PyPI. Install it manually with:
+>   ```bash
+>   pip install pyrosetta --find-links https://west.rosettacommons.org/pyrosetta/quarterly/release
+>   ```
+> - **OpenMM** (`energy_backend="openmm"`) is not available on PyPI either. Install it via conda-forge:
+>   ```bash
+>   conda install -c conda-forge openmm
+>   ```
+> - **GROMACS** (used by `qtf-relax` and `gromacs_postprocess_structure()`) must be installed at the system level. See the [GROMACS download page](https://www.gromacs.org/downloads) for platform-specific instructions.
+
 ---
 
 ## Installation
