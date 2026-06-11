@@ -15,7 +15,7 @@
 3. [Package Structure](#package-structure)
 4. [Dependencies](#dependencies)
 5. [Installation](#installation)
-6. [CLI (`qtf-run`)](#cli-qtf-run)
+6. [CLI (`qtf-run`)](#cli)
 7. [Quick Start](#quick-start)
 8. [Core Concepts](#core-concepts)
    - [Holographic Encoding](#holographic-encoding)
