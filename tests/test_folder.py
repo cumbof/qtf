@@ -20,9 +20,10 @@ class TestInit:
     def test_n_residues(self, folder_ga):
         assert folder_ga.n_residues == 2
 
-    def test_force_field_argument_removed(self):
-        with pytest.raises(TypeError):
-            QuantumBiophysicsFolder("A", force_field="amber")
+    def test_force_field_argument_is_native_profile_metadata(self):
+        f = QuantumBiophysicsFolder("A", force_field="protein-coarse-charge-v1")
+        assert f.force_field == "protein-coarse-charge-v1"
+        assert f.CHARGES["N"] == pytest.approx(-0.42)
 
     def test_n_qubits_at_least_two(self, folder_ga):
         assert folder_ga.n_qubits >= 2
@@ -665,8 +666,7 @@ class TestTopologySeedAngle:
 
 
 class TestOmegaPreProline:
-    """Verify that ω for residues preceding Pro enters the DOF map and
-    that build_full_structure honours its value."""
+    """Verify that omega is optional and PHEAT-defined when stored."""
 
     def test_no_omega_dof_without_proline(self):
         """A sequence with no Pro must have no omega DOF entries."""
@@ -674,18 +674,17 @@ class TestOmegaPreProline:
         omega_dofs = [d for d in f.dof_map if d["type"] == "omega"]
         assert omega_dofs == []
 
-    def test_omega_dof_added_before_proline(self):
-        """Residue preceding P must gain an omega DOF."""
-        f = QuantumBiophysicsFolder("GAP")
+    def test_omega_dofs_are_added_when_requested(self):
+        """Requesting omega stores all peptide-bond omega DOFs from PHEAT."""
+        f = QuantumBiophysicsFolder("GAP", stored_angles=["omega"])
         omega_dofs = [d for d in f.dof_map if d["type"] == "omega"]
-        assert len(omega_dofs) == 1
-        assert omega_dofs[0]["res"] == 1  # residue 1 (A) precedes P at position 2
+        assert len(omega_dofs) == f.n_residues - 1
+        assert [d["res"] for d in omega_dofs] == [0, 1]
 
-    def test_omega_dof_count_matches_pre_pro_count(self):
-        """A sequence with two pre-Pro positions gets two omega DOFs."""
-        f = QuantumBiophysicsFolder("GAPGPV")
+    def test_omega_dof_count_matches_peptide_bonds_when_requested(self):
+        f = QuantumBiophysicsFolder("GAPGPV", stored_angles=["omega"])
         omega_dofs = [d for d in f.dof_map if d["type"] == "omega"]
-        assert len(omega_dofs) == 2
+        assert len(omega_dofs) == f.n_residues - 1
 
     def test_omega_default_is_pi_without_dof(self):
         """Without an omega DOF the built structure uses ω = π (trans)."""
@@ -696,7 +695,7 @@ class TestOmegaPreProline:
 
     def test_omega_affects_coordinates(self):
         """Setting ω to 0 (cis) for a pre-Pro residue must shift CA of Pro."""
-        f = QuantumBiophysicsFolder("GAP")
+        f = QuantumBiophysicsFolder("GAP", stored_angles=["omega"])
         omega_idx = next(
             k for k, d in enumerate(f.dof_map)
             if d["type"] == "omega" and d["res"] == 1
@@ -733,90 +732,44 @@ class TestOmegaPreProline:
           ω  → omega DOF for A (pre-Pro)        = 1
           Total = 10
         """
-        f = QuantumBiophysicsFolder("GAP")
+        f = QuantumBiophysicsFolder("GAP", stored_angles=["omega"])
         assert f.total_angles == len(f.dof_map), \
             "total_angles must equal the number of dof_map entries"
         omega_count = sum(1 for d in f.dof_map if d["type"] == "omega")
-        assert omega_count == 1
+        assert omega_count == f.n_residues - 1
         assert f.total_angles == 10
 
 
 # ---------------------------------------------------------------------------
-# M-4 – Huber loss in _calculate_geometry_integrity
+# M-4 – PHEAT geometry integrity scoring
 # ---------------------------------------------------------------------------
 
 
-class TestHuberLoss:
-    """Unit tests for QuantumBiophysicsFolder._huber."""
-
-    def test_zero_residual(self):
-        assert QuantumBiophysicsFolder._huber(0.0, 1.0) == 0.0
-
-    def test_within_delta_is_quadratic(self):
-        # |x| <= delta → x²
-        for x in (0.0, 0.5, 0.99, -0.5, -0.99):
-            assert pytest.approx(QuantumBiophysicsFolder._huber(x, 1.0)) == x ** 2
-
-    def test_at_transition_continuous(self):
-        # Both branches must agree at |x| = delta
-        delta = 1.0
-        from_below = delta ** 2
-        from_above = 2.0 * delta * delta - delta ** 2  # = delta²
-        assert pytest.approx(from_below) == from_above
-
-    def test_above_delta_is_linear(self):
-        # |x| > delta → 2·delta·|x| - delta²
-        delta = 1.0
-        for x in (1.5, 2.0, 5.0, -2.0):
-            expected = 2.0 * delta * abs(x) - delta ** 2
-            assert pytest.approx(QuantumBiophysicsFolder._huber(x, delta)) == expected
-
-    def test_gradient_bounded_above_delta(self):
-        """d/dx Huber = ±2·delta above the transition — must not exceed 2*delta."""
-        delta = 1.0
-        eps = 1e-6
-        for x in (2.0, 5.0, 100.0):
-            grad = (QuantumBiophysicsFolder._huber(x + eps, delta) -
-                    QuantumBiophysicsFolder._huber(x - eps, delta)) / (2 * eps)
-            assert abs(grad) <= 2.0 * delta + 1e-4
-
-    def test_huber_less_than_quadratic_for_large_residual(self):
-        """Huber penalty must be strictly smaller than the old quadratic for large x."""
-        delta = 1.0
-        for x in (2.0, 3.0, 10.0):
-            assert QuantumBiophysicsFolder._huber(x, delta) < x ** 2
-
-    def test_huber_equals_quadratic_for_small_residual(self):
-        """Below delta, Huber must equal the raw quadratic."""
-        delta = 1.0
-        for x in (0.1, 0.5, 0.9):
-            assert pytest.approx(QuantumBiophysicsFolder._huber(x, delta)) == x ** 2
-
-
-class TestGeometryIntegrityHuber:
-    """Verify that _calculate_geometry_integrity uses Huber-capped penalties."""
+class TestPheatGeometryIntegrity:
+    """QTF delegates geometry integrity scoring to PHEAT."""
 
     def test_energy_finite_for_normal_structure(self):
-        """Geometry integrity on a well-folded structure must be finite."""
+        from pheat.scoring import score_structure
+
         f = QuantumBiophysicsFolder("GAVC")
-        angles = np.full(f.total_angles, 0.1)
-        coords, labels, _ = f.build_full_structure(angles)
-        e = f._calculate_geometry_integrity(coords, labels, f.atom_to_res)
-        assert np.isfinite(e)
+        structure = f.structure_from_angle_vector(np.full(f.total_angles, 0.1))
+        score = score_structure(structure, model="pheat-geometry-integrity")
+        assert np.isfinite(score.total)
 
-    def test_huber_caps_large_deviation(self):
-        """A severe geometry distortion must contribute less than its raw quadratic."""
-        delta = _TOPOLOGY_SEED_ANGLE  # reuse import; actual value is 0.1 (not delta)
-        from qtf.core.folder import _HUBER_DELTA_GEOM, QuantumBiophysicsFolder as QBF
-        large_dev = 5.0  # Å – far beyond any physical bond stretch
-        huber_penalty = 50.0 * QBF._huber(large_dev, _HUBER_DELTA_GEOM)
-        quadratic_penalty = 50.0 * large_dev ** 2
-        assert huber_penalty < quadratic_penalty
+    def test_geometry_integrity_terms_available_from_pheat(self):
+        from pheat.scoring import score_structure
 
-    def test_huber_delta_constant_exported(self):
-        from qtf.core.folder import _HUBER_DELTA_GEOM
-        assert isinstance(_HUBER_DELTA_GEOM, float)
-        assert _HUBER_DELTA_GEOM > 0.0
+        f = QuantumBiophysicsFolder("GAVC")
+        structure = f.structure_from_angle_vector(np.full(f.total_angles, 0.1))
+        score = score_structure(structure, model="pheat-geometry-integrity")
+        assert isinstance(score.terms, dict)
+        assert "total" in score.terms or score.terms
+
+    def test_coarse_model_exposes_end_to_end_controls(self):
+        from pheat.scoring import score_model_option_specs
+
+        specs = {item["name"] for item in score_model_option_specs("pheat-coarse-protein-folding-v1")}
+        assert {"use_end_to_end_constraint", "end_to_end_scale", "decoded_torsions"}.issubset(specs)
 
 
 # ---------------------------------------------------------------------------
@@ -902,7 +855,7 @@ class TestBuildFullStructureLookup:
 
 
 class TestLengthAwareE2EConstraint:
-    """Verify the E2E target scales with chain length: 4.5 + 0.4·max(0,N−5) Å."""
+    """Verify PHEAT coarse end-to-end options through QTF scoring."""
 
     @pytest.mark.parametrize("n_residues,expected_target", [
         (3, 4.5),
@@ -912,34 +865,33 @@ class TestLengthAwareE2EConstraint:
         (20, 10.5),
     ])
     def test_target_formula_values(self, n_residues, expected_target):
-        """E2E target formula produces the correct value for various chain lengths."""
         computed = 4.5 + 0.40 * max(0, n_residues - 5)
         assert computed == pytest.approx(expected_target)
 
-    def test_longer_chain_has_larger_target(self):
-        """A 20-residue chain must have a strictly larger E2E target than a 5-residue chain."""
-        target_5 = 4.5 + 0.40 * max(0, 5 - 5)
-        target_20 = 4.5 + 0.40 * max(0, 20 - 5)
-        assert target_20 > target_5
-
     def test_constraint_term_is_nonneg_and_finite(self):
-        """Constraint energy from energy_function must be finite and non-negative."""
-        f = QuantumBiophysicsFolder("GAVCL", use_e2e_constraint=True)
+        f = QuantumBiophysicsFolder("GAVCL", score_model="pheat-coarse-protein-folding-v1")
         rng = np.random.default_rng(0)
         params = rng.uniform(-0.8, 0.8, f.n_params)
-        f.energy_function(params, return_terms=True)
-        terms = f.last_energy_terms
-        assert np.isfinite(terms["constraint"])
-        assert terms["constraint"] >= 0.0
+        payload, _ = f.score_model_for_params(
+            params,
+            "pheat-coarse-protein-folding-v1",
+            angle_mode="statevector",
+            options={"use_end_to_end_constraint": True},
+        )
+        assert np.isfinite(payload["terms"]["end_to_end"])
+        assert payload["terms"]["end_to_end"] >= 0.0
 
     def test_constraint_disabled_gives_zero(self):
-        """When use_e2e_constraint=False the constraint term must be exactly zero."""
-        f = QuantumBiophysicsFolder("GAVCL", use_e2e_constraint=False)
+        f = QuantumBiophysicsFolder("GAVCL", score_model="pheat-coarse-protein-folding-v1")
         rng = np.random.default_rng(1)
         params = rng.uniform(-0.8, 0.8, f.n_params)
-        f.energy_function(params, return_terms=True)
-        terms = f.last_energy_terms
-        assert terms["constraint"] == 0.0
+        payload, _ = f.score_model_for_params(
+            params,
+            "pheat-coarse-protein-folding-v1",
+            angle_mode="statevector",
+            options={"use_end_to_end_constraint": False},
+        )
+        assert payload["terms"]["end_to_end"] == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -948,43 +900,28 @@ class TestLengthAwareE2EConstraint:
 
 
 class TestBondGraphVDWExclusions:
-    """Verify bond-graph based VdW masking: C-3 correctness fix."""
+    """Verify steric terms through the PHEAT coarse scorer."""
 
     def test_bonded_pairs_excluded_from_strict_vdw_mask(self):
-        """Every covalent bond (1-2 pair) must be absent from mask_non_bonded_vdw."""
         f = QuantumBiophysicsFolder("GAVC")
         _, _, static_bonds = f.build_full_structure(np.full(f.total_angles, 0.1))
         for i, j in static_bonds:
-            assert not f.mask_non_bonded_vdw[i, j], (
-                f"Bonded pair ({i},{j}) incorrectly present in strict VdW non-bonded mask"
-            )
+            assert not f.mask_non_bonded_vdw[i, j]
             assert not f.mask_non_bonded_vdw[j, i]
 
-    def test_14_mask_and_strict_mask_are_disjoint(self):
-        """1-4 pairs and strictly non-bonded pairs must be mutually exclusive."""
-        f = QuantumBiophysicsFolder("GAVC")
-        overlap = f.mask_non_bonded_vdw & f.mask_non_bonded_vdw_14
-        assert not overlap.any(), (
-            "mask_non_bonded_vdw and mask_non_bonded_vdw_14 share entries; "
-            "they must be disjoint"
-        )
-
-    def test_14_mask_nonempty_for_peptide(self):
-        """A multi-residue peptide must have at least some 1-4 atom pairs."""
-        f = QuantumBiophysicsFolder("GAVC")
-        assert f.mask_non_bonded_vdw_14.any(), (
-            "Expected at least one 1-4 atom pair in mask_non_bonded_vdw_14"
-        )
-
-    def test_vdw_energy_finite_and_nonneg(self):
-        """VdW repulsion energy must be finite and non-negative."""
-        f = QuantumBiophysicsFolder("GAVC")
+    def test_steric_terms_are_finite_and_nonnegative(self):
+        f = QuantumBiophysicsFolder("GAVC", score_model="pheat-coarse-protein-folding-v1")
         rng = np.random.default_rng(7)
         params = rng.uniform(-0.8, 0.8, f.n_params)
-        f.energy_function(params, return_terms=True)
-        terms = f.last_energy_terms
-        assert np.isfinite(terms["vdw_repulsion"])
-        assert terms["vdw_repulsion"] >= 0.0
+        payload, _ = f.score_model_for_params(
+            params,
+            "pheat-coarse-protein-folding-v1",
+            angle_mode="statevector",
+        )
+        assert np.isfinite(payload["terms"]["steric"])
+        assert payload["terms"]["steric"] >= 0.0
+        assert np.isfinite(payload["terms"]["adjacent_heavy_sterics"])
+        assert payload["terms"]["adjacent_heavy_sterics"] >= 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -999,7 +936,7 @@ class TestNonFiniteAngles:
         f = QuantumBiophysicsFolder("GA")
         orig_get_angles = f._get_angles
 
-        def _nan_angles(params):
+        def _nan_angles(params, *args, **kwargs):
             return np.full(orig_get_angles(params).shape, np.nan)
 
         monkeypatch.setattr(f, "_get_angles", _nan_angles)
@@ -1011,7 +948,7 @@ class TestNonFiniteAngles:
         f = QuantumBiophysicsFolder("GA")
         orig_get_angles = f._get_angles
 
-        def _inf_angles(params):
+        def _inf_angles(params, *args, **kwargs):
             return np.full(orig_get_angles(params).shape, np.inf)
 
         monkeypatch.setattr(f, "_get_angles", _inf_angles)
@@ -1023,7 +960,7 @@ class TestNonFiniteAngles:
         f = QuantumBiophysicsFolder("GA")
         orig_get_angles = f._get_angles
 
-        def _mixed_angles(params):
+        def _mixed_angles(params, *args, **kwargs):
             a = orig_get_angles(params)
             a[0] = np.nan
             a[-1] = np.inf
@@ -1038,7 +975,7 @@ class TestNonFiniteAngles:
         f = QuantumBiophysicsFolder("GA")
         orig_get_angles = f._get_angles
 
-        def _nan_angles(params):
+        def _nan_angles(params, *args, **kwargs):
             return np.full(orig_get_angles(params).shape, np.nan)
 
         monkeypatch.setattr(f, "_get_angles", _nan_angles)
@@ -1061,11 +998,12 @@ class TestNonFiniteAngles:
 
 
 class TestAccelerate:
-    """Verify the optional Numba-accelerated kernels."""
+    """Verify optional accelerated kernels remain import-safe."""
 
-    def test_accelerate_flag_reflects_availability(self):
-        from qtf.core.folder import _ACCELERATE_AVAILABLE
-        assert _ACCELERATE_AVAILABLE is True  # numba is installed in this env
+    def test_accelerate_module_reports_numba_availability(self):
+        from qtf.utils import accelerate
+
+        assert isinstance(accelerate._HAS_NUMBA, bool)
 
     def test_accelerated_distance_matrix_matches_numpy(self):
         from qtf.utils.accelerate import distance_matrix as dm
@@ -1075,28 +1013,6 @@ class TestAccelerate:
         diffs = coords[:, None, :] - coords[None, :, :]
         ref = np.sqrt(np.sum(diffs ** 2, axis=-1)) + 1e-9
         np.testing.assert_allclose(fast, ref, atol=1e-10)
-
-    def test_accelerated_energy_equals_non_accelerated(self, monkeypatch):
-        """With njit-kernels disabled, energy must match the pure-numpy path."""
-        from qtf.core.folder import _ACCELERATE_AVAILABLE
-        if not _ACCELERATE_AVAILABLE:
-            pytest.skip("numba not installed")
-
-        f = QuantumBiophysicsFolder("GAV")
-        rng = np.random.default_rng(7)
-        params = rng.uniform(-0.8, 0.8, f.n_params)
-
-        # Baseline: accelerated path (enabled by default when numba is present)
-        e_accel = f.energy_function(params)
-
-        # Disable acceleration via monkeypatch
-        import qtf.core.folder as folder_mod
-        monkeypatch.setattr(folder_mod, "_ACCELERATE_AVAILABLE", False)
-        e_pure = f.energy_function(params)
-
-        assert np.isfinite(e_accel)
-        assert np.isfinite(e_pure)
-        assert e_accel == pytest.approx(e_pure, abs=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -1212,135 +1128,106 @@ class TestCircularStats:
 
 
 class TestAnsatz:
-    """Verify the ansatz parameter accepts strings and custom circuits."""
+    """Verify current circuit-template configuration."""
 
-    def test_default_ansatz_has_circular_entanglement(self):
-        """Default ansatz must be an EfficientSU2 with circular entanglement."""
+    def test_default_circuit_has_entanglement(self):
         f = QuantumBiophysicsFolder("GAV")
         circ = f.ansatz
         assert circ.num_qubits >= 2
         assert circ.num_parameters == f.n_params
-        # The circuit should have CX gates (entanglement)
         ops = {instr.operation.name for instr in circ.data}
         assert "cx" in ops
+        assert f.circuit_metadata["name"] == "EfficientSU2"
 
-    def test_string_efficient_su2_matches_default(self):
+    def test_explicit_efficient_su2_template_matches_default_shape(self):
         ref = QuantumBiophysicsFolder("GAV")
-        f = QuantumBiophysicsFolder("GAV", ansatz="efficient_su2")
+        f = QuantumBiophysicsFolder(
+            "GAV",
+            circuit_template={
+                "source": "qiskit-library",
+                "name": "EfficientSU2",
+                "options": {"reps": "auto", "entanglement": "circular"},
+            },
+        )
         assert f.n_qubits == ref.n_qubits
         assert f.n_params == ref.n_params
 
-    def test_string_su2_alias_matches_default(self):
-        ref = QuantumBiophysicsFolder("GAV")
-        f = QuantumBiophysicsFolder("GAV", ansatz="su2")
-        assert f.n_qubits == ref.n_qubits
-        assert f.n_params == ref.n_params
-
-    def test_string_real_amplitudes(self):
-        f = QuantumBiophysicsFolder("GAV", ansatz="real_amplitudes")
+    def test_real_amplitudes_template(self):
+        f = QuantumBiophysicsFolder(
+            "GAV",
+            circuit_template={
+                "source": "qiskit-library",
+                "name": "RealAmplitudes",
+                "options": {"reps": 2, "entanglement": "linear"},
+            },
+        )
         assert f.ansatz.num_qubits >= 2
         assert f.ansatz.num_parameters == f.n_params
+        assert f.circuit_metadata["name"] == "RealAmplitudes"
 
-    def test_string_ra_alias(self):
-        f = QuantumBiophysicsFolder("GAV", ansatz="ra")
-        assert f.ansatz.num_qubits >= 2
-        assert f.ansatz.num_parameters == f.n_params
-
-    def test_n_params_matches_ansatz(self):
-        f = QuantumBiophysicsFolder("GAV", ansatz="real_amplitudes")
-        assert f.ansatz.num_parameters == f.n_params
-
-    def test_total_angles_independent_of_ansatz(self):
+    def test_total_angles_independent_of_circuit_template(self):
         ref = QuantumBiophysicsFolder("GAV")
-        f = QuantumBiophysicsFolder("GAV", ansatz="real_amplitudes")
+        f = QuantumBiophysicsFolder(
+            "GAV",
+            circuit_template={"source": "qiskit-library", "name": "RealAmplitudes", "options": {"reps": 2}},
+        )
         assert f.total_angles == ref.total_angles
 
     def test_energy_function_works_with_real_amplitudes(self):
-        f = QuantumBiophysicsFolder("GA", ansatz="real_amplitudes")
+        f = QuantumBiophysicsFolder(
+            "GA",
+            circuit_template={"source": "qiskit-library", "name": "RealAmplitudes", "options": {"reps": 1}},
+        )
         e = f.energy_function(np.zeros(f.n_params))
         assert np.isfinite(e)
 
-    def test_custom_quantum_circuit(self):
-        from qiskit.circuit import QuantumCircuit
-        from qiskit.circuit.library import RealAmplitudes
-        nq = 4
-        custom = RealAmplitudes(nq, reps=2, entanglement="linear")
-        f = QuantumBiophysicsFolder("GAV", ansatz=custom)
-        assert f.n_qubits == nq
-        assert f.ansatz is custom
-        assert f.n_params == custom.num_parameters
+    def test_invalid_template_raises(self):
+        with pytest.raises(ValueError, match="Unknown Qiskit circuit template"):
+            QuantumBiophysicsFolder("GAV", circuit_template={"source": "qiskit-library", "name": "NoSuchCircuit"})
 
-    def test_custom_circuit_energy_evaluates(self):
-        from qiskit.circuit.library import EfficientSU2
-        custom = EfficientSU2(4, reps=1, entanglement="linear")
-        f = QuantumBiophysicsFolder("GA", ansatz=custom)
-        e = f.energy_function(np.zeros(f.n_params))
-        assert np.isfinite(e)
-
-    def test_custom_too_few_qubits_raises(self):
-        from qiskit.circuit import QuantumCircuit
-        from qiskit.circuit.library import RealAmplitudes
-        custom = RealAmplitudes(2, reps=1, entanglement="linear")
-        with pytest.raises(ValueError, match="need at least"):
-            QuantumBiophysicsFolder("GAV", ansatz=custom)
-
-    def test_custom_no_parameters_raises(self):
-        from qiskit.circuit import QuantumCircuit
-        qc = QuantumCircuit(4)
-        qc.h(0)
-        qc.cx(0, 1)
-        with pytest.raises(ValueError, match="at least one parameter"):
-            QuantumBiophysicsFolder("GAV", ansatz=qc)
-
-    def test_invalid_string_raises(self):
-        with pytest.raises(ValueError, match="Unknown ansatz"):
-            QuantumBiophysicsFolder("GAV", ansatz="nonexistent")
-
-    def test_invalid_type_raises(self):
-        with pytest.raises(TypeError):
-            QuantumBiophysicsFolder("GAV", ansatz=42)
-
-    def test_string_brickwork(self):
-        f = QuantumBiophysicsFolder("GA", ansatz="brickwork")
+    def test_string_brickwork_template(self):
+        f = QuantumBiophysicsFolder(
+            "GA",
+            circuit_template={"source": "qtf", "name": "brickwork-ryrz-nearest-neighbor"},
+        )
         assert f.ansatz is not None
         assert f.ansatz.num_parameters == f.n_params
+        assert f.circuit_metadata["name"] == "brickwork-ryrz-nearest-neighbor"
 
     def test_brickwork_energy_evaluates(self):
-        f = QuantumBiophysicsFolder("GA", ansatz="brickwork")
+        f = QuantumBiophysicsFolder(
+            "GA",
+            circuit_template={"source": "qtf", "name": "brickwork-ryrz-nearest-neighbor"},
+        )
         e = f.energy_function(np.zeros(f.n_params))
         assert np.isfinite(e)
-
-    def test_brickwork_total_angles_unchanged(self):
-        ref = QuantumBiophysicsFolder("GAV")
-        f = QuantumBiophysicsFolder("GAV", ansatz="brickwork")
-        assert f.total_angles == ref.total_angles
 
 
 class TestMode:
-    def test_default_mode_is_statevector(self):
+    def test_default_optimizer_angle_mode_is_statevector(self):
         f = QuantumBiophysicsFolder("GA")
-        assert f.mode == "statevector"
+        assert f.optimizer_angle_mode == "statevector"
 
     def test_explicit_statevector_mode(self):
-        f = QuantumBiophysicsFolder("GA", mode="statevector")
-        assert f.mode == "statevector"
+        f = QuantumBiophysicsFolder("GA", optimizer_angle_mode="statevector")
+        assert f.optimizer_angle_mode == "statevector"
 
     def test_sampler_mode_stored(self):
-        f = QuantumBiophysicsFolder("GA", mode="sampler")
-        assert f.mode == "sampler"
+        f = QuantumBiophysicsFolder("GA", optimizer_angle_mode="sampler")
+        assert f.optimizer_angle_mode == "sampler"
 
     def test_invalid_mode_raises(self):
-        with pytest.raises(ValueError, match="Unknown mode"):
-            QuantumBiophysicsFolder("GA", mode="invalid_mode")
+        with pytest.raises(ValueError, match="optimizer_angle_mode"):
+            QuantumBiophysicsFolder("GA", optimizer_angle_mode="invalid_mode")
 
-    def test_shots_stored(self):
-        f = QuantumBiophysicsFolder("GA", shots=2048)
-        assert f.shots == 2048
+    def test_optimizer_shots_stored(self):
+        f = QuantumBiophysicsFolder("GA", optimizer_shots=2048)
+        assert f.optimizer_shots == 2048
 
-    def test_backend_stored(self):
+    def test_optimizer_backend_stored(self):
         sentinel = object()
-        f = QuantumBiophysicsFolder("GA", backend=sentinel)
-        assert f.backend is sentinel
+        f = QuantumBiophysicsFolder("GA", optimizer_backend=sentinel)
+        assert f.optimizer_backend is sentinel
 
     def test_statevector_mode_get_angles(self, folder_ga):
         params = np.zeros(folder_ga.n_params)
@@ -1349,19 +1236,18 @@ class TestMode:
         assert np.all(np.isfinite(angles))
 
     def test_sampler_mode_get_angles(self):
-        f = QuantumBiophysicsFolder("GA", mode="sampler", shots=256)
+        f = QuantumBiophysicsFolder("GA", optimizer_angle_mode="sampler", optimizer_shots=256)
         params = np.zeros(f.n_params)
-        angles = f._get_angles(params)
+        angles = f._get_angles(params, mode="sampler", shots=f.optimizer_shots)
         assert angles.shape == (f.total_angles,)
         assert np.all(np.isfinite(angles))
         assert np.all(angles >= -np.pi) and np.all(angles <= np.pi)
 
     def test_sampler_and_statevector_agree_coarsely(self):
-        """Sampler angles should lie in (-π, π] like statevector angles."""
-        f_sv = QuantumBiophysicsFolder("GA", mode="statevector")
-        f_sa = QuantumBiophysicsFolder("GA", mode="sampler", shots=512)
+        f_sv = QuantumBiophysicsFolder("GA", optimizer_angle_mode="statevector")
+        f_sa = QuantumBiophysicsFolder("GA", optimizer_angle_mode="sampler", optimizer_shots=512)
         params = np.random.default_rng(42).uniform(-np.pi, np.pi, f_sv.n_params)
         sv_angles = f_sv._get_angles(params)
-        sa_angles = f_sa._get_angles(params)
+        sa_angles = f_sa._get_angles(params, mode="sampler", shots=f_sa.optimizer_shots)
         assert sv_angles.shape == sa_angles.shape
         assert np.all(np.isfinite(sa_angles))

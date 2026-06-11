@@ -166,18 +166,17 @@ def test_save_pdb_folder_method_is_a_wrapper():
     method_file = methods[0][0]
     method_line = methods[0][1]
     assert method_file.relative_to(REPO_ROOT) == Path("qtf/core/folder.py")
-    # Read a window around the method to confirm it delegates to
-    # qtf.utils.pdb.save_pdb (i.e. it is a thin wrapper, not a
-    # re-implementation).
+    # Read a window around the method to confirm it delegates PDB formatting
+    # to PHEAT instead of re-implementing ATOM record writing in QTF.
     text = method_file.read_text()
     lines = text.splitlines()
     window_start = max(0, method_line - 1)
     window_end = min(len(lines), method_line + 40)
     window = "\n".join(lines[window_start:window_end])
-    assert "qtf.utils.pdb" in window or "from qtf.utils.pdb import save_pdb" in window, (
-        "QuantumBiophysicsFolder.save_pdb is expected to be a thin "
-        "wrapper around qtf.utils.pdb.save_pdb (B5). The window after "
-        f"the definition does not mention qtf.utils.pdb:\n{window}"
+    assert "write_pdb(" in window and "structure_from_coords_labels" in window, (
+        "QuantumBiophysicsFolder.save_pdb is expected to delegate PDB writing "
+        "to PHEAT write_pdb via a HeavyAtomStructure. The window after "
+        f"the definition does not show that delegation:\n{window}"
     )
 
 

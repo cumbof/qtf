@@ -9,43 +9,24 @@ Three main entry points
 
 from __future__ import annotations
 
+from typing import Optional
 import warnings
-from typing import List, Optional, Tuple
 
 import numpy as np
 
+from pheat.geometry import kabsch_align
 
-def _require_plotly() -> Tuple["object", "object"]:
-    """Lazily import :mod:`plotly`.
 
-    Plotly is a default QTF dependency, but importing it at module
-    load time forces every user of ``qtf.visualization`` to pay the
-    import cost and to surface a bare ``ModuleNotFoundError`` if the
-    install is broken. The plot functions call this helper instead,
-    so a missing plotly is reported with a clear, actionable error
-    pointing at the install command.
-
-    Returns
-    -------
-    (go, make_subplots)
-        The two :mod:`plotly` symbols the rest of the module needs.
-    """
+def _require_plotly():
     try:
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
-    except ImportError as exc:
+    except ModuleNotFoundError as exc:
         raise ImportError(
-            "plotly is required for the QTF visualization helpers "
-            "(plot_structure, plot_energy_landscape, plot_ranking) but "
-            "could not be imported. plotly is a default QTF dependency; "
-            "if it is genuinely missing, install it with "
-            "`pip install plotly`. If it is installed but still raises, "
-            "the install is broken (e.g. a version conflict); the "
-            "original ImportError is chained below."
+            "plotly is required for qtf.visualization plots. Install it with `pip install plotly` "
+            "or install QTF with visualization/report dependencies."
         ) from exc
     return go, make_subplots
-
-from qtf.analysis.stability import kabsch_rmsd
 
 
 # ---------------------------------------------------------------------------
@@ -70,11 +51,11 @@ _PALETTE = {
 def plot_structure(
     ranking,
     ground_truth_ca: Optional[np.ndarray] = None,
-    ground_truth_labels: Optional[List] = None,
+    ground_truth_labels: Optional[list] = None,
     ca_label: str = "CA",
     show_all: bool = True,
     title: str = "Predicted Protein Structures",
-) -> "object":  # plotly.graph_objects.Figure
+) -> go.Figure:
     """Interactive 3-D backbone overlay.
 
     Parameters
@@ -86,13 +67,8 @@ def plot_structure(
         provided, all predicted structures are Kabsch-aligned to it before
         display.
     ground_truth_labels:
-        Optional label list for the ground-truth structure (same format as
-        ``result["labels"]``).  When provided, alignment is performed on
-        the **residue-ID intersection** between prediction and ground truth
-        rather than naively truncating arrays by index.  This correctly
-        handles structures that differ in length, e.g. a prediction missing
-        the N-terminal methionine or a loop that is unresolved in the
-        experimental PDB.
+        Optional atom labels for the ground-truth structure. When provided,
+        Cα traces are aligned by common residue id instead of by truncation.
     ca_label:
         Atom label used to filter Cα atoms from ``labels`` (default ``"CA"``).
     show_all:
@@ -108,16 +84,29 @@ def plot_structure(
     go, _ = _require_plotly()
     fig = go.Figure()
 
-    def _ca_with_ids(result: dict) -> Tuple[np.ndarray, List[int]]:
+    def _get_ca(result: dict) -> tuple[np.ndarray, list[int]]:
         coords = result["coords"]
         labels = result["labels"]
         ca_coords = []
-        ca_ids = []
+        residue_ids = []
         for i, lbl in enumerate(labels):
             if lbl[1] == ca_label:
                 ca_coords.append(coords[i])
-                ca_ids.append(lbl[0])
-        return np.array(ca_coords), ca_ids
+                residue_ids.append(int(lbl[0]))
+        return np.asarray(ca_coords, dtype=float), residue_ids
+
+    def _ground_truth_by_residue() -> dict[int, np.ndarray]:
+        if ground_truth_ca is None or ground_truth_labels is None:
+            return {}
+        gt_ca_labels = [lbl for lbl in ground_truth_labels if lbl[1] == ca_label]
+        return {
+            int(lbl[0]): np.asarray(ground_truth_ca[idx], dtype=float)
+            for idx, lbl in enumerate(gt_ca_labels[: len(ground_truth_ca)])
+        }
+
+    gt_by_residue = _ground_truth_by_residue()
+    display_ground_truth = None
+    warned_truncation = False
 
     df = ranking.stats_df
     best_e_id = int(df[df["is_best_energy"]]["replica_id"].iloc[0])
@@ -130,54 +119,41 @@ def plot_structure(
     # Build replica lookup from the ranking's internal result list
     result_map = {r["id"]: r for r in _collect_results(ranking)}
 
-    reference = ground_truth_ca  # alignment target
-
-    # Pre-compute ground-truth Cα residue IDs if labels are available
-    _gt_ca_ids = None
-    if reference is not None and ground_truth_labels is not None:
-        _gt_ca_ids = [lbl[0] for lbl in ground_truth_labels if lbl[1] == ca_label]
-        if len(_gt_ca_ids) != len(reference):
-            warnings.warn(
-                f"len(ground_truth_labels) Cα count ({len(_gt_ca_ids)}) "
-                f"does not match ground_truth_ca length ({len(reference)}). "
-                "Falling back to index-based truncation.",
-                UserWarning,
-            )
-            _gt_ca_ids = None
-
     for _, row in df.iterrows():
         rid = int(row["replica_id"])
-        ca_coords, ca_ids = _ca_with_ids(result_map[rid])
+        ca_raw, ca_residue_ids = _get_ca(result_map[rid])
+        ca = ca_raw
+        reference = ground_truth_ca
+
+        if ground_truth_ca is not None and gt_by_residue:
+            pred_by_residue = {
+                residue_id: np.asarray(ca_raw[idx], dtype=float)
+                for idx, residue_id in enumerate(ca_residue_ids)
+            }
+            common = [residue_id for residue_id in ca_residue_ids if residue_id in gt_by_residue]
+            if common:
+                if (len(common) < len(ca_residue_ids) or len(common) < len(gt_by_residue)) and not warned_truncation:
+                    warnings.warn(
+                        f"only {len(common)} match ground-truth residue ids; plotting the common C-alpha subset",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+                    warned_truncation = True
+                ca = np.asarray([pred_by_residue[residue_id] for residue_id in common], dtype=float)
+                reference = np.asarray([gt_by_residue[residue_id] for residue_id in common], dtype=float)
+                if display_ground_truth is None:
+                    display_ground_truth = reference
+        elif ground_truth_ca is not None:
+            reference = ground_truth_ca
 
         if reference is not None:
-            if _gt_ca_ids is not None:
-                common = sorted(set(ca_ids) & set(_gt_ca_ids))
-                if len(common) < len(ca_ids):
-                    warnings.warn(
-                        f"Replica {rid}: prediction has {len(ca_ids)} Cα "
-                        f"residues but only {len(common)} match ground-truth "
-                        "residue IDs. Aligning on the common subset.",
-                        UserWarning,
-                    )
-                id_to_idx_pred = {r: i for i, r in enumerate(ca_ids)}
-                id_to_idx_gt = {r: i for i, r in enumerate(_gt_ca_ids)}
-                pred_subset = np.array([ca_coords[id_to_idx_pred[r]] for r in common])
-                gt_subset = np.array([reference[id_to_idx_gt[r]] for r in common])
-                _, ca_aligned = kabsch_rmsd(pred_subset, gt_subset)
-            else:
-                n = min(len(ca_coords), len(reference))
-                if n < len(ca_coords):
-                    warnings.warn(
-                        f"Replica {rid}: prediction has {len(ca_coords)} Cα "
-                        f"atoms but ground truth has {len(reference)}. "
-                        "Truncating to the first {n} by array index. "
-                        "Pass ground_truth_labels for proper residue-ID "
-                        "matching.",
-                        UserWarning,
-                    )
-                _, ca_aligned = kabsch_rmsd(ca_coords[:n], reference[:n])
+            n = min(len(ca), len(reference))
+            ca_aligned = np.asarray(
+                kabsch_align(np.asarray(reference[:n], dtype=float).tolist(), ca[:n].tolist()),
+                dtype=float,
+            )
         else:
-            ca_aligned = ca_coords
+            ca_aligned = ca
 
         is_best_e = rid == best_e_id
         is_best_r = rid == best_r_id
@@ -228,12 +204,14 @@ def plot_structure(
         )
 
     # Ground truth
-    if ground_truth_ca is not None:
+    ground_truth_trace = display_ground_truth if display_ground_truth is not None else ground_truth_ca
+    if ground_truth_trace is not None:
+        ground_truth_trace = np.asarray(ground_truth_trace, dtype=float)
         fig.add_trace(
             go.Scatter3d(
-                x=ground_truth_ca[:, 0],
-                y=ground_truth_ca[:, 1],
-                z=ground_truth_ca[:, 2],
+                x=ground_truth_trace[:, 0],
+                y=ground_truth_trace[:, 1],
+                z=ground_truth_trace[:, 2],
                 mode="lines+markers",
                 line=dict(color=_PALETTE["ground_truth"], width=4, dash="dash"),
                 marker=dict(size=4, color=_PALETTE["ground_truth"]),
@@ -255,7 +233,6 @@ def plot_structure(
     )
     return fig
 
-
 # ---------------------------------------------------------------------------
 # Energy landscape
 # ---------------------------------------------------------------------------
@@ -265,7 +242,7 @@ def plot_energy_landscape(
     replica_ids: Optional[list[int]] = None,
     clip_range: tuple[float, float] = (-1000.0, 2000.0),
     title: str = "Optimisation Energy Landscape",
-) -> "object":  # plotly.graph_objects.Figure
+) -> go.Figure:
     """Plot energy-vs-evaluation-step traces for selected replicas.
 
     Parameters
@@ -283,6 +260,7 @@ def plot_energy_landscape(
     -------
     :class:`plotly.graph_objects.Figure`
     """
+    go, _ = _require_plotly()
     df = ranking.stats_df
     results = _collect_results(ranking)
     result_map = {r["id"]: r for r in results}
@@ -307,9 +285,9 @@ def plot_energy_landscape(
                 seen_stage_names[sname] = stage_colours[min(idx, len(stage_colours) - 1)]
     stage_colour_map: dict[str, str] = seen_stage_names
 
-    go, _ = _require_plotly()
     fig = go.Figure()
     stage_lines_added: set[str] = set()
+
     for rid in replica_ids:
         result = result_map.get(rid)
         if result is None:
@@ -367,13 +345,251 @@ def plot_energy_landscape(
 
 
 # ---------------------------------------------------------------------------
+# Tracker energy landscape
+# ---------------------------------------------------------------------------
+
+_PHASE_COLOURS = (
+    "#ff6b35",
+    "#4ecdc4",
+    "#a855f7",
+    "#ffd166",
+    "#06d6a0",
+    "#ef476f",
+    "#118ab2",
+    "#f78c6b",
+)
+
+_PHASE_STATUS_COLOURS = {
+    "ok": "#2e7d32",
+    "warning": "#f59e0b",
+    "error": "#d32f2f",
+}
+
+
+def _tracker_markers(tracker) -> list[tuple[int, str]]:
+    markers = getattr(tracker, "phase_markers", None)
+    if markers:
+        return [(int(step), str(name)) for step, name in markers]
+    markers = getattr(tracker, "stage_markers", None) or []
+    return [(int(step), str(name)) for step, name in markers]
+
+
+def _tracker_phase_ranges(markers: list[tuple[int, str]], n_iters: int) -> list[tuple[str, int, int]]:
+    if n_iters <= 0:
+        return [("Optimization", 0, 0)]
+    cleaned = sorted(
+        [(max(0, min(int(step), n_iters - 1)), str(name)) for step, name in markers],
+        key=lambda item: item[0],
+    )
+    if not cleaned:
+        cleaned = [(0, "Optimization")]
+    elif cleaned[0][0] > 0:
+        cleaned.insert(0, (0, "Initialization"))
+
+    ranges = []
+    for idx, (start, name) in enumerate(cleaned):
+        end = cleaned[idx + 1][0] if idx + 1 < len(cleaned) else n_iters
+        if end > start:
+            ranges.append((name, start, end))
+    return ranges or [("Optimization", 0, n_iters)]
+
+
+def _phase_status_category(success, status, message: str | None) -> str:
+    if bool(success):
+        return "ok"
+    status_text = "" if status is None else str(status).strip()
+    message_text = str(message or "").strip().lower()
+    if status_text == "9" or "iteration limit" in message_text:
+        return "warning"
+    if "maximum number of function evaluations" in message_text:
+        return "warning"
+    if "maxiter" in message_text or "maxfun" in message_text:
+        return "warning"
+    return "error"
+
+
+def _phase_metadata_map(phase_results: Optional[list[dict]]) -> tuple[dict, dict]:
+    by_range = {}
+    by_label = {}
+    for phase in phase_results or []:
+        label = str(phase.get("label") or phase.get("name") or "")
+        status = str(
+            phase.get("phase_status")
+            or _phase_status_category(phase.get("success"), phase.get("status"), phase.get("message"))
+        )
+        if status not in _PHASE_STATUS_COLOURS:
+            status = "error"
+        metadata = {
+            "label": label,
+            "optimizer": phase.get("optimizer") or "n/a",
+            "score_model": phase.get("score_model") or "n/a",
+            "status": status,
+            "message": phase.get("phase_status_label") or phase.get("message") or status,
+        }
+        start = phase.get("energy_start_index")
+        end = phase.get("energy_end_index")
+        if start is not None and end is not None:
+            by_range[(int(start), int(end))] = metadata
+        if label:
+            by_label[label] = metadata
+        name = phase.get("name")
+        if name:
+            by_label[str(name)] = metadata
+    return by_range, by_label
+
+
+def _phase_metadata(name: str, start: int, end: int, by_range: dict, by_label: dict) -> dict:
+    return by_range.get((int(start), int(end))) or by_label.get(str(name)) or {
+        "label": str(name),
+        "optimizer": "n/a",
+        "score_model": "n/a",
+        "status": "ok",
+        "message": "ok",
+    }
+
+
+def _needs_signed_log(values: np.ndarray) -> bool:
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return False
+    nonzero = np.abs(finite[finite != 0])
+    if nonzero.size == 0:
+        return False
+    crosses_zero = float(np.min(finite)) < 0 < float(np.max(finite))
+    dynamic_range = float(np.max(nonzero) / max(np.min(nonzero), 1e-12))
+    return crosses_zero or dynamic_range > 1.0e4
+
+
+def _signed_log_transform(values: np.ndarray) -> tuple[np.ndarray, float]:
+    finite = values[np.isfinite(values)]
+    nonzero = np.abs(finite[finite != 0])
+    linthresh = max(1.0, float(np.percentile(nonzero, 10))) if nonzero.size else 1.0
+    return np.sign(values) * np.log10(1.0 + np.abs(values) / linthresh), linthresh
+
+
+def plot_tracker_energy_landscape(
+    tracker,
+    *,
+    sequence: str = "",
+    forcefield: str = "",
+    title: Optional[str] = None,
+    phase_results: Optional[list[dict]] = None,
+    save_path: Optional[str] = None,
+    include_plotlyjs: str | bool = "cdn",
+    full_html: bool = True,
+) -> go.Figure:
+    """Plot a single run's energy trace with phase boundaries.
+
+    This is the per-run companion to :func:`plot_energy_landscape`, which plots
+    ranked ensemble traces.  The tracker may expose either ``phase_markers`` or
+    the package's existing ``stage_markers`` attribute.
+    """
+    go, _ = _require_plotly()
+    history = np.asarray(getattr(tracker, "history", []) or [], dtype=float)
+    markers = _tracker_markers(tracker)
+    phase_ranges = _tracker_phase_ranges(markers, len(history))
+    by_range, by_label = _phase_metadata_map(phase_results)
+
+    fig = go.Figure()
+    if history.size == 0:
+        fig.add_annotation(
+            text="No energy evaluations recorded",
+            xref="paper",
+            yref="paper",
+            x=0.5,
+            y=0.5,
+            showarrow=False,
+        )
+        y_values = history
+        y_title = "Energy (a.u.)"
+    else:
+        if _needs_signed_log(history):
+            y_values, linthresh = _signed_log_transform(history)
+            y_title = f"Signed log energy (linthresh={linthresh:.3g})"
+        else:
+            y_values = history
+            y_title = "Energy (a.u.)"
+
+        for idx, (name, start, end) in enumerate(phase_ranges):
+            meta = _phase_metadata(name, start, end, by_range, by_label)
+            colour = _PHASE_COLOURS[idx % len(_PHASE_COLOURS)]
+            status_colour = _PHASE_STATUS_COLOURS.get(meta["status"], _PHASE_STATUS_COLOURS["error"])
+            x_segment = list(range(start, end))
+            y_segment = y_values[start:end]
+            raw_segment = history[start:end]
+            phase_label = meta.get("label") or name
+            hover = [
+                (
+                    f"<b>{phase_label}</b><br>"
+                    f"Evaluation: {x}<br>"
+                    f"Energy: {raw:.6g}<br>"
+                    f"Optimizer: {meta['optimizer']}<br>"
+                    f"Score: {meta['score_model']}<br>"
+                    f"Status: {meta['message']}"
+                    "<extra></extra>"
+                )
+                for x, raw in zip(x_segment, raw_segment)
+            ]
+            fig.add_trace(
+                go.Scatter(
+                    x=x_segment,
+                    y=y_segment,
+                    mode="lines",
+                    line=dict(color=colour, width=2.5),
+                    name=str(phase_label),
+                    hovertemplate=hover,
+                )
+            )
+            if start > 0:
+                fig.add_vline(x=start, line=dict(color=colour, width=1, dash="dash"))
+            if meta["status"] != "ok":
+                fig.add_vrect(
+                    x0=start,
+                    x1=max(start + 1, end),
+                    fillcolor=status_colour,
+                    opacity=0.08,
+                    line_width=0,
+                )
+                fig.add_annotation(
+                    x=start,
+                    y=y_segment[-1] if len(y_segment) else 0,
+                    text=meta["status"].upper(),
+                    showarrow=True,
+                    arrowcolor=status_colour,
+                    font=dict(color=status_colour),
+                )
+
+    if title is None:
+        parts = ["Optimization Energy Landscape"]
+        if sequence:
+            parts.append(sequence)
+        if forcefield:
+            parts.append(str(forcefield).upper())
+        title = " | ".join(parts)
+
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=16)),
+        xaxis_title="Function Evaluations",
+        yaxis_title=y_title,
+        legend=dict(itemsizing="constant"),
+        template="plotly_white",
+        height=560,
+    )
+    if save_path is not None:
+        import plotly.io as pio
+
+        pio.write_html(fig, file=str(save_path), include_plotlyjs=include_plotlyjs, full_html=full_html)
+    return fig
+
+
+# ---------------------------------------------------------------------------
 # Ranking visualisation
 # ---------------------------------------------------------------------------
 
 def plot_ranking(
     ranking,
     title: str = "Ensemble Ranking",
-) -> "object":  # plotly.graph_objects.Figure
+) -> go.Figure:
     """Interactive two-panel figure: ranking bar chart + statistics table.
 
     Parameters
@@ -387,10 +603,10 @@ def plot_ranking(
     -------
     :class:`plotly.graph_objects.Figure`
     """
+    go, make_subplots = _require_plotly()
     df = ranking.stats_df.copy()
     has_gt = not df["rmsd_vs_gt"].isna().all()
 
-    go, make_subplots = _require_plotly()
     fig = make_subplots(
         rows=2, cols=1,
         row_heights=[0.55, 0.45],

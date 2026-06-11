@@ -17,7 +17,7 @@ from qtf.utils import gromacs as qtf_gromacs
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
-        prog="qtf-relax",
+        prog="qtf relax",
         description="Energy-minimize a PDB structure using GROMACS."
     )
     ap.add_argument("--input_pdb", required=True, help="Path to input PDB file")

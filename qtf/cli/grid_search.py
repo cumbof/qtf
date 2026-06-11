@@ -91,7 +91,7 @@ def write_run_settings(path: Path, settings: Dict[str, str | float]) -> None:
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
-        prog="qtf-grid-search",
+        prog="qtf grid-search",
         description="Run grid search over energy scale parameters for peptide panels."
     )
     ap.add_argument("--panel_csv", default=DEFAULT_PANEL_CSV)

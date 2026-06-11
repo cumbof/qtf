@@ -1,0 +1,604 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qtf.local/schemas/fold-recipes.schema.json",
+  "title": "QTF Fold Recipes",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["recipes"],
+  "properties": {
+    "recipes": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": ["string", "null"]
+          },
+          "fold": {
+            "type": "object",
+            "properties": {
+              "description": {
+                "type": ["string", "null"]
+              }
+            },
+            "additionalProperties": true
+          },
+          "geometry": {
+            "type": "object",
+            "properties": {
+              "description": {
+                "type": ["string", "null"]
+              },
+              "stored_angles": {},
+              "stored_lengths": {},
+              "geometry_mode": {
+                "type": ["string", "null"]
+              },
+              "geometry_table": {
+                "type": ["string", "null"]
+              },
+              "geometry_profile": {
+                "type": ["string", "null"]
+              },
+              "length_encoding_scope": {
+                "type": ["string", "null"],
+                "enum": ["shared-by-type", "per-residue", null]
+              },
+              "backbone_length_span": {
+                "type": ["number", "null"],
+                "exclusiveMinimum": 0
+              },
+              "sidechain_length_span": {
+                "type": ["number", "null"],
+                "exclusiveMinimum": 0
+              },
+              "max_chi": {
+                "type": ["integer", "string", "null"],
+                "minimum": 0
+              },
+              "selective_chi_map": {
+                "type": ["object", "null"],
+                "additionalProperties": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            },
+            "not": {
+              "required": ["chi_mode"]
+            },
+            "additionalProperties": true
+          },
+          "metrics": {
+            "type": "object",
+            "properties": {
+              "description": {
+                "type": ["string", "null"]
+              },
+              "atom_sets": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                ]
+              },
+              "rmsd_alignment_atom_set": {
+                "type": ["string", "null"]
+              }
+            },
+            "additionalProperties": true
+          },
+          "report": {
+            "type": "object",
+            "properties": {
+              "description": {
+                "type": ["string", "null"]
+              },
+              "structure_domain": {
+                "type": ["string", "null"],
+                "enum": ["protein-heavy", "all-heavy", "full", null]
+              }
+            },
+            "additionalProperties": true
+          },
+          "basis_circuit_batching": {
+            "type": ["string", "null"]
+          },
+          "transpile": {
+            "type": "object",
+            "properties": {
+              "description": {
+                "type": ["string", "null"]
+              },
+              "optimization_level": {
+                "type": ["integer", "string", "null"]
+              },
+              "seed": {
+                "type": ["integer", "string", "null"],
+                "minimum": 0
+              },
+              "gate_estimate_optimization_levels": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": ["integer", "string"]
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "gate_estimate_seed": {
+                "type": ["integer", "string", "null"],
+                "minimum": 0
+              },
+              "gate_estimate_transpile_seed": {
+                "type": ["integer", "string", "null"],
+                "minimum": 0
+              }
+            },
+            "additionalProperties": true
+          },
+          "circuit_template": {
+            "type": "object",
+            "properties": {
+              "description": {
+                "type": ["string", "null"]
+              },
+              "source": {
+                "type": "string",
+                "enum": ["qiskit-library", "qtf"]
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "options": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            },
+            "required": ["name"],
+            "additionalProperties": true
+          },
+          "circuit": {
+            "type": "object",
+            "properties": {
+              "description": {
+                "type": ["string", "null"]
+              },
+              "source": {
+                "type": "string",
+                "enum": ["qpy", "qasm2", "qasm3"]
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "index": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": ["source", "path"],
+            "additionalProperties": true
+          },
+          "scouting": {
+            "type": "object",
+            "properties": {
+              "description": {
+                "type": ["string", "null"]
+              }
+            },
+            "additionalProperties": true
+          },
+          "result": {
+            "type": "object",
+            "properties": {
+              "description": {
+                "type": ["string", "null"]
+              }
+            },
+            "additionalProperties": true
+          },
+          "phases": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "properties": {
+                "description": {
+                  "type": ["string", "null"]
+                },
+                "geometry": {
+                  "type": "object",
+                  "properties": {
+                    "description": {
+                      "type": ["string", "null"]
+                    },
+                    "stored_angles": {},
+                    "stored_lengths": {},
+                    "length_encoding_scope": {
+                      "type": ["string", "null"],
+                      "enum": ["shared-by-type", "per-residue", null]
+                    },
+                    "backbone_length_span": {
+                      "type": ["number", "null"],
+                      "exclusiveMinimum": 0
+                    },
+                    "sidechain_length_span": {
+                      "type": ["number", "null"],
+                      "exclusiveMinimum": 0
+                    },
+                    "max_chi": {
+                      "type": ["integer", "string", "null"],
+                      "minimum": 0
+                    },
+                    "selective_chi_map": {
+                      "type": ["object", "null"],
+                      "additionalProperties": {
+                        "oneOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "additionalProperties": true
+                },
+                "handoff_guard": {
+                  "type": "object",
+                  "properties": {
+                    "description": {
+                      "type": ["string", "null"]
+                    },
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "fallback": {
+                      "type": "string"
+                    },
+                    "abort_on_reject": {
+                      "type": "boolean"
+                    },
+                    "allow_improving_unsafe": {
+                      "type": "boolean"
+                    },
+                    "max_clash_count": {
+                      "type": ["integer", "null"],
+                      "minimum": 0
+                    },
+                    "max_short_contact_count": {
+                      "type": ["integer", "null"],
+                      "minimum": 0
+                    },
+                    "min_nonlocal_distance_a": {
+                      "type": ["number", "null"],
+                      "exclusiveMinimum": 0
+                    },
+                    "unsafe_transition_max_short_contact_count": {
+                      "type": ["integer", "null"],
+                      "minimum": 0
+                    },
+                    "unsafe_transition_min_nonlocal_distance_a": {
+                      "type": ["number", "null"],
+                      "exclusiveMinimum": 0
+                    },
+                    "unsafe_transition_require_clash_count_decrease": {
+                      "type": "boolean"
+                    },
+                    "reject_on_score_worse": {
+                      "type": "boolean"
+                    },
+                    "reject_on_clash_count_increase": {
+                      "type": "boolean"
+                    },
+                    "reject_on_short_contact_count_increase": {
+                      "type": "boolean"
+                    },
+                    "reject_on_min_nonlocal_distance_decrease": {
+                      "type": "boolean"
+                    },
+                    "reject_on_nonfinite": {
+                      "type": "boolean"
+                    }
+                  },
+                  "additionalProperties": true
+                }
+              },
+              "additionalProperties": true
+            }
+          },
+          "readouts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "description": {
+                  "type": ["string", "null"]
+                }
+              },
+              "additionalProperties": true
+            }
+          },
+          "evaluators": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "description": {
+                  "type": ["string", "null"]
+                },
+                "score_model": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "required": {
+                  "type": "boolean"
+                },
+                "options": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "required": ["score_model"],
+              "additionalProperties": true
+            }
+          },
+          "phase_comparisons": {
+            "type": "object",
+            "properties": {
+              "description": {
+                "type": ["string", "null"]
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "evaluators": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                ]
+              },
+              "compare": {
+                "type": "string"
+              },
+              "affect_selection": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": true
+          },
+          "reranking": {
+            "type": "object",
+            "properties": {
+              "description": {
+                "type": ["string", "null"]
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "evaluator": {
+                "type": ["string", "null"]
+              },
+              "triggers": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "candidate_pool": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "apply": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          },
+          "phase_readiness": {
+            "type": "object",
+            "properties": {
+              "description": {
+                "type": ["string", "null"]
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "evaluator": {
+                "type": ["string", "null"]
+              },
+              "phases": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                ]
+              },
+              "on_fail": {
+                "type": "string",
+                "enum": ["continue", "skip_phase"]
+              },
+              "max_clash_count": {
+                "type": ["integer", "null"],
+                "minimum": 0
+              },
+              "max_short_contact_count": {
+                "type": ["integer", "null"],
+                "minimum": 0
+              },
+              "min_nonlocal_distance_a": {
+                "type": ["number", "null"],
+                "exclusiveMinimum": 0
+              }
+            },
+            "additionalProperties": true
+          },
+          "handoff_guard": {
+            "type": "object",
+            "properties": {
+              "description": {
+                "type": ["string", "null"]
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "evaluator": {
+                "type": ["string", "null"]
+              },
+              "phases": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                ]
+              },
+              "fallback": {
+                "type": "string"
+              },
+              "abort_on_reject": {
+                "type": "boolean"
+              },
+              "allow_improving_unsafe": {
+                "type": "boolean"
+              },
+              "max_clash_count": {
+                "type": ["integer", "null"],
+                "minimum": 0
+              },
+              "max_short_contact_count": {
+                "type": ["integer", "null"],
+                "minimum": 0
+              },
+              "min_nonlocal_distance_a": {
+                "type": ["number", "null"],
+                "exclusiveMinimum": 0
+              },
+              "unsafe_transition_max_short_contact_count": {
+                "type": ["integer", "null"],
+                "minimum": 0
+              },
+              "unsafe_transition_min_nonlocal_distance_a": {
+                "type": ["number", "null"],
+                "exclusiveMinimum": 0
+              },
+              "unsafe_transition_require_clash_count_decrease": {
+                "type": "boolean"
+              },
+              "reject_on_score_worse": {
+                "type": "boolean"
+              },
+              "reject_on_clash_count_increase": {
+                "type": "boolean"
+              },
+              "reject_on_short_contact_count_increase": {
+                "type": "boolean"
+              },
+              "reject_on_min_nonlocal_distance_decrease": {
+                "type": "boolean"
+              },
+              "reject_on_nonfinite": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": true
+          },
+          "validation": {
+            "type": "object",
+            "properties": {
+              "description": {
+                "type": ["string", "null"]
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "candidates": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                ]
+              },
+              "evaluators": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                ]
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  }
+}

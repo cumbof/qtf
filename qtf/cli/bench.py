@@ -21,7 +21,6 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Any
 from pathlib import Path
 
-import mdtraj as md
 import numpy as np
 import pandas as pd
 
@@ -34,10 +33,25 @@ from qtf.utils.workflow import (
     nonlocal_heavy_clash_metrics,
     pdb_id_from_path,
 )
-from qtf.cli.fold import _jsonify
 
 
 
+
+
+def _jsonify(x):
+    try:
+        import numpy as _np
+        if isinstance(x, (_np.floating, _np.integer)):
+            return x.item()
+        if isinstance(x, _np.ndarray):
+            return x.tolist()
+    except Exception:
+        pass
+    if isinstance(x, dict):
+        return {str(k): _jsonify(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [_jsonify(v) for v in x]
+    return x
 
 
 def deg(vals):
@@ -45,6 +59,10 @@ def deg(vals):
 
 
 def load_reference_ca_coords(pdb_path: str) -> np.ndarray:
+    try:
+        import mdtraj as md
+    except ImportError as exc:
+        raise RuntimeError("qtf bench requires mdtraj; install qtf[workflows] or mdtraj.") from exc
     traj = md.load(pdb_path)
     ca_idx = traj.topology.select("name CA")
     if ca_idx is None or len(ca_idx) == 0:
@@ -209,7 +227,7 @@ def dedup_states_by_backbone(
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
-        prog="qtf-bench",
+        prog="qtf bench",
         description="Run exhaustive beam-search benchmark for QTF energy function."
     )
     ap.add_argument("--sequence", required=True)

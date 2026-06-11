@@ -18,7 +18,7 @@ from qtf.utils import workflow as utils
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
-        prog="qtf-eval",
+        prog="qtf eval",
         description="Score experimental/native structures with the QTF energy function."
     )
     ap.add_argument("--panel", help="JSON or CSV with columns/name,pdb_path,chain,residue_start,residue_end")

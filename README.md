@@ -40,7 +40,7 @@
 14. [API Reference](#api-reference)
 15. [Reproducibility](#reproducibility)
 16. [Logging](#logging)
-17. [Credits](#credits)
+17. [References](#references)
 18. [License](#license)
 
 ---
@@ -127,11 +127,7 @@ qtf/
    └── gromacs.py              GROMACS minimisation bridge (optional)
 
  cli/
-   ├── fold.py                 qtf-fold: quantum folding prediction
-   ├── bench.py                qtf-bench: beam-search benchmark
-   ├── eval.py                 qtf-eval: score experimental structures
-   ├── grid_search.py          qtf-grid-search: parameter grid sweep
-   └── relax.py                qtf-relax: GROMACS relaxation
+   └── __init__.py             qtf fold: canonical recipe-driven folding command
 ```
 
 ---
@@ -161,12 +157,12 @@ Optional extras:
 >
 > QTF's default `custom` energy backend works out of the box — no additional dependencies required.
 >
-> **PyRosetta** (`energy_backend="rosetta"`) is not available directly on PyPI. Install it manually with:
-> ```bash
-> pip install pyrosetta --find-links https://west.rosettacommons.org/pyrosetta/quarterly/release
-> ```
->
-> **GROMACS** (used by `qtf-relax` and `gromacs_postprocess_structure()`) must be installed at the system level. See the [GROMACS download page](https://www.gromacs.org/downloads) for platform-specific instructions.
+> - External physics engines are configured in fold recipes through PHEAT scorer/evaluator options.
+> - **OpenMM** is optional and should be installed via conda-forge when using OpenMM-backed PHEAT evaluators:
+>   ```bash
+>   conda install -c conda-forge openmm
+>   ```
+> - **GROMACS** (used by PHEAT external validation recipes and `gromacs_postprocess_structure()`) must be installed at the system level. See the [GROMACS download page](https://www.gromacs.org/downloads) for platform-specific instructions.
 
 ---
 
@@ -181,7 +177,7 @@ pip install qtf
 **Editable install from source (for development or contribution):**
 
 ```bash
-git clone https://github.com/cumbof/qtf.git
+git clone https://github.com/cumbof/QTF.git
 cd QTF
 pip install -e ".[dev]"
 ```
@@ -192,91 +188,37 @@ pip install -e ".[dev]"
 
 ## CLI
 
-Six command-line tools are installed automatically with `pip install qtf`:
+QTF installs one canonical command, `qtf`.
 
-### `qtf-run` — Unified dispatcher
-
-All subcommands are also accessible via a single unified entry point:
+### `qtf fold` — recipe-driven folding
 
 ```bash
-qtf-run fold --predict YYDPETGTWY --ensemble_size 5
-qtf-run bench --sequence YYDPETGTWY --beam_width 1000
-qtf-run eval --name 5AWL --pdb_path 5AWL.pdb --out_csv scores.csv
-qtf-run grid-search --panel_csv protein_panel.csv --outsubdir run1 --window_deg 30
-qtf-run relax --input_pdb structure.pdb --forcefield amber99sb-ildn
+qtf fold qtf-main-equivalent \
+  --sequence YYDPETGTWY \
+  --reference-structure pdb/5AWL.pdb \
+  --outdir outputs/example_fold
 ```
 
-| Subcommand | Delegates to |
-|------------|-------------|
-| `fold` | `qtf-fold` |
-| `bench` | `qtf-bench` |
-| `eval` | `qtf-eval` |
-| `grid-search` | `qtf-grid-search` |
-| `relax` | `qtf-relax` |
+Omitting `--backend` uses exact local statevector extraction. Pass a backend such
+as `aer`, `statevector-shots`, or an IBM backend name only when you want sampled
+backend execution.
 
-### `qtf-fold` — Quantum folding prediction
+Useful discovery commands:
 
 ```bash
-qtf-fold --predict YYDPETGTWY --ensemble_size 5
+qtf fold --list-recipes
+qtf fold --show-recipe qtf-main-equivalent
 ```
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--predict SEQ` | required | Target amino acid sequence |
-| `--ensemble_size N` | `3` | Number of independent replicas |
-| `--maxiter N` | `2000` | Max optimiser iterations per stage |
-| `--prime_strategy` | `Random` | `Random` \| `Helix` \| `Sheet` \| `mixed` |
-| `--reference_structure PDB_ID` | None | RCSB PDB ID for RMSD comparison |
-| `--reference_pdb PATH` | None | Local PDB file for RMSD comparison |
-| `--rmsd_mode` | `ca` | `ca` (Cα only) \| `heavy` (all heavy atoms) |
-| `--rmsd_residue_scope` | `core` | `core` \| `all` |
-| `--top_k N` | `1` | Save and compare the N lowest-energy models |
-| `--top_frac F` | None | Save top fraction F of models (overrides `--top_k`) |
-| `--top_k_snapshots N` | `0` | Save the N lowest-energy intermediate structures encountered during optimisation (0 = disabled) |
-| `--energy_backend` | `custom` | `custom` \| `rosetta` \| `openmm` |
-| `--mode` | `predict_and_compare` | `predict_and_compare` \| `predict_only` |
+`qtf fold` runs named YAML recipes. The built-in main-equivalent recipe uses
+PHEAT geometry/scoring through the native `pheat-coarse-protein-folding-v1` scorer and reports
+RMSD only when a reference structure is provided.
 
-Outputs written to `<output_root>/<SEQUENCE>_<FF>_<TIMESTAMP>/`:
-per-model PDBs, `ensemble_ranked.csv`/`.json`, `summary_results.csv`/`.json`.
+### External validation
 
-### `qtf-bench` — Beam-search benchmark
+AmberTools, OpenMM, and GROMACS are accessed through PHEAT scorer/evaluator
+configuration inside fold recipes, not through separate QTF commands.
 
-Exhaustive discrete search over Ramachandran-basin grids + chi rotamers.
-
-```bash
-qtf-bench --sequence YYDPETGTWY --beam_width 1000 --outdir ./bench
-```
-
-Key flags: `--sequence`, `--beam_width`, `--window_deg`, `--step_deg`,
-`--chi_mode`, `--max_sidechain_opts_per_residue`, `--reference_pdb`, `--outdir`.
-
-### `qtf-eval` — Score experimental structures
-
-Score native PDB structures with the QTF energy function.
-
-```bash
-qtf-eval --name 5AWL --pdb_path 5AWL.pdb --out_csv scores.csv
-```
-
-Supports `--panel` (batch via JSON/CSV) and single-structure mode (`--name`
-+ `--pdb_path`).
-
-### `qtf-grid-search` — Parameter grid sweep
-
-Cartesian-product scan over energy-scale parameters for peptide panels.
-
-```bash
-qtf-grid-search --panel_csv protein_panel.csv --grid_json params.json \
-  --outsubdir run1 --window_deg 30 --step_deg 15
-```
-
-### `qtf-relax` — GROMACS relaxation
-
-Energy-minimise a PDB structure with GROMACS.
-
-```bash
-qtf-relax --input_pdb structure.pdb --forcefield amber99sb-ildn
-```
 
 ---
 
@@ -484,7 +426,7 @@ E_constraint = λ · deviation²
 ```
 
 `λ` = 50.0 in Stages 1–2, 5.0 in Stage 3 (released to let the protein explore freely).
-The constraint can be disabled at construction time with `use_e2e_constraint=False`.
+End-to-end behavior is configured through recipe score options.
 
 #### 2. Implicit Solvent / Hydrophobic Effect (SASA Approximation)
 
@@ -984,7 +926,7 @@ print(f"Radius of gyration  : {rg:.2f} Å")
 ## API Reference
 
 The full auto-generated API reference is available at
-**[https://cumbof.github.io/qtf/api](https://cumbof.github.io/qtf/api)**
+**[https://cumbof.github.io/QTF/api](https://cumbof.github.io/QTF/api)**
 or locally by building the docs:
 
 ```bash
@@ -1034,7 +976,7 @@ To isolate the effect of energy backend on folding outcome:
 
 ```python
 for backend in ("custom", "rosetta", "openmm"):
-    folder = QuantumBiophysicsFolder("YYDPETGTWY", energy_backend=backend)
+    folder = QuantumBiophysicsFolder("YYDPETGTWY")
     manager = EnsembleFoldingManager(folder)
     manager.run_ensemble(n_runs=5, max_iter=2000, scout_attempts=50)
     # All three runs start from the same initial geometries,
@@ -1086,18 +1028,36 @@ logging.getLogger("qtf.core.ensemble").setLevel(logging.INFO)
 
 ---
 
-## Credits
+## References
 
-If you use QTF in your research, please cite the following study:
+1. **Hydrophobicity Scale**:
+   Kyte, J., & Doolittle, R. F. (1982). A simple method for displaying the hydropathic character of a protein. *Journal of Molecular Biology*, 157(1), 105–132. https://doi.org/10.1016/0022-2836(82)90515-0
 
-```bibtex
-@article{Cumbo2026quantum,
-    author  = {Cumbo, Fabio and Raubenolt, Bryan and Puram, Varun and Joshi, Jayadev and Blankenberg, Daniel},
-    title   = {Logarithmic-scale variational quantum eigensolver for torsion-space off-lattice protein structure prediction},
-    journal = {arXiv preprint},
-    year    = {2026}
-}
-```
+2. **AMBER Force Field**:
+
+5. **van der Waals Radii**:
+   Bondi, A. (1964). van der Waals volumes and radii. *Journal of Physical Chemistry*, 68(3), 441–451. https://doi.org/10.1021/j100785a001
+
+6. **Bond and Angle Parameters**:
+   Engh, R. A., & Huber, R. (1991). Accurate bond and angle parameters for X-ray protein structure refinement. *Acta Crystallographica Section A*, 47(4), 392–400. https://doi.org/10.1107/S0108767391001071
+
+7. **NERF Algorithm**:
+   Parsons, J., Holmes, J. B., Rojas, J. M., Tsai, J., & Strauss, C. E. M. (2005). Practical conversion from torsion space to Cartesian space for in silico protein synthesis. *Journal of Computational Chemistry*, 26(10), 1063–1068. https://doi.org/10.1002/jcc.20237
+
+8. **Kabsch Algorithm**:
+   Kabsch, W. (1978). A discussion of the solution for the best rotation to relate two sets of vectors. *Acta Crystallographica Section A*, 34(5), 827–828. https://doi.org/10.1107/S0567739478001680
+
+9. **EfficientSU2 Ansatz / VQE**:
+   Kandala, A., et al. (2017). Hardware-efficient variational quantum eigensolver for small molecules and quantum magnets. *Nature*, 549, 242–246. https://doi.org/10.1038/nature23879
+
+10. **Ramachandran Plot**:
+    Ramachandran, G. N., Ramakrishnan, C., & Sasisekharan, V. (1963). Stereochemistry of polypeptide chain configurations. *Journal of Molecular Biology*, 7(1), 95–99. https://doi.org/10.1016/S0022-2836(63)80023-6
+
+11. **COBYLA Optimiser**:
+    Powell, M. J. D. (1994). A direct search optimization method that models the objective and constraint functions by linear interpolation. In *Advances in Optimization and Numerical Analysis* (pp. 51–67). Kluwer Academic Publishers.
+
+12. **SLSQP Optimiser**:
+    Kraft, D. (1988). *A software package for sequential quadratic programming*. DFVLR-FB 88-28, Deutsche Forschungs- und Versuchsanstalt für Luft- und Raumfahrt.
 
 ---
 

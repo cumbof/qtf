@@ -3,7 +3,7 @@
 A hybrid quantum-classical protein structure prediction package built on
 Qiskit's parameterised quantum circuits and a physics-based energy critic.
 
-Use ``qtf-run --help`` for the CLI entry point, and install optional workflow
+Use ``qtf --help`` for the CLI entry point, and install optional workflow
 dependencies with ``pip install "qtf[workflows]"``.
 
 Quick start
@@ -36,4 +36,4 @@ __all__ = [
     "LandscapeTracker",
 ]
 
-__version__ = "0.4.3"
+__version__ = "0.4.4"
