@@ -88,6 +88,8 @@ def main(argv=None):
                         help='1 to rerank final minimized outputs by GROMACS potential energy when available')
     parser.add_argument('--output_root', default=os.path.join("run_outputs", "quantum_simulations"),
                         help='root directory for predictor outputs')
+    parser.add_argument('--top_k_snapshots', default=0, type=int,
+                        help='save the K lowest-energy intermediate structures encountered during optimisation (0 = disabled)')
 
     args = parser.parse_args(argv)
     if args.gromacs_minimize is None:
@@ -125,7 +127,8 @@ def main(argv=None):
     )
 
     manager = EnsembleFoldingManager(folder)
-    manager.run_ensemble(n_runs=ensemble_size, max_iter=args.maxiter, prime_strategy=prime_strategy)
+    manager.run_ensemble(n_runs=ensemble_size, max_iter=args.maxiter, prime_strategy=prime_strategy,
+                         top_k_snapshots=args.top_k_snapshots)
 
     ranked_results = manager.get_results(ranked=True)
     selected_results = manager.select_top(top_k=top_k, top_frac=top_frac)
@@ -178,6 +181,22 @@ def main(argv=None):
             remarks=["QTF heavy-atom rebuilt structure from optimized ensemble model"],
             include_hydrogens=False,
         )
+
+        # Save best-K intermediate snapshots if available
+        snapshots = res.get("best_snapshots", [])
+        if snapshots:
+            snap_dir = os.path.join(job_output_dir, "raw_pdbs", "snapshots", f"model_{rank}")
+            os.makedirs(snap_dir, exist_ok=True)
+            for si, snap in enumerate(snapshots, start=1):
+                snap_pdb = os.path.join(snap_dir, f"snapshot_{si}.pdb")
+                folder.save_pdb(
+                    snap["coords"],
+                    snap["labels"],
+                    filename=snap_pdb,
+                    energy=snap["energy"],
+                    remarks=[f"Best snapshot #{si} during optimisation (E={snap['energy']:.4f})"],
+                    include_hydrogens=False,
+                )
 
         if true_rmsd_coords is not None:
             raw_rmsd, raw_rmsd_meta = utils.rmsd_between_structures(

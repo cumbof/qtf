@@ -84,6 +84,7 @@ def _run_one_replica(
     strat: str,
     max_iter: int,
     scout_attempts: int,
+    top_k_snapshots: int = 0,
 ) -> dict:
     """Execute a single folding replica in a subprocess.
 
@@ -99,8 +100,8 @@ def _run_one_replica(
             n_attempts=scout_attempts, seed=replica_seed
         )
 
-    coords, labels, bonds, tracker, final_params, final_energy = folder.fold(
-        max_iter=max_iter, initial_params=start_params
+    coords, labels, bonds, tracker, final_params, final_energy, best_snapshots = folder.fold(
+        max_iter=max_iter, initial_params=start_params, top_k_snapshots=top_k_snapshots,
     )
 
     energy_terms = dict(getattr(folder, "last_energy_terms", {}) or {})
@@ -116,6 +117,7 @@ def _run_one_replica(
         "bonds": bonds,
         "params": final_params,
         "tracker": tracker,
+        "best_snapshots": best_snapshots,
     }
 
 
@@ -220,6 +222,7 @@ class EnsembleFoldingManager:
         prime_strategy: str = "random",
         checkpoint_path: str | None = None,
         max_workers: int = 1,
+        top_k_snapshots: int = 0,
     ) -> None:
         """Run *n_runs* independent folding trajectories in parallel.
 
@@ -310,10 +313,12 @@ class EnsembleFoldingManager:
         if n_workers <= 1:
             self._run_sequential(
                 tasks, folder_kwargs, max_iter, scout_attempts, n_runs,
+                top_k_snapshots=top_k_snapshots,
             )
         else:
             self._run_parallel(
                 tasks, folder_kwargs, max_iter, scout_attempts, n_runs, n_workers,
+                top_k_snapshots=top_k_snapshots,
             )
 
         # Restore deterministic insertion order (by replica id)
@@ -330,6 +335,7 @@ class EnsembleFoldingManager:
         max_iter: int,
         scout_attempts: int,
         n_runs: int,
+        top_k_snapshots: int = 0,
     ) -> None:
         """Run replicas in-process using ``self.folder`` (no subprocess).
 
@@ -350,9 +356,10 @@ class EnsembleFoldingManager:
                         n_attempts=scout_attempts, seed=replica_seed,
                     )
 
-                coords, labels, bonds, tracker, final_params, final_energy = (
+                coords, labels, bonds, tracker, final_params, final_energy, best_snapshots = (
                     self.folder.fold(
                         max_iter=max_iter, initial_params=start_params,
+                        top_k_snapshots=top_k_snapshots,
                     )
                 )
             except (KeyboardInterrupt, SystemExit):
@@ -387,6 +394,7 @@ class EnsembleFoldingManager:
                     "bonds": bonds,
                     "params": final_params,
                     "tracker": tracker,
+                    "best_snapshots": best_snapshots,
                 }
             )
             self._write_checkpoint()
@@ -403,6 +411,7 @@ class EnsembleFoldingManager:
         scout_attempts: int,
         n_runs: int,
         n_workers: int,
+        top_k_snapshots: int = 0,
     ) -> None:
         """Distribute replicas across *n_workers* subprocesses."""
         from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -419,6 +428,7 @@ class EnsembleFoldingManager:
                     strat,
                     max_iter,
                     scout_attempts,
+                    top_k_snapshots,
                 )
                 fut_to_idx[fut] = i
 

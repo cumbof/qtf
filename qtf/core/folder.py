@@ -21,6 +21,7 @@ References
 from __future__ import annotations
 
 import hashlib
+import heapq
 import logging
 import os
 import tempfile
@@ -1900,12 +1901,51 @@ class QuantumBiophysicsFolder:
     # Folding
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Best-snapshot tracker
+    # ------------------------------------------------------------------
+
+    def _build_best_k_tracker(self, k: int):
+        """Return a wrapper that records the *k* lowest-energy parameter vectors.
+
+        Usage inside ``fold()``::
+
+            tracker = self._build_best_k_tracker(top_k_snapshots)
+            obj = tracker if tracker is not None else self.energy_function
+            minimize(obj, ...)
+            ...
+            best = tracker.best_snapshots if tracker is not None else []
+        """
+        if k <= 0:
+            return None
+
+        _heap: list[tuple[float, int, np.ndarray]] = []
+        _counter: int = 0
+
+        def _tracker(params: np.ndarray, **kwargs) -> float:
+            nonlocal _counter
+            value = self.energy_function(params, **kwargs)
+            if not kwargs.get("return_terms"):
+                if len(_heap) < k:
+                    heapq.heappush(_heap, (-value, _counter, params.copy()))
+                    _counter += 1
+                elif -value > _heap[0][0]:
+                    heapq.heappop(_heap)
+                    heapq.heappush(_heap, (-value, _counter, params.copy()))
+                    _counter += 1
+            return value
+
+        _tracker._heap = _heap
+        return _tracker
+        return _tracker
+
     def fold(
         self,
         max_iter: int = 2000,
         initial_params: np.ndarray | None = None,
         scout_attempts: int | None = None,
-    ) -> tuple[np.ndarray, list, list, LandscapeTracker, np.ndarray, float]:
+        top_k_snapshots: int = 0,
+    ) -> tuple[np.ndarray, list, list, LandscapeTracker, np.ndarray, float, list]:
         """Run the three-stage optimisation curriculum.
 
         Parameters
@@ -1935,7 +1975,21 @@ class QuantumBiophysicsFolder:
 
         Returns
         -------
-        coords, labels, bonds, tracker, final_params, final_energy
+        coords, labels, bonds, tracker, final_params, final_energy, best_snapshots
+            The first six elements are the same as before.  The seventh
+            element is a list of dicts (empty when *top_k_snapshots* <= 0)::
+
+                [
+                    {
+                        "energy": float,
+                        "coords": ndarray,
+                        "labels": list,
+                        "bonds": list,
+                    },
+                    ...
+                ]
+
+            sorted by ascending energy (lowest first).
         """
         logger.info("Starting quantum folding (max_iter=%d)", max_iter)
         self.tracker = LandscapeTracker()
@@ -1946,6 +2000,10 @@ class QuantumBiophysicsFolder:
             init_params = self.get_smart_initialization(n_attempts=n_scout)
         else:
             init_params = initial_params
+
+        # Wrap the objective function when tracking best snapshots
+        best_tracker = self._build_best_k_tracker(top_k_snapshots)
+        obj_fn = best_tracker if best_tracker is not None else self.energy_function
 
         logger.info("Stage 1: Mechanical Collapse (high force)…")
         self.tracker.mark_stage("Stage1")
@@ -1959,23 +2017,38 @@ class QuantumBiophysicsFolder:
         # wondering whether the run is broken. Enforce the floor
         # explicitly so the warning is structurally impossible.
         safe_maxiter = max(int(max_iter), int(self.n_params) + 2)
-        res_1 = minimize(self.energy_function, init_params, method="COBYLA",
+        res_1 = minimize(obj_fn, init_params, method="COBYLA",
                          options={"maxiter": safe_maxiter, "rhobeg": 1.0})
         logger.info("  Collapse energy: %.2f", res_1.fun)
 
         logger.info("Stage 2: Physics Refinement (high force)…")
         self.tracker.mark_stage("Stage2")
         self.current_stage = 2
-        res_2 = minimize(self.energy_function, res_1.x, method="SLSQP",
+        res_2 = minimize(obj_fn, res_1.x, method="SLSQP",
                          tol=1e-6, options={"maxiter": max_iter, "disp": False})
         logger.info("  Refinement energy: %.2f", res_2.fun)
 
         logger.info("Stage 3: Natural Relaxation (releasing constraints)…")
         self.tracker.mark_stage("Stage3")
         self.current_stage = 3
-        res_3 = minimize(self.energy_function, res_2.x, method="SLSQP",
+        res_3 = minimize(obj_fn, res_2.x, method="SLSQP",
                          tol=1e-6, options={"maxiter": max_iter, "disp": False})
         logger.info("  Final energy: %.2f", res_3.fun)
+
+        # Rebuild best-K snapshots (if requested) before the final output
+        # rebuild so that last_energy_terms is still valid for the final
+        # result.
+        best_snapshots: list[dict] = []
+        if best_tracker is not None:
+            for neg_val, _, params in sorted(best_tracker._heap, key=lambda x: -x[0]):
+                energy = -neg_val
+                s_coords, s_labels, s_bonds = self._final_output_structure_from_params(params)
+                best_snapshots.append({
+                    "energy": float(energy),
+                    "coords": s_coords,
+                    "labels": s_labels,
+                    "bonds": s_bonds,
+                })
 
         self.energy_function(res_3.x, return_terms=True)
         coords, labels, bonds = self._final_output_structure_from_params(res_3.x)
@@ -1986,7 +2059,7 @@ class QuantumBiophysicsFolder:
                 self.last_energy_terms.get("openmm_potential_kj_mol", float(res_3.fun)),
             ),
         )
-        return coords, labels, bonds, self.tracker, res_3.x, float(final_energy)
+        return coords, labels, bonds, self.tracker, res_3.x, float(final_energy), best_snapshots
 
     def compute_sidechain_centroids(self, coords, labels):
         """

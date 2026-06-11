@@ -235,6 +235,7 @@ qtf-fold --predict YYDPETGTWY --ensemble_size 5
 | `--rmsd_residue_scope` | `core` | `core` \| `all` |
 | `--top_k N` | `1` | Save and compare the N lowest-energy models |
 | `--top_frac F` | None | Save top fraction F of models (overrides `--top_k`) |
+| `--top_k_snapshots N` | `0` | Save the N lowest-energy intermediate structures encountered during optimisation (0 = disabled) |
 | `--energy_backend` | `custom` | `custom` \| `rosetta` \| `openmm` |
 | `--mode` | `predict_and_compare` | `predict_and_compare` \| `predict_only` |
 
