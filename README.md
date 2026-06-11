@@ -127,11 +127,7 @@ qtf/
    └── gromacs.py              GROMACS minimisation bridge (optional)
 
  cli/
-   ├── fold.py                 qtf-fold: quantum folding prediction
-   ├── bench.py                qtf-bench: beam-search benchmark
-   ├── eval.py                 qtf-eval: score experimental structures
-   ├── grid_search.py          qtf-grid-search: parameter grid sweep
-   └── relax.py                qtf-relax: GROMACS relaxation
+   └── __init__.py             qtf fold: canonical recipe-driven folding command
 ```
 
 ---
@@ -161,15 +157,12 @@ Optional extras:
 >
 > QTF's default `custom` energy backend works out of the box — no additional dependencies required.
 >
-> - **PyRosetta** (`energy_backend="rosetta"`) is not available directly on PyPI. Install it manually with:
->   ```bash
->   pip install pyrosetta --find-links https://west.rosettacommons.org/pyrosetta/quarterly/release
->   ```
-> - **OpenMM** (`energy_backend="openmm"`) is not available on PyPI either. Install it via conda-forge:
+> - External physics engines are configured in fold recipes through PHEAT scorer/evaluator options.
+> - **OpenMM** is optional and should be installed via conda-forge when using OpenMM-backed PHEAT evaluators:
 >   ```bash
 >   conda install -c conda-forge openmm
 >   ```
-> - **GROMACS** (used by `qtf-relax` and `gromacs_postprocess_structure()`) must be installed at the system level. See the [GROMACS download page](https://www.gromacs.org/downloads) for platform-specific instructions.
+> - **GROMACS** (used by PHEAT external validation recipes and `gromacs_postprocess_structure()`) must be installed at the system level. See the [GROMACS download page](https://www.gromacs.org/downloads) for platform-specific instructions.
 
 ---
 
@@ -195,90 +188,37 @@ pip install -e ".[dev]"
 
 ## CLI
 
-Six command-line tools are installed automatically with `pip install qtf`:
+QTF installs one canonical command, `qtf`.
 
-### `qtf-run` — Unified dispatcher
-
-All subcommands are also accessible via a single unified entry point:
+### `qtf fold` — recipe-driven folding
 
 ```bash
-qtf-run fold --predict YYDPETGTWY --ensemble_size 5
-qtf-run bench --sequence YYDPETGTWY --beam_width 1000
-qtf-run eval --name 5AWL --pdb_path 5AWL.pdb --out_csv scores.csv
-qtf-run grid-search --panel_csv protein_panel.csv --outsubdir run1 --window_deg 30
-qtf-run relax --input_pdb structure.pdb --forcefield amber99sb-ildn
+qtf fold qtf-three-stage-main \
+  --sequence YYDPETGTWY \
+  --reference-structure pdb/5AWL.pdb \
+  --outdir outputs/example_fold
 ```
 
-| Subcommand | Delegates to |
-|------------|-------------|
-| `fold` | `qtf-fold` |
-| `bench` | `qtf-bench` |
-| `eval` | `qtf-eval` |
-| `grid-search` | `qtf-grid-search` |
-| `relax` | `qtf-relax` |
+Omitting `--backend` uses exact local statevector extraction. Pass a backend such
+as `aer`, `statevector-shots`, or an IBM backend name only when you want sampled
+backend execution.
 
-### `qtf-fold` — Quantum folding prediction
+Useful discovery commands:
 
 ```bash
-qtf-fold --predict YYDPETGTWY --ensemble_size 5
+qtf fold --list-recipes
+qtf fold --show-recipe qtf-three-stage-main
 ```
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--predict SEQ` | required | Target amino acid sequence |
-| `--ensemble_size N` | `3` | Number of independent replicas |
-| `--maxiter N` | `2000` | Max optimiser iterations per stage |
-| `--prime_strategy` | `Random` | `Random` \| `Helix` \| `Sheet` \| `mixed` |
-| `--reference_structure PDB_ID` | None | RCSB PDB ID for RMSD comparison |
-| `--reference_pdb PATH` | None | Local PDB file for RMSD comparison |
-| `--rmsd_mode` | `ca` | `ca` (Cα only) \| `heavy` (all heavy atoms) |
-| `--rmsd_residue_scope` | `core` | `core` \| `all` |
-| `--top_k N` | `1` | Save and compare the N lowest-energy models |
-| `--top_frac F` | None | Save top fraction F of models (overrides `--top_k`) |
-| `--energy_backend` | `custom` | `custom` \| `rosetta` \| `openmm` |
-| `--mode` | `predict_and_compare` | `predict_and_compare` \| `predict_only` |
+`qtf fold` runs named YAML recipes. The built-in main-equivalent recipe uses
+PHEAT geometry/scoring through the native `pheat-physics` scorer and reports
+RMSD only when a reference structure is provided.
 
-Outputs written to `<output_root>/<SEQUENCE>_<FF>_<TIMESTAMP>/`:
-per-model PDBs, `ensemble_ranked.csv`/`.json`, `summary_results.csv`/`.json`.
+### External validation
 
-### `qtf-bench` — Beam-search benchmark
+AmberTools, OpenMM, and GROMACS are accessed through PHEAT scorer/evaluator
+configuration inside fold recipes, not through separate QTF commands.
 
-Exhaustive discrete search over Ramachandran-basin grids + chi rotamers.
-
-```bash
-qtf-bench --sequence YYDPETGTWY --beam_width 1000 --outdir ./bench
-```
-
-Key flags: `--sequence`, `--beam_width`, `--window_deg`, `--step_deg`,
-`--chi_mode`, `--max_sidechain_opts_per_residue`, `--reference_pdb`, `--outdir`.
-
-### `qtf-eval` — Score experimental structures
-
-Score native PDB structures with the QTF energy function.
-
-```bash
-qtf-eval --name 5AWL --pdb_path 5AWL.pdb --out_csv scores.csv
-```
-
-Supports `--panel` (batch via JSON/CSV) and single-structure mode (`--name`
-+ `--pdb_path`).
-
-### `qtf-grid-search` — Parameter grid sweep
-
-Cartesian-product scan over energy-scale parameters for peptide panels.
-
-```bash
-qtf-grid-search --panel_csv protein_panel.csv --grid_json params.json \
-  --outsubdir run1 --window_deg 30 --step_deg 15
-```
-
-### `qtf-relax` — GROMACS relaxation
-
-Energy-minimise a PDB structure with GROMACS.
-
-```bash
-qtf-relax --input_pdb structure.pdb --forcefield amber99sb-ildn
-```
 
 ---
 
@@ -486,7 +426,7 @@ E_constraint = λ · deviation²
 ```
 
 `λ` = 50.0 in Stages 1–2, 5.0 in Stage 3 (released to let the protein explore freely).
-The constraint can be disabled at construction time with `use_e2e_constraint=False`.
+End-to-end behavior is configured through recipe score options.
 
 #### 2. Implicit Solvent / Hydrophobic Effect (SASA Approximation)
 
@@ -1036,7 +976,7 @@ To isolate the effect of energy backend on folding outcome:
 
 ```python
 for backend in ("custom", "rosetta", "openmm"):
-    folder = QuantumBiophysicsFolder("YYDPETGTWY", energy_backend=backend)
+    folder = QuantumBiophysicsFolder("YYDPETGTWY")
     manager = EnsembleFoldingManager(folder)
     manager.run_ensemble(n_runs=5, max_iter=2000, scout_attempts=50)
     # All three runs start from the same initial geometries,

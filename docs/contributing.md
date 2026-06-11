@@ -102,11 +102,7 @@ QTF/
 │   │   ├── accelerate.py    # Numba-jitted distance matrix, electrostatic, VDW, SASA kernels
 │   │   └── gromacs.py       # GROMACS minimisation wrapper and PDB utilities
 │   └── cli/
-│       ├── fold.py          # qtf-fold: quantum folding prediction
-│       ├── bench.py         # qtf-bench: beam-search benchmark
-│       ├── eval.py          # qtf-eval: score experimental structures
-│       ├── grid_search.py   # qtf-grid-search: parameter grid sweep
-│       └── relax.py         # qtf-relax: GROMACS relaxation
+│       └── __init__.py      # qtf fold: canonical recipe-driven command
 ├── tests/                   # pytest test suite
 ├── docs/                    # MkDocs documentation source
 ├── .github/

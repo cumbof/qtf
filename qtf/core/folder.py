@@ -2,9 +2,8 @@
 
 Architecture
 ------------
-1. **Quantum Actor**: a parameterised quantum circuit (EfficientSU2 by
-   default) whose statevector phases encode backbone/side-chain torsion
-   angles.
+1. **Quantum Actor**: a parameterised Qiskit circuit whose statevector or
+   sampled readout encodes backbone/side-chain torsion angles.
 2. **Classical Critic**: a physics-based energy function (hydrophobicity, H-bonds,
    electrostatics, sterics, Ramachandran bias, geometry integrity).
 3. **Optimisation Loop**: COBYLA + SLSQP in three progressive stages (collapse →
@@ -13,99 +12,46 @@ Architecture
 References
 ----------
 * Kyte & Doolittle (1982) hydrophobicity scale.
-* AMBER ff14SB partial charges (approximate).
+* PHEAT coarse atom-name charge profiles for native scoring; exact force fields are external scorers.
 * Bondi (1964) van der Waals radii.
 * Engh & Huber (1991) bond/angle parameters.
 """
 
 from __future__ import annotations
 
-import hashlib
 import logging
-import os
-import tempfile
-from pathlib import Path
+import math
+from typing import Any, Optional
 
 import numpy as np
+from pheat import Atom, HeavyAtomStructure, ResidueGeometry, ResidueGeometryStructure, write_pdb
+from pheat.models import RESIDUE_GEOMETRY_BACKBONE_LENGTHS
+from pheat.residue_geometry import (
+    ANGLE_CA_C_N,
+    ANGLE_N_CA_C,
+    ANGLE_UNITS,
+    CA_C,
+    CA_CB,
+    C_N,
+    C_O,
+    N_CA,
+    PCA_N_CD,
+    PRO_N_CD,
+    PYL_CA2_CG2,
+    residue_angle_specs,
+    structure_from_residue_geometry,
+)
+from pheat.residues import SIDECHAIN_STEPS, one_to_three
+from pheat.roundtrip import normalize_max_chi, normalize_stored_angles
+from qiskit import transpile
+from qiskit.quantum_info import Statevector
 from scipy.optimize import minimize
 
+from qtf.core.circuits import build_circuit
 from qtf.core.tracker import LandscapeTracker
-from qtf.utils import gromacs as qtf_gromacs
-from qtf.utils.aer_sim import statevector_data as _statevector_data
-
-try:
-    import pyrosetta
-    from pyrosetta import rosetta as _rosetta
-    _PYROSETTA_AVAILABLE = True
-except ImportError:
-    pyrosetta = None  # type: ignore[assignment]
-    _rosetta = None   # type: ignore[assignment]
-    _PYROSETTA_AVAILABLE = False
-
-
-def _load_openmm() -> tuple[tuple, bool]:
-    """Best-effort import of :mod:`openmm` and the symbols QTF needs.
-
-    Returns a 2-tuple ``((mm, unit, ForceField, HBonds, Modeller,
-    NoCutoff, PDBFile), available)``. The symbols are all ``None`` and
-    ``available`` is ``False`` only when :mod:`openmm` is genuinely
-    not installed (``ModuleNotFoundError``).
-
-    A non-``ModuleNotFoundError`` exception -- the typical signature
-    of a *broken* openmm install (mismatched CUDA runtime, missing
-    shared library, failed C++ extension load, etc.) -- is **logged
-    and re-raised** so that the user is not misled into a
-    ``pip install qtf[workflows]`` loop when the real fix is to
-    reinstall the existing openmm package.
-    """
-    try:
-        import openmm as mm
-        from openmm import unit
-        from openmm.app import (
-            ForceField,
-            HBonds,
-            Modeller,
-            NoCutoff,
-            PDBFile,
-        )
-        return (
-            (mm, unit, ForceField, HBonds, Modeller, NoCutoff, PDBFile),
-            True,
-        )
-    except ModuleNotFoundError:
-        return (None, None, None, None, None, None, None), False
-    except Exception as exc:
-        logger.error(
-            "OpenMM import failed (install is broken, not missing): %s: %s",
-            type(exc).__name__,
-            exc,
-        )
-        raise
-
-
-(
-    (_mm, _unit, _ForceField, _HBonds, _Modeller, _NoCutoff, _PDBFile),
-    _OPENMM_AVAILABLE,
-) = _load_openmm()
-
-_PYROSETTA_INIT_DONE = False
+from qtf.scoring import canonical_score_model, is_qtf_score_model, score_classic_folder, score_pheat_structure
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Optional Numba acceleration
-# ---------------------------------------------------------------------------
-try:
-    from qtf.utils.accelerate import (
-        distance_matrix as _dist_accel,
-        electrostatic_energy as _elec_accel,
-        vdw_repulsion as _vdw_accel,
-        sasa_energy as _sasa_accel,
-    )
-
-    _ACCELERATE_AVAILABLE = True
-except ImportError:
-    _ACCELERATE_AVAILABLE = False
 
 # Coulomb's law prefactor: 332.0637 kcal mol⁻¹ Å e⁻²
 # (charges in elementary charges, distances in Ångströms, energy in kcal/mol)
@@ -123,33 +69,73 @@ _DIELECTRIC: float = 4.0
 # this without affecting the cache output, which discards coordinates and
 # only retains atom labels.
 _TOPOLOGY_SEED_ANGLE: float = 0.1
-
-# Huber-loss transition threshold for geometry-integrity penalties (Å or Å³).
-# Below this threshold each penalty is quadratic (x²), preserving a smooth
-# gradient signal for small deviations.  Above it the loss grows only
-# linearly (2·δ·|x| − δ²), preventing a single severely distorted bond or
-# wrong-chirality centre from dominating the gradient and stalling the
-# optimiser.  Value of 1.0 Å corresponds to roughly one bond length of
-# distortion before saturation kicks in.
 _HUBER_DELTA_GEOM: float = 1.0
+
+PHEAT_FAILURE_PENALTY = 1.0e12
+LENGTH_ENCODING_SCOPES = ("shared-by-type", "per-residue")
+TRANSPILE_OPTIMIZATION_LEVELS = (0, 1, 2, 3)
+DEFAULT_BACKBONE_LENGTH_SPAN_A = 0.08
+DEFAULT_SIDECHAIN_LENGTH_SPAN_A = 0.12
+MIN_ENCODED_BOND_LENGTH_A = 0.5
+_UNSET = object()
+
+
+def _backend_display_name(backend) -> str:
+    if backend is None:
+        return "statevector"
+    try:
+        name = getattr(backend, "name", None)
+        return name() if callable(name) else str(name or backend)
+    except Exception:
+        return str(backend)
+
+
+def _normalize_length_encoding_scope(value: str) -> str:
+    normalized = str(value or "shared-by-type").strip().lower()
+    if normalized not in LENGTH_ENCODING_SCOPES:
+        raise ValueError(
+            "length_encoding_scope must be one of "
+            + ", ".join(LENGTH_ENCODING_SCOPES)
+        )
+    return normalized
+
+
+def _normalize_transpile_optimization_level(value, context: str = "transpile_optimization_level") -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() in {"", "none", "default", "auto"}:
+        return None
+    try:
+        level = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{context} must be one of none, 0, 1, 2, or 3.") from exc
+    if level not in TRANSPILE_OPTIMIZATION_LEVELS:
+        raise ValueError(f"{context} must be one of none, 0, 1, 2, or 3.")
+    return level
+
+
+def _normalize_transpile_seed(value, context: str = "transpile_seed") -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() in {"", "none", "default", "auto"}:
+        return None
+    try:
+        seed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{context} must be a non-negative integer or none.") from exc
+    if seed < 0:
+        raise ValueError(f"{context} must be a non-negative integer or none.")
+    return seed
+
+
+def _wrap_radians(value: float) -> float:
+    return (float(value) + math.pi) % (2 * math.pi) - math.pi
 
 
 class QuantumBiophysicsFolder:
     """Hybrid quantum-classical protein folder."""
 
-    # ------------------------------------------------------------------
-    # Defaults for stage-aware attributes.
-    #
-    # Declaring these at class level (not only in ``__init__``) means
-    # that ``folder.energy_function(...)`` is safe to call on an
-    # instance whose ``__init__`` has been bypassed -- e.g. by a
-    # user-supplied gradient, a checkpoint restart that constructs
-    # the folder from a pickled state, or a unit test that exercises
-    # the energy function in isolation. Without the class-level
-    # default, ``energy_function`` would raise ``AttributeError``
-    # when reading ``self.current_stage``.
-    # ------------------------------------------------------------------
-    current_stage: int = 1  # 1 = helix/sheet-only cost; see fold() for 2, 3.
+    current_stage: int = 1
 
     # ------------------------------------------------------------------
     # Force-field tables
@@ -165,337 +151,172 @@ class QuantumBiophysicsFolder:
         "H": 0.6, "C": 1.7, "N": 1.55, "O": 1.52, "S": 1.8,
     }
 
-    _LJ_TYPE_PARAMS: dict[str, dict] = {
-        "H":           {"radius": 1.20, "epsilon": 0.0157},
-        "H_polar":     {"radius": 1.05, "epsilon": 0.0157},
-        "C_backbone":  {"radius": 1.75, "epsilon": 0.0700},
-        "C_carbonyl":  {"radius": 1.70, "epsilon": 0.0860},
-        "C_aliphatic": {"radius": 1.90, "epsilon": 0.1094},
-        "C_aromatic":  {"radius": 1.85, "epsilon": 0.1200},
-        "N_backbone":  {"radius": 1.65, "epsilon": 0.1700},
-        "N_sidechain": {"radius": 1.65, "epsilon": 0.1700},
-        "O_carbonyl":  {"radius": 1.60, "epsilon": 0.2100},
-        "O_hydroxyl":  {"radius": 1.55, "epsilon": 0.1700},
-        "O_carboxyl":  {"radius": 1.60, "epsilon": 0.2100},
-        "S_sulfur":    {"radius": 2.00, "epsilon": 0.2500},
-        "X":           {"radius": 1.75, "epsilon": 0.1000},
-    }
-
-    _SIDE_CHAIN_TOPO: dict[str, list] = {
-        "G": [],
-        "A": [("CB", "CA", 1.53, 1.91, 2.1)],
-        "V": [("CB", "CA", 1.53, 1.91, "chi1"),
-              ("CG1", "CB", 1.52, 1.91, "chi2"), ("CG2", "CB", 1.52, 1.91, "chi2_branch")],
-        "L": [("CB", "CA", 1.53, 1.91, "chi1"),
-              ("CG", "CB", 1.52, 1.91, "chi2"),
-              ("CD1", "CG", 1.52, 1.91, "chi3"), ("CD2", "CG", 1.52, 1.91, "chi3_branch")],
-        "I": [("CB", "CA", 1.53, 1.91, "chi1"),
-              ("CG1", "CB", 1.54, 1.91, "chi2"), ("CD1", "CG1", 1.52, 1.91, "chi3"),
-              ("CG2", "CB", 1.54, 1.91, "chi2_branch")],
-        "M": [("CB", "CA", 1.53, 1.91, "chi1"), ("CG", "CB", 1.52, 1.91, "chi2"),
-              ("SD", "CG", 1.81, 1.91, "chi3"), ("CE", "SD", 1.79, 1.76, "chi4")],
-        "P": [("CB", "CA", 1.53, 1.80, "chi1"), ("CG", "CB", 1.50, 1.82, "chi2"),
-              ("CD", "CG", 1.52, 1.83, "chi3")],
-        "F": [("CB", "CA", 1.53, 1.91, "chi1"), ("CG", "CB", 1.50, 1.91, "chi2"),
-              ("CD1", "CG", 1.39, 2.09, 1.57), ("CD2", "CG", 1.39, 2.09, -1.57),
-              ("CE1", "CD1", 1.39, 2.09, 3.14), ("CE2", "CD2", 1.39, 2.09, 3.14),
-              ("CZ", "CE1", 1.39, 2.09, 0.0)],
-        "Y": [("CB", "CA", 1.53, 1.91, "chi1"), ("CG", "CB", 1.50, 1.91, "chi2"),
-              ("CD1", "CG", 1.39, 2.09, 1.57), ("CD2", "CG", 1.39, 2.09, -1.57),
-              ("CE1", "CD1", 1.39, 2.09, 3.14), ("CE2", "CD2", 1.39, 2.09, 3.14),
-              ("CZ", "CE1", 1.39, 2.09, 0.0),
-              ("OH", "CZ", 1.37, 2.09, 3.14), ("HH", "OH", 0.96, 1.83, "chi3")],
-        "W": [("CB", "CA", 1.53, 1.91, "chi1"), ("CG", "CB", 1.50, 1.91, "chi2"),
-              ("CD1", "CG", 1.37, 2.15, 1.0), ("CD2", "CG", 1.43, 2.15, -1.0),
-              ("NE1", "CD1", 1.38, 1.90, 3.14), ("HE1", "NE1", 1.01, 2.09, 0.0),
-              ("CE2", "CD2", 1.40, 1.90, 0.0), ("CE3", "CD2", 1.40, 2.30, 3.14),
-              ("CZ2", "CE2", 1.40, 2.10, 0.0), ("CZ3", "CE3", 1.40, 2.10, 0.0),
-              ("CH2", "CZ2", 1.40, 2.10, 0.0)],
-        "S": [("CB", "CA", 1.53, 1.91, "chi1"), ("OG", "CB", 1.42, 1.91, "chi2"),
-              ("HG", "OG", 0.96, 1.83, "chi3")],
-        "T": [("CB", "CA", 1.53, 1.91, "chi1"),
-              ("OG1", "CB", 1.43, 1.91, "chi2"), ("HG1", "OG1", 0.96, 1.83, "chi3"),
-              ("CG2", "CB", 1.53, 1.91, "chi2_branch")],
-        "C": [("CB", "CA", 1.53, 1.91, "chi1"), ("SG", "CB", 1.81, 1.91, "chi2")],
-        "D": [("CB", "CA", 1.53, 1.91, "chi1"), ("CG", "CB", 1.52, 1.91, "chi2"),
-              ("OD1", "CG", 1.25, 2.0, 1.0), ("OD2", "CG", 1.25, 2.0, -1.0)],
-        "N": [("CB", "CA", 1.53, 1.91, "chi1"), ("CG", "CB", 1.52, 1.91, "chi2"),
-              ("OD1", "CG", 1.23, 2.09, 0.0), ("ND2", "CG", 1.32, 2.09, 3.14)],
-        "E": [("CB", "CA", 1.53, 1.91, "chi1"), ("CG", "CB", 1.52, 1.91, "chi2"),
-              ("CD", "CG", 1.52, 1.91, "chi3"), ("OE1", "CD", 1.25, 2.0, 1.0), ("OE2", "CD", 1.25, 2.0, -1.0)],
-        "Q": [("CB", "CA", 1.53, 1.91, "chi1"), ("CG", "CB", 1.52, 1.91, "chi2"),
-              ("CD", "CG", 1.52, 1.91, "chi3"), ("OE1", "CD", 1.23, 2.09, 0.0), ("NE2", "CD", 1.32, 2.09, 3.14)],
-        "K": [("CB", "CA", 1.53, 1.91, "chi1"), ("CG", "CB", 1.52, 1.91, "chi2"),
-              ("CD", "CG", 1.52, 1.91, "chi3"), ("CE", "CD", 1.52, 1.91, "chi4"),
-              ("NZ", "CE", 1.49, 1.91, "chi5")],
-        "R": [("CB", "CA", 1.53, 1.91, "chi1"), ("CG", "CB", 1.52, 1.91, "chi2"),
-              ("CD", "CG", 1.52, 1.91, "chi3"), ("NE", "CD", 1.46, 1.91, "chi4"),
-              ("CZ", "NE", 1.33, 2.15, "chi5"), ("NH1", "CZ", 1.33, 2.10, 0.0), ("NH2", "CZ", 1.33, 2.10, 3.14)],
-        "H": [("CB", "CA", 1.53, 1.91, "chi1"), ("CG", "CB", 1.50, 1.91, "chi2"),
-              ("ND1", "CG", 1.38, 2.15, 1.0), ("CD2", "CG", 1.36, 2.15, -1.0),
-              ("CE1", "ND1", 1.32, 1.90, 0.0),
-              ("NE2", "CD2", 1.32, 1.90, 0.0), ("HE2", "NE2", 1.01, 2.09, 0.0)],
-        "DEFAULT": [("CB", "CA", 1.53, 1.91, "chi1")],
-    }
-
     def __init__(
         self,
         sequence: str,
-        chi_mode: str = "all",
-        selective_chi_map: dict | None = None,
-        energy_backend: str | None = None,
-        use_e2e_constraint: bool | None = None,
-        e2e_scale: float | None = None,
-        rosetta_repack: bool | None = None,
-        rosetta_fa_min: bool | None = None,
-        rosetta_cen_min: bool | None = None,
-        ansatz: str | None = None,
-        mode: str = "statevector",
-        backend=None,
-        shots: int = 4096,
+        force_field: str = "protein-coarse-charge-v1",
+        *,
+        selective_chi_map: Optional[dict[str, list[str]]] = None,
+        angle_units: str = "radians",
+        stored_angles=None,
+        stored_lengths=None,
+        max_chi=None,
+        include_terminal_oxt: bool = False,
+        geometry_mode: Optional[str] = None,
+        geometry_table: Optional[Any] = None,
+        geometry_profile: Optional[str] = None,
+        score_model: str = "pheat-generic",
+        bond_angle_encoding: str = "centered",
+        tau_center_deg: float = ANGLE_N_CA_C,
+        tau_span_deg: float = 25.0,
+        theta_center_deg: float = ANGLE_CA_C_N,
+        theta_span_deg: float = 25.0,
+        length_encoding_scope: str = "shared-by-type",
+        backbone_length_span: float = DEFAULT_BACKBONE_LENGTH_SPAN_A,
+        sidechain_length_span: float = DEFAULT_SIDECHAIN_LENGTH_SPAN_A,
+        optimizer_angle_mode: str = "statevector",
+        optimizer_backend=None,
+        optimizer_shots: int = 4096,
+        basis_circuit_batching: str = "auto",
+        transpile_optimization_level: Optional[int] = None,
+        transpile_seed: Optional[int] = None,
+        reference_residue_geometry: Optional[ResidueGeometryStructure] = None,
+        base_residue_geometry: Optional[ResidueGeometryStructure] = None,
+        circuit_template: Optional[dict[str, Any]] = None,
+        circuit: Optional[dict[str, Any]] = None,
     ) -> None:
         """
         Parameters
         ----------
         sequence:
             Single-letter amino acid sequence (e.g. ``"MAGTWY"``).
-        ansatz:
-            Quantum circuit ansatz.  ``None`` (default) → ``EfficientSU2``
-            with ``circular`` entanglement.  A string selects a built-in
-            Qiskit circuit-library ansatz:
-
-            - ``"efficient_su2"`` (or ``"su2"``)
-            - ``"real_amplitudes"`` (or ``"ra"``)
-            - ``"brickwork"`` — custom brick-layer entanglement with lower
-              circuit depth than circular; suitable for near-term hardware.
-
-            You can also pass a fully constructed
-            ``qiskit.circuit.QuantumCircuit`` with ``num_parameters > 0``.
-            When a custom circuit is provided the qubit count is taken
-            from the circuit (``n_qubits`` = ``circuit.num_qubits``) and
-            must be ≥ ``ceil(log2(total_angles))`` so that the statevector
-            has enough amplitude slots for all torsion-angle DOFs.
-        mode:
-            Quantum simulation mode.  ``"statevector"`` (default) extracts
-            torsion angles from the complex phases of the full statevector.
-            ``"sampler"`` runs a shot-based measurement and derives angles
-            from the empirical probability CDF, enabling execution on real
-            quantum hardware.
-        backend:
-            Quantum backend instance (e.g. from ``qiskit_ibm_runtime``).
-            Used only when ``mode="sampler"``.  If ``None``, an
-            ``AerSimulator`` is used automatically.
-        shots:
-            Number of measurement shots for ``mode="sampler"``.
-            Ignored when ``mode="statevector"``.
+        force_field:
+            Coarse native scoring profile selector used only by QTF-native metadata paths;
+            exact force-field engines are configured through external PHEAT scorers.
         """
-        if mode not in ("statevector", "sampler"):
-            raise ValueError(
-                f"Unknown mode {mode!r}; choose from 'statevector' or 'sampler'"
-            )
-        self.mode = mode
-        self.backend = backend
-        self.shots = int(shots)
-
         self.sequence = sequence.upper()
         self.n_residues = len(self.sequence)
+        self.force_field = force_field.lower()
+        self.selective_chi_map = selective_chi_map or {}
+        self.angle_units = str(angle_units).lower()
+        self.stored_angles = normalize_stored_angles(stored_angles or ())
+        self.stored_lengths = ResidueGeometryStructure(
+            residues=[],
+            stored_lengths=stored_lengths,
+        ).stored_lengths
+        self.max_chi = normalize_max_chi(max_chi)
+        self.include_terminal_oxt = bool(include_terminal_oxt)
+        self.geometry_mode = None if geometry_mode in (None, "") else str(geometry_mode)
+        self.geometry_table = None if geometry_table in (None, "") else geometry_table
+        self.geometry_profile = None if geometry_profile in (None, "") else str(geometry_profile)
+        self.reference_residue_geometry = reference_residue_geometry
+        self.score_model = canonical_score_model(score_model)
+        self.active_score_model = self.score_model
+        self.optimizer_angle_mode = str(optimizer_angle_mode).lower()
+        self.optimizer_backend = optimizer_backend
+        self.optimizer_shots = int(optimizer_shots)
+        self.basis_circuit_batching = str(basis_circuit_batching).strip().lower()
+        self.transpile_optimization_level = _normalize_transpile_optimization_level(
+            transpile_optimization_level
+        )
+        self.transpile_seed = _normalize_transpile_seed(transpile_seed)
+        self.basis_circuit_batching_stats = {
+            "requested": self.basis_circuit_batching,
+            "calls": 0,
+            "batched_calls": 0,
+            "serial_calls": 0,
+            "local_statevector_calls": 0,
+            "fallback_calls": 0,
+            "basis_circuits": 0,
+            "backend_jobs": 0,
+            "last_effective": None,
+            "fallback_reasons": [],
+            "last_transpile_optimization_level": None,
+            "last_transpile_seed": None,
+        }
+        self.bond_angle_encoding = str(bond_angle_encoding).lower()
+        self.tau_center_deg = float(tau_center_deg)
+        self.tau_span_deg = float(tau_span_deg)
+        self.theta_center_deg = float(theta_center_deg)
+        self.theta_span_deg = float(theta_span_deg)
+        self.length_encoding_scope = _normalize_length_encoding_scope(length_encoding_scope)
+        self.backbone_length_span = float(backbone_length_span)
+        self.sidechain_length_span = float(sidechain_length_span)
+        self.circuit_template = circuit_template
+        self.circuit = circuit
+        self.circuit_metadata = {}
+        self.last_score = None
+        self.last_score_error = None
+        self.last_structure = None
+        self.last_residue_geometry = None
+        self.base_residue_geometry = base_residue_geometry
+        self.pheat_chi_dofs_by_residue: dict[int, list[str]] = {}
 
-        logger.info("Initialising QuantumBiophysicsFolder | seq=%s | mode=%s", self.sequence, self.mode)
+        if self.optimizer_angle_mode not in {"statevector", "sampler"}:
+            raise ValueError("optimizer_angle_mode must be 'statevector' or 'sampler'.")
+        if self.angle_units not in ANGLE_UNITS:
+            raise ValueError(f"angle_units must be one of {', '.join(ANGLE_UNITS)}")
+        if self.bond_angle_encoding not in {"centered", "raw"}:
+            raise ValueError("bond_angle_encoding must be 'centered' or 'raw'.")
+        if self.backbone_length_span <= 0:
+            raise ValueError("backbone_length_span must be positive.")
+        if self.sidechain_length_span <= 0:
+            raise ValueError("sidechain_length_span must be positive.")
+        if self.optimizer_shots <= 0:
+            raise ValueError("optimizer_shots must be positive.")
+        if self.basis_circuit_batching not in {"auto", "on", "off"}:
+            raise ValueError("basis_circuit_batching must be one of auto, on, or off.")
+
+        logger.info("Initialising QuantumBiophysicsFolder | FF=%s | seq=%s", self.force_field.upper(), self.sequence)
 
         self.HYDROPHOBICITY = self._HYDROPHOBICITY
         self.VDW_RADII = self._VDW_RADII
-        self.SIDE_CHAIN_TOPO = self._SIDE_CHAIN_TOPO
 
-        self.CHARGES = self._build_charges()
-        self._chi_mode = chi_mode
-        self.selective_chi_map = selective_chi_map or {}
-        self.LJ_TYPE_PARAMS = self._LJ_TYPE_PARAMS
-
-        # Empirical peptide backbone geometry (Engh & Huber 1991).
-        self.BB_ANGLE_N_CA_C = np.deg2rad(111.4)
-        self.BB_ANGLE_CA_C_N = np.deg2rad(118.3)
-        self.BB_ANGLE_C_N_CA = np.deg2rad(122.8)
-        self.OMEGA_CENTER = np.pi
-        self.OMEGA_MIN = np.deg2rad(170.0)
-        self.OMEGA_MAX = np.deg2rad(190.0)
-        self.OMEGA_HALF_WIDTH = 0.5 * (self.OMEGA_MAX - self.OMEGA_MIN)
-        self.fixed_omegas = np.full(max(0, self.n_residues - 1), np.pi, dtype=float)
+        self.CHARGES = self._build_charges(self.force_field)
 
         # ------------------------------------------------------------------
         # Degrees of freedom
         # ------------------------------------------------------------------
-        # Each residue contributes φ and ψ backbone dihedrals plus up to five
-        # side-chain χ angles.  In addition, the peptide-bond torsion ω is
-        # added as an explicit DOF for every residue **i** whose successor
-        # residue **i+1** is proline ("P").  All other ω angles are fixed at
-        # π (trans-amide) — deviations from planarity are < 5° in practice
-        # and are not worth the extra quantum resource.
-        #
-        # NOTE — encoding vs optimiser gap
-        # The quantum statevector has 2ⁿ complex amplitudes; extracting the
-        # first ``total_angles`` phases is sufficient to carry ω_Pro angles
-        # without any structural change to the circuit.  However, the current
-        # COBYLA optimiser path treats all extracted phases symmetrically and
-        # cannot constrain individual DOFs.  The ω_Pro angles therefore enter
-        # the optimisation unconstrained in [−π, π].  If a narrow prior is
-        # desired (e.g. cis-Pro at ~0 ± 20°), a penalty term should be added
-        # to the energy function, or the optimiser should be replaced with one
-        # that supports bounded variables.
-        self.dof_map: list[dict] = []
-        for i, aa in enumerate(self.sequence):
-            self.dof_map.append({"res": i, "type": "phi"})
-            self.dof_map.append({"res": i, "type": "psi"})
-            topo = self.SIDE_CHAIN_TOPO.get(aa, self.SIDE_CHAIN_TOPO["DEFAULT"])
-            chis: set[str] = set()
-            for atom in topo:
-                tor = atom[4]
-                if isinstance(tor, str) and "chi" in tor:
-                    chis.add(tor)
-            for k in self._allowed_chis_for_residue(i, aa, chis):
-                self.dof_map.append({"res": i, "type": k})
-            # Pre-proline ω is free; add it last so existing φ/ψ/χ indices
-            # are unaffected for non-proline-containing sequences.
-            if i < self.n_residues - 1 and self.sequence[i + 1] == "P":
-                self.dof_map.append({"res": i, "type": "omega"})
+        # PHEAT owns the residue-level angle definitions. QTF keeps a compact
+        # dof_map view for circuit encoding and optimizer bookkeeping.
+        self._rebuild_dof_map()
 
-        self._total_angles = len(self.dof_map)
-
-        # ------------------------------------------------------------------
-        # Quantum circuit (ansatz)
-        # ------------------------------------------------------------------
-        min_qubits = max(2, int(np.ceil(np.log2(self.total_angles))))
-
-        if ansatz is None:
-            from qiskit.circuit.library import efficient_su2
-            self.n_qubits = min_qubits
-            self.reps = int(np.ceil(self.total_angles / self.n_qubits)) + 2
-            self.ansatz = efficient_su2(
-                self.n_qubits, reps=self.reps, entanglement="circular",
-            )
-        elif isinstance(ansatz, str):
-            from qiskit.circuit.library import EfficientSU2, RealAmplitudes
-            name = ansatz.lower().replace("-", "_")
-            self.n_qubits = min_qubits
-            self.reps = int(np.ceil(self.total_angles / self.n_qubits)) + 2
-            if name in ("efficient_su2", "su2"):
-                self.ansatz = EfficientSU2(
-                    self.n_qubits, reps=self.reps, entanglement="circular",
-                )
-            elif name in ("real_amplitudes", "ra"):
-                self.ansatz = RealAmplitudes(
-                    self.n_qubits, reps=self.reps, entanglement="circular",
-                )
-            elif name == "brickwork":
-                self.ansatz = self._build_brickwork_ansatz(self.n_qubits, self.reps)
-            else:
-                raise ValueError(
-                    f"Unknown ansatz name {ansatz!r}; "
-                    f"choose from 'efficient_su2', 'real_amplitudes', 'brickwork'"
-                )
-        else:
-            from qiskit.circuit import QuantumCircuit
-            if not isinstance(ansatz, QuantumCircuit):
-                raise TypeError(
-                    f"ansatz must be a string, a QuantumCircuit, or None; "
-                    f"got {type(ansatz).__name__}"
-                )
-            if ansatz.num_parameters == 0:
-                raise ValueError(
-                    "Custom ansatz circuit must have at least one parameter"
-                )
-            if ansatz.num_qubits < min_qubits:
-                raise ValueError(
-                    f"Custom ansatz has {ansatz.num_qubits} qubit(s); "
-                    f"need at least {min_qubits} for {self.total_angles} angles"
-                )
-            self.n_qubits = ansatz.num_qubits
-            self.ansatz = ansatz
-
-        self.n_params = self.ansatz.num_parameters
+        self._rebuild_quantum_register()
 
         self.current_stage = 1
-        self._cache_initialized = False
-        self._initialize_topology_cache()
-
-        # --- Optional stage-3 backends ---
-        def _as_bool(value, default=False):
-            if value is None:
-                return bool(default)
-            if isinstance(value, bool):
-                return value
-            return str(value).strip().lower() not in ("0", "false", "no", "off", "none", "")
-
-        self.stage_backend = (
-            energy_backend or "custom"
-        ).strip().lower()
-        if self.stage_backend not in ("custom", "rosetta", "openmm"):
-            raise ValueError("energy_backend must be 'custom', 'rosetta', or 'openmm'")
-
-        if self.stage_backend == "rosetta" and not _PYROSETTA_AVAILABLE:
-            raise ImportError(
-                "PyRosetta is not installed. Install it with:\n"
-                "    pip install pyrosetta "
-                "--find-links https://west.rosettacommons.org/pyrosetta/quarterly/release"
-            )
-        if self.stage_backend == "openmm" and not _OPENMM_AVAILABLE:
-            raise ImportError(
-                "OpenMM is not installed. Install it with: "
-                "conda install -c conda-forge openmm"
-            )
-
-        self.use_e2e_constraint = _as_bool(
-            use_e2e_constraint,
-            "1"
-            not in ("0", "false", "no", "off"),
-        )
-        self.e2e_scale = float(
-            e2e_scale if e2e_scale is not None else "1.0"
-        )
-        self.rosetta_flags = "-mute all"
-        self.rosetta_centroid_weights = "cen_std"
-        self.rosetta_fullatom_weights = "ref2015"
-        self.rosetta_cen_weight = 0.35
-        self.rosetta_fa_weight = 1.0
-        self.rosetta_do_centroid_min = _as_bool(rosetta_cen_min, False)
-        self.rosetta_do_fullatom_min = _as_bool(rosetta_fa_min, False)
-        self.rosetta_do_repack = _as_bool(rosetta_repack, False)
-        self._rosetta_ready = False
-        self._rosetta_scorefxn_cen = None
-        self._rosetta_scorefxn_fa = None
-        self._last_rosetta_pose = None
-        self._last_rosetta_ca = None
-        self.openmm_forcefield = "amber14-all.xml"
-        self.openmm_platform = "CPU"
-        self.openmm_do_minimize = False
-        self.openmm_max_iterations = 200
-        self.openmm_tolerance = 10.0
-        self.openmm_ph = 7.0
-        self._openmm_ready = False
-        self._last_openmm_coords = None
-        self._last_openmm_labels = None
+        self.active_score_options = None
         self.tracker: LandscapeTracker | None = None
-        self.last_energy_terms: dict[str, float] = {}
-
-    # ------------------------------------------------------------------
-    # Read-only topological properties
-    # ------------------------------------------------------------------
-
-    @property
-    def total_angles(self) -> int:
-        """Number of torsion-angle degrees of freedom (read-only)."""
-        return self._total_angles
-
-    @property
-    def chi_mode(self) -> str:
-        """Side-chain chi angle sampling mode (read-only)."""
-        return self._chi_mode
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _rebuild_quantum_register(self) -> None:
+        self.total_dofs = len(self.dof_map)
+        self.total_angles = self.total_dofs
+        build = build_circuit(
+            total_angles=self.total_dofs,
+            circuit_template=self.circuit_template,
+            circuit=self.circuit,
+        )
+        self.ansatz = build.circuit
+        self.n_qubits = build.n_qubits
+        self.reps = build.reps
+        self.n_params = build.n_params
+        self.circuit_metadata = build.metadata()
+        self.circuit_metadata.update(
+            {
+                "total_dofs": self.total_dofs,
+                "total_angle_dofs": self.total_angle_dofs,
+                "total_length_dofs": self.total_length_dofs,
+                "length_encoding_scope": self.length_encoding_scope,
+            }
+        )
+        self._cache_initialized = False
+        self._initialize_topology_cache()
+
     @staticmethod
-    def _build_charges() -> dict[str, float]:
+    def _build_charges(force_field: str = "protein-coarse-charge-v1") -> dict[str, float]:
         common: dict[str, float] = {
             "OXT": -1.0,
             "NZ": 1.0, "NH1": 0.5, "NH2": 0.5,
@@ -504,532 +325,151 @@ class QuantumBiophysicsFolder:
             "SG": -0.1, "SD": -0.1,
             "HE2": 0.4, "ND1": -0.4,
         }
-        amber: dict[str, float] = {
+        protein_coarse: dict[str, float] = {
             "N": -0.42, "H": 0.27, "CA": 0.00, "C": 0.60, "O": -0.57,
             "OG": -0.6, "HG": 0.4, "OG1": -0.6, "HG1": 0.4, "OH": -0.5, "HH": 0.4,
             "NE1": -0.4, "HE1": 0.3,
         }
         charges = common.copy()
-        charges.update(amber)
+        if force_field != "protein-coarse-charge-v1":
+            logger.warning(
+                "Unknown native scoring profile '%s'. Defaulting to protein-coarse-charge-v1.",
+                force_field,
+            )
+        charges.update(protein_coarse)
         return charges
 
-    def _allowed_chis_for_residue(self, res_idx, aa, available_chis):
-        """
-        Decide which chi DOFs to expose for a residue.
-        """
 
-        available = sorted(set(available_chis), key=lambda x: (len(x), x))
-
-        if self.chi_mode == "all":
-            return available
-
-        if self.chi_mode == "chi1_only":
-            return [c for c in available if c == "chi1"]
-
-        if self.chi_mode == "selective":
-            allowed = self.selective_chi_map.get(aa, ["chi1"])
-            allowed = set(allowed)
-            return [c for c in available if c in allowed]
-
-        raise ValueError(f"Unknown chi_mode: {self.chi_mode}")
-
-    def _bounded_omega(self, omega):
-        """Clamp omega to the allowed trans-peptide band."""
-        val = float(omega)
-        if abs(val) < 1e-12:
-            return float(self.OMEGA_CENTER)
-        # MDTraj/PDB torsions are often represented as signed angles near -180.
-        # Convert those to the equivalent positive trans angle before enforcing
-        # the [170, 190] degree band; e.g. -174 deg means 186 deg, not 174 deg.
-        if -self.OMEGA_MAX <= val <= -self.OMEGA_MIN:
-            val = (2.0 * np.pi) + val
-        return float(np.clip(val, self.OMEGA_MIN, self.OMEGA_MAX))
-
-    def _map_angle_vector_to_physical_ranges(self, angle_vector):
-        """
-        Map unconstrained circuit phases into physical torsion ranges.
-
-        Phi/psi/chi remain regular signed torsions. Omega is restricted to the
-        trans band [170, 190] degrees, so quantum sampling cannot produce
-        unphysical peptide twists.
-        """
-        mapped = np.asarray(angle_vector, dtype=float).copy()
-        for j, dof in enumerate(self.dof_map[:len(mapped)]):
-            if str(dof.get("type")) == "omega":
-                raw = mapped[j]
-                if np.isfinite(raw):
-                    raw = float(np.clip(raw, -np.pi, np.pi))
-                    mapped[j] = self.OMEGA_CENTER + (raw / np.pi) * self.OMEGA_HALF_WIDTH
-                    mapped[j] = self._bounded_omega(mapped[j])
-        return mapped
-
-    def _angle_dict_from_vector(self, angle_vector):
-        angle_dict = {f"{x['res']}_{x['type']}": val for x, val in zip(self.dof_map, angle_vector)}
-        for key, val in list(angle_dict.items()):
-            if key.endswith("_omega"):
-                angle_dict[key] = self._bounded_omega(val)
-        return angle_dict
-
-    def _infer_element_from_atom_name(self, atom_name: str) -> str:
-        """Infer a PDB element symbol from a compact protein atom name."""
-        name = str(atom_name).strip()
-        if not name:
-            return "X"
-        # The topology currently only uses C/N/O/S/H-style atom names.
-        first = name[0].upper()
-        if first in {"C", "N", "O", "S", "H"}:
-            return first
-        return "X"
-
-    def build_output_structure(self, angle_vector):
-        """
-        Build the structure that should be emitted to downstream consumers.
-
-        In Rosetta stage-3 mode, this returns the actual PyRosetta pose scored
-        for the supplied torsions so saved PDBs and RMSDs reflect the same
-        structure Rosetta evaluated.
-        """
-        if self.stage_backend == "rosetta":
-            self._score_stage_rosetta(angle_vector, return_terms=True)
-            if self._last_rosetta_pose is not None and self.last_energy_terms.get("rosetta_error", 1.0) == 0.0:
-                return self._pose_to_coords_labels_bonds(self._last_rosetta_pose)
-        return self.build_full_structure(angle_vector)
-
-    def _assign_lj_type(self, rid: int, atom_name: str, elem: str) -> str:
-        """Assign a compact LJ atom type from residue, atom name, and element."""
-        aa = self.sequence[int(rid)] if 0 <= int(rid) < self.n_residues else "X"
-        name = str(atom_name)
-        elem = str(elem)
-
-        if elem == "H" or name.startswith("H"):
-            if name in ("H", "HN", "HG", "HG1", "HH", "HE1", "HE2"):
-                return "H_polar"
-            return "H"
-
-        if elem == "S" or name.startswith("S"):
-            return "S_sulfur"
-
-        if elem == "O":
-            if name == "O" or name == "OXT":
-                return "O_carbonyl"
-            if name in ("OD1", "OD2", "OE1", "OE2"):
-                return "O_carboxyl"
-            return "O_hydroxyl"
-
-        if elem == "N":
-            if name == "N":
-                return "N_backbone"
-            return "N_sidechain"
-
-        if elem == "C":
-            if name == "C":
-                return "C_carbonyl"
-            if name == "CA":
-                return "C_backbone"
-            if aa in ("F", "Y", "W", "H") and name in {
-                "CG", "CD1", "CD2", "CE1", "CE2", "CE3", "CZ", "CZ2", "CZ3", "CH2"
-            }:
-                return "C_aromatic"
-            return "C_aliphatic"
-
-        return "X"
-
-    def _ensure_rosetta(self):
-        global _PYROSETTA_INIT_DONE
-        if self._rosetta_ready:
-            return
-        if not _PYROSETTA_AVAILABLE:
-            raise RuntimeError("PyRosetta is not installed, but QTF_STAGE3_BACKEND=rosetta was requested.")
-        if not _PYROSETTA_INIT_DONE:
-            pyrosetta.init(self.rosetta_flags)
-            _PYROSETTA_INIT_DONE = True
-        self._rosetta_scorefxn_cen = pyrosetta.create_score_function(self.rosetta_centroid_weights)
-        try:
-            self._rosetta_scorefxn_fa = pyrosetta.create_score_function(self.rosetta_fullatom_weights)
-        except Exception:
-            self._rosetta_scorefxn_fa = pyrosetta.get_fa_scorefxn()
-        self._rosetta_ready = True
-
-    def _ensure_openmm(self):
-        if self._openmm_ready:
-            return
-        if not _OPENMM_AVAILABLE:
-            raise ImportError(
-                "OpenMM is required for the 'openmm' stage-3 backend but it is "
-                "not importable. Install it with `pip install \"qtf[workflows]\"` "
-                "(or `conda install -c conda-forge openmm`); if OpenMM is already "
-                "installed, the import failure means the install is broken (CUDA "
-                "mismatch, missing shared library, failed C++ extension load, etc.) "
-                "and the original error was logged at module-import time."
-            )
-        self._openmm_ready = True
-
-    def _build_rosetta_pose_from_angles(self, angle_vec):
-        self._ensure_rosetta()
-        pose = pyrosetta.pose_from_sequence(self.sequence, "fa_standard")
-        angle_dict = self._angle_dict_from_vector(angle_vec)
-        for i in range(1, pose.total_residue()):
-            pose.set_omega(i, float(np.rad2deg(angle_dict.get(f"{i-1}_omega", np.pi))))
-        for dof, ang in zip(self.dof_map, angle_vec):
-            resi = int(dof["res"]) + 1
-            t = str(dof["type"])
-            if t == "omega":
-                continue
-            deg = float(np.rad2deg(ang))
-            try:
-                if t == "phi":
-                    pose.set_phi(resi, deg)
-                elif t == "psi":
-                    pose.set_psi(resi, deg)
-                elif t.startswith("chi"):
-                    chi_idx = int(t.replace("chi", ""))
-                    if chi_idx <= pose.residue(resi).nchi():
-                        pose.set_chi(chi_idx, resi, deg)
-            except Exception:
-                continue
-        return pose
-
-    def _build_openmm_input_pdb(self, coords, labels):
-        tmp = tempfile.NamedTemporaryFile("w", suffix=".pdb", delete=False)
-        tmp.close()
-        coords = np.asarray(coords, dtype=float)
-        labels = list(labels)
-        res_ids = [int(lbl[0]) for lbl in labels]
-        if labels:
-            last_res = max(res_ids)
-            atom_names = {str(atom_name).upper() for rid, atom_name, _ in labels if int(rid) == last_res}
-            if "OXT" not in atom_names:
-                idx_c = idx_o = idx_ca = None
-                for i, (rid, atom_name, elem) in enumerate(labels):
-                    if int(rid) != last_res:
-                        continue
-                    an = str(atom_name).upper()
-                    if an == "C":
-                        idx_c = i
-                    elif an == "O":
-                        idx_o = i
-                    elif an == "CA":
-                        idx_ca = i
-                if idx_c is not None and idx_o is not None and idx_ca is not None:
-                    c = coords[idx_c]
-                    o = coords[idx_o]
-                    ca = coords[idx_ca]
-                    u = o - c
-                    nu = np.linalg.norm(u)
-                    if nu > 1e-6:
-                        u = u / nu
-                        v = ca - c
-                        nv = np.linalg.norm(v)
-                        if nv > 1e-6:
-                            v = v / nv
-                            n = np.cross(u, v)
-                            nn = np.linalg.norm(n)
-                            if nn > 1e-6:
-                                n = n / nn
-                                perp = np.cross(n, u)
-                                np_ = np.linalg.norm(perp)
-                                if np_ > 1e-6:
-                                    perp = perp / np_
-                                else:
-                                    perp = -u
-                                direction = (-0.5 * u) + (0.8660254037844386 * perp)
-                                nd = np.linalg.norm(direction)
-                                if nd > 1e-6:
-                                    direction = direction / nd
-                                    oxt = c + 1.24 * direction
-                                    coords = np.vstack([coords, oxt])
-                                    labels.append((last_res, "OXT", "O"))
-        self.save_pdb(
-            coords,
-            labels,
-            filename=tmp.name,
-            energy=0.0,
-            include_hydrogens=False,
+    def _rebuild_dof_map(self) -> None:
+        self.pheat_angle_specs = residue_angle_specs(
+            self.sequence,
+            selective_chi_map=self.selective_chi_map or None,
+            max_chi=self.max_chi,
+            stored_angles=self.stored_angles,
+            angle_units=self.angle_units,
         )
-        return tmp.name
+        self.pheat_chi_dofs_by_residue = {}
+        self.dof_map: list[dict] = []
+        self.dof_specs: list[dict] = []
+        for spec in self.pheat_angle_specs:
+            res_idx = int(spec["residue_index"])
+            angle_name = str(spec["angle_name"])
+            self.dof_map.append({"res": res_idx, "type": angle_name})
+            self.dof_specs.append({"kind": "angle", "res": res_idx, "type": angle_name})
+            if angle_name.startswith("chi"):
+                self.pheat_chi_dofs_by_residue.setdefault(res_idx, []).append(angle_name)
 
-    def _update_openmm_output_from_pdb(self, pdb_path):
-        if not pdb_path:
-            self._last_openmm_coords = None
-            self._last_openmm_labels = None
-            return
-        try:
-            coords, labels = qtf_gromacs.parse_pdb_atoms(pdb_path)
-            self._last_openmm_coords = coords
-            self._last_openmm_labels = labels
-        except Exception:
-            self._last_openmm_coords = None
-            self._last_openmm_labels = None
+        self.length_targets_by_residue = self._build_length_targets_by_residue()
+        self.length_dof_specs = self._build_length_dof_specs()
+        for spec in self.length_dof_specs:
+            self.dof_specs.append(spec)
+            self.dof_map.append({"res": spec.get("residue_index"), "type": f"length:{spec['key']}"})
 
-    def _pose_ca_coords(self, pose):
-        ca = []
-        for i in range(1, pose.total_residue() + 1):
-            rsd = pose.residue(i)
-            if rsd.has("CA"):
-                xyz = rsd.xyz("CA")
-                ca.append([float(xyz.x), float(xyz.y), float(xyz.z)])
-        return np.asarray(ca, dtype=float) if ca else np.zeros((0, 3), dtype=float)
+        self.total_angle_dofs = len(self.pheat_angle_specs)
+        self.total_length_dofs = len(self.length_dof_specs)
+        self.total_dofs = len(self.dof_specs)
 
-    def _pose_to_coords_labels_bonds(self, pose):
-        """
-        Convert the actual PyRosetta Pose that was scored/refined into the
-        runner.py coordinate/label/bond tuple used by downstream QTF code.
-
-        This is intentionally used in Rosetta mode so returned PDB/RMSD
-        coordinates match the object that Rosetta scored, repacked, and/or
-        minimized. Labels use 0-indexed residue IDs to preserve the existing
-        save_pdb() and centroid helpers. Bonds are left empty because QTF
-        downstream code treats them as optional metadata.
-        """
-        coords = []
-        labels = []
-        for i in range(1, pose.total_residue() + 1):
-            rsd = pose.residue(i)
-            for j in range(1, rsd.natoms() + 1):
-                atom_name = rsd.atom_name(j).strip()
-                xyz = rsd.xyz(j)
-                elem = "X"
-                try:
-                    elem = rsd.atom_type(j).element().strip() or atom_name[0]
-                except Exception:
-                    # Fallback for older PyRosetta builds.
-                    elem = atom_name[0] if atom_name else "X"
-                coords.append([float(xyz.x), float(xyz.y), float(xyz.z)])
-                labels.append((i - 1, atom_name, elem))
-        return np.asarray(coords, dtype=float), labels, []
-
-    def _final_output_structure_from_params(self, params):
-        """
-        Return the final structure for fold(). In custom mode this is the
-        original QTF NERF rebuild. In Rosetta mode this forcibly refreshes
-        scoring at the final optimizer parameters and returns the actual
-        PyRosetta full-atom pose used for scoring/refinement.
-        """
-        angle_vec = self._get_angles(params)
-        if self.stage_backend == "rosetta":
-            # Force one final score call at res_3.x so _last_rosetta_pose is
-            # synchronized with the optimizer's final parameter vector.
-            self._score_stage_rosetta(angle_vec, return_terms=True)
-            if self._last_rosetta_pose is not None and self.last_energy_terms.get("rosetta_error", 1.0) == 0.0:
-                return self._pose_to_coords_labels_bonds(self._last_rosetta_pose)
-        if self.stage_backend == "openmm":
-            self._score_stage_openmm(angle_vec, return_terms=True)
-            if self._last_openmm_coords is not None and self.last_energy_terms.get("openmm_error", 1.0) == 0.0:
-                return self._last_openmm_coords, self._last_openmm_labels, []
-        return self.build_full_structure(angle_vec)
-
-    def _extract_rosetta_terms(self, pose, scorefxn, prefix):
-        """Return a stable set of Rosetta term columns, including zeros."""
-        _ = scorefxn(pose)
-        emap = pose.energies().total_energies()
-        names = [
-            "fa_atr", "fa_rep", "fa_sol", "lk_ball_wtd", "fa_elec",
-            "hbond_sr_bb", "hbond_lr_bb", "hbond_bb_sc", "hbond_sc",
-            "rama_prepro", "omega", "p_aa_pp", "fa_dun", "dslf_fa13", "ref",
-            "env", "pair", "cbeta", "vdw", "rg", "rama",
-        ]
-        out = {}
-        for name in names:
-            val = 0.0
-            if hasattr(_rosetta.core.scoring, name):
-                st = getattr(_rosetta.core.scoring, name)
-                try:
-                    val = float(emap[st])
-                except Exception:
-                    val = 0.0
-            out[f"{prefix}_{name}"] = val
-        out[f"{prefix}_total"] = float(scorefxn(pose))
-        return out
-
-    def _score_stage_rosetta(self, angle_vec, return_terms=False):
-        terms = {"energy_backend_rosetta": 1.0, "energy_backend_custom": 0.0, "energy_backend_openmm": 0.0}
-        try:
-            self._ensure_rosetta()
-            fa_pose = self._build_rosetta_pose_from_angles(angle_vec)
-
-            cen_pose = fa_pose.clone()
-            _rosetta.protocols.simple_moves.SwitchResidueTypeSetMover("centroid").apply(cen_pose)
-            cen_score = float(self._rosetta_scorefxn_cen(cen_pose))
-            terms.update(self._extract_rosetta_terms(cen_pose, self._rosetta_scorefxn_cen, "cen"))
-
-            if self.rosetta_do_centroid_min:
-                mm = _rosetta.core.kinematics.MoveMap()
-                mm.set_bb(True)
-                mm.set_chi(False)
-                minmov = _rosetta.protocols.minimization_packing.MinMover()
-                minmov.movemap(mm)
-                minmov.score_function(self._rosetta_scorefxn_cen)
-                minmov.min_type("lbfgs_armijo_nonmonotone")
-                minmov.apply(cen_pose)
-                cen_score = float(self._rosetta_scorefxn_cen(cen_pose))
-                terms.update(self._extract_rosetta_terms(cen_pose, self._rosetta_scorefxn_cen, "cen"))
-
-            if self.rosetta_do_repack:
-                task = pyrosetta.standard_packer_task(fa_pose)
-                task.restrict_to_repacking()
-                task.or_include_current(True)
-                packer = _rosetta.protocols.minimization_packing.PackRotamersMover(self._rosetta_scorefxn_fa, task)
-                packer.apply(fa_pose)
-
-            if self.rosetta_do_fullatom_min:
-                mm = _rosetta.core.kinematics.MoveMap()
-                mm.set_bb(False)
-                mm.set_chi(True)
-                minmov = _rosetta.protocols.minimization_packing.MinMover()
-                minmov.movemap(mm)
-                minmov.score_function(self._rosetta_scorefxn_fa)
-                minmov.min_type("lbfgs_armijo_nonmonotone")
-                minmov.apply(fa_pose)
-
-            fa_score = float(self._rosetta_scorefxn_fa(fa_pose))
-            terms.update(self._extract_rosetta_terms(fa_pose, self._rosetta_scorefxn_fa, "fa"))
-            total = self.rosetta_cen_weight * cen_score + self.rosetta_fa_weight * fa_score
-            terms["rosetta_cen_weight"] = float(self.rosetta_cen_weight)
-            terms["rosetta_fa_weight"] = float(self.rosetta_fa_weight)
-            terms["rosetta_total"] = float(total)
-            terms["total"] = float(total)
-            terms["rosetta_error"] = 0.0
-            self._last_rosetta_pose = fa_pose.clone()
-            self._last_rosetta_ca = self._pose_ca_coords(fa_pose)
-        except Exception as exc:
-            total = 1.0e6
-            # Emit stable columns even on failure so CSV/analyzer columns do not
-            # become all-empty or disappear in mixed runs.
-            for p in ("cen", "fa"):
-                for name in [
-                    "fa_atr", "fa_rep", "fa_sol", "lk_ball_wtd", "fa_elec",
-                    "hbond_sr_bb", "hbond_lr_bb", "hbond_bb_sc", "hbond_sc",
-                    "rama_prepro", "omega", "p_aa_pp", "fa_dun", "dslf_fa13", "ref",
-                    "env", "pair", "cbeta", "vdw", "rg", "rama", "total",
-                ]:
-                    terms[f"{p}_{name}"] = 0.0
-            terms["rosetta_cen_weight"] = float(self.rosetta_cen_weight)
-            terms["rosetta_fa_weight"] = float(self.rosetta_fa_weight)
-            terms["rosetta_total"] = float(total)
-            terms["total"] = float(total)
-            terms["rosetta_error"] = 1.0
-            terms["rosetta_message_hash"] = float(abs(hash(str(exc))) % 1000000)
-        self.last_energy_terms = {k: float(v) for k, v in terms.items()}
-        if self.tracker is not None:
-            self.tracker.log(float(total))
-        return float(total)
-
-    def _score_stage_openmm(self, angle_vec, return_terms=False):
-        terms = {"energy_backend_openmm": 1.0, "energy_backend_custom": 0.0, "energy_backend_rosetta": 0.0}
-        try:
-            self._ensure_openmm()
-            coords, labels, _ = self.build_full_structure(angle_vec)
-            input_pdb = self._build_openmm_input_pdb(coords, labels)
-            workdir = tempfile.mkdtemp(prefix="qtf_openmm_")
-            prepared_pdb = os.path.join(workdir, "prepared_input.pdb")
-            minimized_pdb = os.path.join(workdir, "minimized.pdb")
-            result = {
-                "openmm_status": "not_run",
-                "openmm_message": "",
-                "openmm_workdir": workdir,
-                "openmm_prepared_pdb_path": prepared_pdb,
-                "openmm_minimized_full_pdb_path": "",
-                "openmm_potential_kj_mol": np.nan,
-                "openmm_potential_kcal_mol": np.nan,
-                "openmm_converged": False,
-                "openmm_final_max_force": np.nan,
-            }
-
-            qtf_gromacs.prepare_pdb_for_gromacs(input_pdb, Path(prepared_pdb))
-            pdb = _PDBFile(str(prepared_pdb))
-            modeller = _Modeller(pdb.topology, pdb.positions)
-            forcefield = _ForceField(self.openmm_forcefield)
-            modeller.addHydrogens(forcefield, pH=float(self.openmm_ph))
-            system = forcefield.createSystem(
-                modeller.topology,
-                nonbondedMethod=_NoCutoff,
-                constraints=_HBonds,
-                rigidWater=False,
-                removeCMMotion=False,
-            )
-            integrator = _mm.VerletIntegrator(1.0 * _unit.femtoseconds)
-            platform_name = (self.openmm_platform or "CPU").strip() or "CPU"
-            try:
-                platform = _mm.Platform.getPlatformByName(platform_name)
-            except Exception:
-                platform = _mm.Platform.getPlatform(0)
-            context = _mm.Context(system, integrator, platform)
-            context.setPositions(modeller.positions)
-
-            if self.openmm_do_minimize:
-                _mm.LocalEnergyMinimizer.minimize(
-                    context,
-                    tolerance=float(self.openmm_tolerance) * _unit.kilojoule_per_mole / _unit.nanometer,
-                    maxIterations=int(self.openmm_max_iterations),
+    def _build_length_targets_by_residue(self) -> dict[int, list[dict[str, Any]]]:
+        targets: dict[int, list[dict[str, Any]]] = {}
+        if not self.stored_lengths:
+            return targets
+        for res_idx, aa in enumerate(self.sequence):
+            resname = one_to_three(aa)
+            residue_targets = [
+                {"key": "N-CA", "default": N_CA, "class": "backbone"},
+                {"key": "CA-C", "default": CA_C, "class": "backbone"},
+                {"key": "C-O", "default": C_O, "class": "backbone"},
+            ]
+            if res_idx < self.n_residues - 1:
+                residue_targets.append({"key": "C-N", "default": C_N, "class": "backbone"})
+            if resname != "GLY":
+                residue_targets.append({"key": "CA-CB", "default": CA_CB, "class": "sidechain"})
+            for step in SIDECHAIN_STEPS.get(resname, []):
+                residue_targets.append(
+                    {
+                        "key": f"{step.parent}-{step.atom}",
+                        "default": float(step.length),
+                        "class": "sidechain",
+                    }
                 )
+            for ring_target in self._ring_closure_length_targets(resname):
+                residue_targets.append(ring_target)
+            selected = [
+                target
+                for target in residue_targets
+                if self._length_requested(str(target["key"]))
+            ]
+            if selected:
+                targets[res_idx] = selected
+        return targets
 
-            state = context.getState(getEnergy=True, getPositions=True)
-            potential_kj = float(state.getPotentialEnergy().value_in_unit(_unit.kilojoule_per_mole))
-            result["openmm_status"] = "ok"
-            result["openmm_potential_kj_mol"] = potential_kj
-            result["openmm_potential_kcal_mol"] = float(potential_kj / 4.184)
-            result["openmm_converged"] = bool(self.openmm_do_minimize)
-            if self.openmm_do_minimize:
-                with open(minimized_pdb, "w") as handle:
-                    _PDBFile.writeFile(modeller.topology, state.getPositions(), handle)
-                result["openmm_minimized_full_pdb_path"] = minimized_pdb
-            else:
-                result["openmm_minimized_full_pdb_path"] = ""
+    def _build_length_dof_specs(self) -> list[dict[str, Any]]:
+        if not self.length_targets_by_residue:
+            return []
+        if self.length_encoding_scope == "per-residue":
+            return [
+                {
+                    "kind": "length",
+                    "scope": "per-residue",
+                    "residue_index": res_idx,
+                    "res": res_idx,
+                    "key": target["key"],
+                    "class": target["class"],
+                }
+                for res_idx, targets in self.length_targets_by_residue.items()
+                for target in targets
+            ]
 
-            terms["openmm_potential_kj_mol"] = potential_kj
-            terms["openmm_potential_kcal_mol"] = float(potential_kj / 4.184)
-            terms["total"] = float(potential_kj)
-            terms["openmm_status_ok"] = 1.0
-            terms["openmm_minimize"] = 1.0 if self.openmm_do_minimize else 0.0
-            terms["openmm_error"] = 0.0
-            terms["openmm_forcefield_hash"] = float(abs(hash(self.openmm_forcefield)) % 1000000)
-            terms["openmm_platform_hash"] = float(abs(hash(platform_name)) % 1000000)
-            terms["openmm_max_iterations"] = float(self.openmm_max_iterations)
-            terms["openmm_tolerance"] = float(self.openmm_tolerance)
-            terms["openmm_ph"] = float(self.openmm_ph)
-            terms["openmm_status_hash"] = float(abs(hash(str(result.get("openmm_status", "")))) % 1000000)
-            terms["openmm_message_hash"] = float(abs(hash(str(result.get("openmm_message", "")))) % 1000000)
+        specs_by_key: dict[str, dict[str, Any]] = {}
+        for targets in self.length_targets_by_residue.values():
+            for target in targets:
+                key = str(target["key"])
+                specs_by_key.setdefault(
+                    key,
+                    {
+                        "kind": "length",
+                        "scope": "shared-by-type",
+                        "residue_index": None,
+                        "res": None,
+                        "key": key,
+                        "class": target["class"],
+                    },
+                )
+        return list(specs_by_key.values())
 
-            if result.get("openmm_minimized_full_pdb_path"):
-                self._update_openmm_output_from_pdb(str(result["openmm_minimized_full_pdb_path"]))
-            else:
-                self._last_openmm_coords = coords
-                self._last_openmm_labels = labels
+    @staticmethod
+    def _ring_closure_length_targets(resname: str) -> list[dict[str, Any]]:
+        if resname in {"PRO", "HYP"}:
+            return [{"key": "N-CD", "default": PRO_N_CD, "class": "sidechain"}]
+        if resname == "PCA":
+            return [{"key": "N-CD", "default": PCA_N_CD, "class": "sidechain"}]
+        if resname == "PYL":
+            return [{"key": "CA2-CG2", "default": PYL_CA2_CG2, "class": "sidechain"}]
+        return []
 
-            total = potential_kj
-            try:
-                os.unlink(input_pdb)
-            except OSError:
-                pass
-        except Exception as exc:
-            total = 1.0e6
-            terms["openmm_potential_kj_mol"] = float(total)
-            terms["openmm_potential_kcal_mol"] = float(total / 4.184)
-            terms["total"] = float(total)
-            terms["openmm_status_ok"] = 0.0
-            terms["openmm_minimize"] = 1.0 if self.openmm_do_minimize else 0.0
-            terms["openmm_error"] = 1.0
-            terms["openmm_forcefield_hash"] = float(abs(hash(self.openmm_forcefield)) % 1000000)
-            terms["openmm_platform_hash"] = float(abs(hash(self.openmm_platform)) % 1000000)
-            terms["openmm_max_iterations"] = float(self.openmm_max_iterations)
-            terms["openmm_tolerance"] = float(self.openmm_tolerance)
-            terms["openmm_ph"] = float(self.openmm_ph)
-            terms["openmm_status_hash"] = float(abs(hash(type(exc).__name__)) % 1000000)
-            terms["openmm_message_hash"] = float(abs(hash(str(exc))) % 1000000)
-            self._last_openmm_coords = None
-            self._last_openmm_labels = None
-        self.last_energy_terms = {k: float(v) for k, v in terms.items()}
-        if self.tracker is not None:
-            self.tracker.log(float(total))
-        return float(total)
+    def _length_requested(self, key: str) -> bool:
+        if "all" in self.stored_lengths:
+            return True
+        if key in self.stored_lengths:
+            return True
+        if key in RESIDUE_GEOMETRY_BACKBONE_LENGTHS:
+            return "backbone" in self.stored_lengths
+        return "sidechain" in self.stored_lengths
 
-    def _get_angles(self, params: np.ndarray) -> np.ndarray:
-        """Map circuit parameters to torsion angles.
+    def _get_angles(
+        self,
+        params: np.ndarray,
+        mode: str = "statevector",
+        backend=None,
+        shots: int = 4096,
+        transpile_optimization_level=_UNSET,
+        transpile_seed=_UNSET,
+    ) -> np.ndarray:
+        """Map circuit parameters to torsion angles via statevector phases or sampled bases.
 
-        In ``"statevector"`` mode (default) the 2ⁿ complex amplitudes of the
-        statevector each carry a phase in ``(-π, π]``.  The first
-        ``total_angles`` phases are used as torsion angles after removing the
-        **global phase**.
+        The 2ⁿ complex amplitudes of the statevector each carry a phase in
+        ``(-π, π]``.  The first ``total_angles`` phases are used as torsion
+        angles after removing the **global phase**.
 
         A global rotation ``e^{iα}|ψ⟩`` shifts every amplitude phase by α
         uniformly, but is physically unobservable — it would add a spurious
@@ -1045,115 +485,232 @@ class QuantumBiophysicsFolder:
         is conventionally undefined (or set to a reference value).  The
         optimiser therefore controls ``K − 1`` independent phase degrees of
         freedom for K total torsion angles.
-
-        In ``"sampler"`` mode a shot-based measurement is performed; the
-        empirical probability distribution is accumulated into a CDF and
-        mapped linearly onto ``(-π, π]``.  This mode supports real quantum
-        hardware by accepting a ``backend`` instance.
         """
+        if mode == "sampler":
+            return self._get_sampler_angles(
+                params,
+                backend=backend,
+                shots=shots,
+                transpile_optimization_level=transpile_optimization_level,
+                transpile_seed=transpile_seed,
+            )
         param_dict = dict(zip(self.ansatz.parameters, params))
         bound_circuit = self.ansatz.assign_parameters(param_dict)
-
-        if self.mode == "sampler":
-            return self._get_angles_sampler(bound_circuit)
-
-        # Default: statevector mode
-        psi = _statevector_data(bound_circuit)
+        psi = Statevector(bound_circuit).data
         phases = np.angle(psi)[: self.total_angles]
         # Remove global phase: pin phases[0] to 0 and wrap into (-π, π].
         phases = (phases - np.angle(psi[0]) + np.pi) % (2 * np.pi) - np.pi
-        return self._map_angle_vector_to_physical_ranges(phases)
+        return phases
 
-    def _get_angles_sampler(self, bound_circuit) -> np.ndarray:
-        """Shot-based angle extraction via empirical probability CDF.
+    def _get_sampler_angles(
+        self,
+        params: np.ndarray,
+        *,
+        backend,
+        shots: int,
+        transpile_optimization_level=_UNSET,
+        transpile_seed=_UNSET,
+    ) -> np.ndarray:
+        if shots <= 0:
+            raise ValueError("shots must be positive for sampler angle extraction.")
+        if backend is None:
+            try:
+                from qiskit_aer import AerSimulator
+            except ImportError as exc:
+                raise RuntimeError("Sampler angle extraction requires a backend or qiskit-aer.") from exc
+            backend = AerSimulator()
 
-        Runs a measurement on ``bound_circuit`` using ``self.backend`` (or an
-        ``AerSimulator`` when no backend is provided), accumulates the shot
-        counts into a probability vector, and maps the cumulative distribution
-        function linearly onto ``(-π, π]`` to produce torsion angles.
-        """
-        from qiskit import transpile
+        param_dict = dict(zip(self.ansatz.parameters, params))
+        bound_circuit = self.ansatz.assign_parameters(param_dict)
+        n_states = 2 ** self.n_qubits
+        is_statevector_shots = _backend_display_name(backend) == "statevector-shots"
+        optimization_level = (
+            self.transpile_optimization_level
+            if transpile_optimization_level is _UNSET
+            else _normalize_transpile_optimization_level(transpile_optimization_level)
+        )
+        seed_transpiler = (
+            self.transpile_seed
+            if transpile_seed is _UNSET
+            else _normalize_transpile_seed(transpile_seed)
+        )
+
+        def _transpile_kwargs():
+            kwargs = {}
+            if optimization_level is not None:
+                kwargs["optimization_level"] = int(optimization_level)
+            if seed_transpiler is not None:
+                kwargs["seed_transpiler"] = int(seed_transpiler)
+            return kwargs
+
+        def _basis_circuit(qc, basis: str):
+            circuit = qc.copy()
+            if basis == "X":
+                for qubit in range(self.n_qubits):
+                    circuit.h(qubit)
+            elif basis == "Y":
+                for qubit in range(self.n_qubits):
+                    circuit.sdg(qubit)
+                    circuit.h(qubit)
+            if not is_statevector_shots:
+                circuit.measure_all()
+            return circuit
+
+        circuits = [
+            _basis_circuit(bound_circuit, "Z"),
+            _basis_circuit(bound_circuit, "X"),
+            _basis_circuit(bound_circuit, "Y"),
+        ]
+
+        def _statevector_counts(qc, basis_offset: int):
+            statevector = Statevector(qc)
+            seed = getattr(backend, "seed", None)
+            if seed is not None:
+                statevector.seed(int(seed) + basis_offset)
+            return statevector.sample_counts(shots)
+
+        def _counts_to_pvec(counts):
+            pvec = np.zeros(n_states, dtype=float)
+            total = sum(counts.values())
+            if total <= 0:
+                raise ValueError("shot sampling produced no measurement counts.")
+            for bitstring, count in counts.items():
+                idx = int(str(bitstring).replace(" ", "")[::-1], 2)
+                pvec[idx] += count / total
+            return pvec
+
+        def _serial_counts():
+            counts = []
+            for circuit in circuits:
+                tqc = transpile(circuit, backend, **_transpile_kwargs())
+                counts.append(backend.run(tqc, shots=shots).result().get_counts())
+            return counts
+
+        def _batched_counts():
+            tqcs = transpile(circuits, backend, **_transpile_kwargs())
+            result = backend.run(tqcs, shots=shots).result()
+            return [result.get_counts(index) for index in range(len(circuits))]
+
+        requested = getattr(self, "basis_circuit_batching", "auto")
+        if is_statevector_shots:
+            counts = [_statevector_counts(circuit, offset) for offset, circuit in enumerate(circuits)]
+            effective = "local_statevector_serial" if requested == "off" else "local_statevector"
+            self._record_basis_circuit_batching(
+                effective=effective,
+                backend=backend,
+                transpile_optimization_level=optimization_level,
+                transpile_seed=seed_transpiler,
+            )
+            return self._angles_from_probability_vectors(*[_counts_to_pvec(item) for item in counts])
+
+        if requested == "off":
+            counts = _serial_counts()
+            self._record_basis_circuit_batching(
+                effective="serial",
+                backend=backend,
+                transpile_optimization_level=optimization_level,
+                transpile_seed=seed_transpiler,
+            )
+            return self._angles_from_probability_vectors(*[_counts_to_pvec(item) for item in counts])
 
         try:
-            from qiskit_aer import AerSimulator
-        except ImportError as exc:
-            raise ImportError(
-                "qiskit-aer is required for sampler mode. "
-                "Install it with: pip install qiskit-aer"
-            ) from exc
+            counts = _batched_counts()
+            self._record_basis_circuit_batching(
+                effective="batched",
+                backend=backend,
+                transpile_optimization_level=optimization_level,
+                transpile_seed=seed_transpiler,
+            )
+        except Exception as exc:
+            if requested == "on":
+                raise RuntimeError(
+                    "Basis-circuit batching was requested but the backend did not accept the batched Z/X/Y job: "
+                    f"{exc}"
+                ) from exc
+            counts = _serial_counts()
+            self._record_basis_circuit_batching(
+                effective="fallback_serial",
+                backend=backend,
+                transpile_optimization_level=optimization_level,
+                transpile_seed=seed_transpiler,
+                reason=f"{_backend_display_name(backend)}: {exc}",
+            )
+        return self._angles_from_probability_vectors(*[_counts_to_pvec(item) for item in counts])
 
-        backend = self.backend if self.backend is not None else AerSimulator()
+    def _record_basis_circuit_batching(
+        self,
+        *,
+        effective: str,
+        backend,
+        reason: Optional[str] = None,
+        transpile_optimization_level: Optional[int] = None,
+        transpile_seed: Optional[int] = None,
+    ) -> None:
+        stats = getattr(self, "basis_circuit_batching_stats", None)
+        if not isinstance(stats, dict):
+            return
+        stats["calls"] = int(stats.get("calls") or 0) + 1
+        stats["basis_circuits"] = int(stats.get("basis_circuits") or 0) + 3
+        stats["last_effective"] = effective
+        stats["last_backend"] = _backend_display_name(backend) if backend is not None else "statevector"
+        stats["last_transpile_optimization_level"] = transpile_optimization_level
+        stats["last_transpile_seed"] = transpile_seed
+        if effective == "batched":
+            stats["batched_calls"] = int(stats.get("batched_calls") or 0) + 1
+            stats["backend_jobs"] = int(stats.get("backend_jobs") or 0) + 1
+        elif effective.startswith("local_statevector"):
+            stats["local_statevector_calls"] = int(stats.get("local_statevector_calls") or 0) + 1
+        else:
+            stats["serial_calls"] = int(stats.get("serial_calls") or 0) + 1
+            stats["backend_jobs"] = int(stats.get("backend_jobs") or 0) + 3
+            if effective == "fallback_serial":
+                stats["fallback_calls"] = int(stats.get("fallback_calls") or 0) + 1
+        if reason:
+            reasons = list(stats.get("fallback_reasons") or [])
+            if reason not in reasons:
+                reasons.append(reason)
+            stats["fallback_reasons"] = reasons[-10:]
+
+    def _angles_from_probability_vectors(self, pZ, pX, pY):
         n_states = 2 ** self.n_qubits
+        state_angles = 2.0 * np.pi * np.arange(n_states) / n_states
 
-        qc = bound_circuit.copy()
-        qc.measure_all()
-        tqc = transpile(qc, backend)
-        counts = backend.run(tqc, shots=self.shots).result().get_counts()
+        def _marginal_angles(pvec):
+            angles = []
+            for qubit in range(self.n_qubits):
+                mask = np.array([(index >> qubit) & 1 for index in range(n_states)], dtype=float)
+                angles.append(2.0 * np.pi * np.dot(pvec, mask) - np.pi)
+            return np.array(angles)
 
-        pvec = np.zeros(n_states, dtype=float)
-        total = sum(counts.values())
-        for bitstring, c in counts.items():
-            bs = bitstring.replace(" ", "")[::-1]
-            idx = int(bs, 2)
-            pvec[idx] += c / total
+        def _circular_mean(pvec):
+            return np.arctan2(np.sum(pvec * np.sin(state_angles)), np.sum(pvec * np.cos(state_angles)))
 
-        cdf = np.cumsum(pvec)
-        angles = 2.0 * np.pi * cdf - np.pi
-        return self._map_angle_vector_to_physical_ranges(angles[: self.total_angles])
-
-    @staticmethod
-    def _build_brickwork_ansatz(n_qubits: int, reps: int):
-        """Build a custom brickwork (brick-layer) ansatz circuit.
-
-        Structure per rep:
-
-        - Layer 1: ``Ry`` + ``Rz`` on every qubit.
-        - Layer 2: ``CX`` on even pairs (0–1, 2–3, 4–5, …).
-        - Layer 3: ``CX`` on odd pairs (1–2, 3–4, 5–6, …).
-
-        This gives full nearest-neighbour connectivity in two CX layers per
-        rep — lower serial depth than circular entanglement and therefore
-        less noise on current hardware.
-
-        Parameters
-        ----------
-        n_qubits:
-            Number of qubits in the circuit.
-        reps:
-            Number of repetitions of the rotation + entanglement block.
-
-        Returns
-        -------
-        qiskit.circuit.QuantumCircuit
-            Parameterised circuit with ``2 * n_qubits * (reps + 1)``
-            free parameters.
-        """
-        from qiskit import QuantumCircuit
-        from qiskit.circuit import ParameterVector
-
-        n_params_total = 2 * n_qubits * (reps + 1)
-        params = ParameterVector("θ", n_params_total)
-        qc = QuantumCircuit(n_qubits)
-        p_idx = 0
-
-        for _ in range(reps):
-            # Single-qubit rotation layer
-            for q in range(n_qubits):
-                qc.ry(params[p_idx], q); p_idx += 1
-                qc.rz(params[p_idx], q); p_idx += 1
-            # Even-pair entanglement: (0,1), (2,3), …
-            for q in range(0, n_qubits - 1, 2):
-                qc.cx(q, q + 1)
-            # Odd-pair entanglement: (1,2), (3,4), …
-            for q in range(1, n_qubits - 1, 2):
-                qc.cx(q, q + 1)
-
-        # Final rotation layer (no entanglement after)
-        for q in range(n_qubits):
-            qc.ry(params[p_idx], q); p_idx += 1
-            qc.rz(params[p_idx], q); p_idx += 1
-
-        return qc
+        cdf_angles = 2.0 * np.pi * np.cumsum(pZ) - np.pi
+        eps = 1e-12
+        kl_zx = float(np.sum(pZ * np.log((pZ + eps) / (pX + eps))))
+        kl_zy = float(np.sum(pZ * np.log((pZ + eps) / (pY + eps))))
+        base = np.concatenate(
+            [
+                _marginal_angles(pZ),
+                _marginal_angles(pX),
+                _marginal_angles(pY),
+                [_circular_mean(pZ), _circular_mean(pX), _circular_mean(pY)],
+                cdf_angles,
+                [np.arctan(kl_zx) * 2.0 - np.pi / 2.0, np.arctan(kl_zy) * 2.0 - np.pi / 2.0],
+            ]
+        )
+        base = np.clip(base, -np.pi, np.pi)
+        if len(base) >= self.total_angles:
+            return base[: self.total_angles]
+        out = np.zeros(self.total_angles, dtype=float)
+        out[: len(base)] = base
+        for idx in range(len(base), self.total_angles):
+            i = idx % len(base)
+            j = (idx * 3 + 1) % len(base)
+            m = (idx * 7 + 2) % len(base)
+            value = 0.60 * base[i] + 0.30 * np.sin(base[j]) + 0.10 * np.cos(base[m])
+            out[idx] = (value + np.pi) % (2 * np.pi) - np.pi
+        return out
 
     @staticmethod
     def _nerf_step(
@@ -1176,27 +733,380 @@ class QuantumBiophysicsFolder:
         ])
         return c + (M @ d)
 
+    def _raw_dof_maps(self, dof_vector: np.ndarray) -> tuple[dict[str, float], dict[tuple[Any, str], float]]:
+        angle_values: dict[str, float] = {}
+        length_values: dict[tuple[Any, str], float] = {}
+        for spec, value in zip(self.dof_specs, dof_vector):
+            if spec["kind"] == "angle":
+                angle_values[f"{spec['res']}_{spec['type']}"] = float(value)
+            elif spec["kind"] == "length":
+                key = str(spec["key"])
+                if spec.get("scope") == "shared-by-type":
+                    length_values[(None, key)] = float(value)
+                else:
+                    length_values[(int(spec["residue_index"]), key)] = float(value)
+        return angle_values, length_values
+
+    def _angle_dict(self, angle_vector: np.ndarray) -> dict[str, float]:
+        return self._raw_dof_maps(angle_vector)[0]
+
+    def _to_configured_units(self, angle_radians: Optional[float]) -> Optional[float]:
+        if angle_radians is None:
+            return None
+        if self.angle_units == "degrees":
+            return float(math.degrees(angle_radians))
+        return float(angle_radians)
+
+    def _angle_from_configured_units(self, angle_value: Optional[float]) -> Optional[float]:
+        if angle_value is None:
+            return None
+        if self.angle_units == "degrees":
+            return float(math.radians(float(angle_value)))
+        return float(angle_value)
+
+    def _residue_angle_radians(self, residue: Optional[ResidueGeometry], name: str) -> Optional[float]:
+        if residue is None:
+            return None
+        return self._angle_from_configured_units(getattr(residue, name, None))
+
+    def _residue_chi_radians(self, residue: Optional[ResidueGeometry], chi_name: str) -> Optional[float]:
+        if residue is None or not chi_name.startswith("chi"):
+            return None
+        try:
+            chi_index = int(chi_name[3:]) - 1
+        except ValueError:
+            return None
+        if not (0 <= chi_index < len(residue.chi)):
+            return None
+        return self._angle_from_configured_units(residue.chi[chi_index])
+
+    def _encoded_torsion_value(
+        self,
+        raw_radians: Optional[float],
+        base_radians: Optional[float],
+    ) -> Optional[float]:
+        if raw_radians is None:
+            return self._to_configured_units(base_radians)
+        if base_radians is None:
+            return self._to_configured_units(float(raw_radians))
+        return self._to_configured_units(_wrap_radians(float(base_radians) + float(raw_radians)))
+
+    def _bond_angle_value(
+        self,
+        raw_radians: Optional[float],
+        *,
+        center_deg: float,
+        span_deg: float,
+        base_radians: Optional[float] = None,
+    ) -> Optional[float]:
+        if raw_radians is None:
+            return self._to_configured_units(base_radians)
+        if self.bond_angle_encoding == "raw":
+            if base_radians is not None:
+                return self._to_configured_units(float(base_radians) + float(raw_radians))
+            return self._to_configured_units(float(raw_radians))
+        base_deg = math.degrees(base_radians) if base_radians is not None else center_deg
+        angle_deg = base_deg + span_deg * math.sin(float(raw_radians))
+        return self._to_configured_units(math.radians(angle_deg))
+
+    def _template_residue(self, res_idx: int) -> Optional[ResidueGeometry]:
+        template = self.reference_residue_geometry
+        if template is None or not (0 <= res_idx < len(template.residues)):
+            return None
+        return template.residues[res_idx]
+
+    def _base_residue(self, res_idx: int) -> Optional[ResidueGeometry]:
+        base = self.base_residue_geometry
+        if base is None or not (0 <= res_idx < len(base.residues)):
+            return None
+        return base.residues[res_idx]
+
+    def _template_disulfide_bonds(self):
+        template = self.reference_residue_geometry
+        if template is None:
+            return []
+        return list(template.disulfide_bonds)
+
+    @staticmethod
+    def _residue_bond_length(residue: Optional[ResidueGeometry], key: str) -> Optional[float]:
+        if residue is None:
+            return None
+        value = residue.bond_lengths.get(key)
+        return None if value is None else float(value)
+
+    def _length_span_for_target(self, target: dict[str, Any]) -> float:
+        if target.get("class") == "backbone":
+            return self.backbone_length_span
+        return self.sidechain_length_span
+
+    def _encoded_bond_lengths(
+        self,
+        res_idx: int,
+        *,
+        base_residue: Optional[ResidueGeometry],
+        template_residue: Optional[ResidueGeometry],
+        length_values: dict[tuple[Any, str], float],
+    ) -> dict[str, float]:
+        bond_lengths = dict(template_residue.bond_lengths) if template_residue is not None else {}
+        for target in self.length_targets_by_residue.get(res_idx, []):
+            key = str(target["key"])
+            raw_value = length_values.get((res_idx, key), length_values.get((None, key), 0.0))
+            base_length = (
+                self._residue_bond_length(base_residue, key)
+                or self._residue_bond_length(template_residue, key)
+                or float(target["default"])
+            )
+            encoded = base_length + self._length_span_for_target(target) * math.sin(float(raw_value))
+            bond_lengths[key] = max(MIN_ENCODED_BOND_LENGTH_A, float(encoded))
+        return bond_lengths
+
+    def angle_vector_to_residue_geometry(self, angle_vector: np.ndarray) -> ResidueGeometryStructure:
+        """Convert a QTF raw DOF vector to PHEAT residue geometry."""
+
+        angle_dict, length_values = self._raw_dof_maps(angle_vector)
+        residues = []
+        for res_idx, aa in enumerate(self.sequence):
+            template_residue = self._template_residue(res_idx)
+            base_residue = self._base_residue(res_idx)
+            metadata_residue = template_residue or base_residue
+            chain_id = metadata_residue.chain_id if metadata_residue is not None else "A"
+            resseq = metadata_residue.resseq if metadata_residue is not None else res_idx + 1
+            icode = metadata_residue.icode if metadata_residue is not None else ""
+            chi_values = []
+            for chi_name in self.pheat_chi_dofs_by_residue.get(res_idx, []):
+                key = f"{res_idx}_{chi_name}"
+                if key in angle_dict:
+                    chi_values.append(
+                        self._encoded_torsion_value(
+                            angle_dict[key],
+                            self._residue_chi_radians(base_residue, chi_name),
+                        )
+                    )
+
+            omega = None
+            theta = None
+            if res_idx < self.n_residues - 1:
+                if "omega" in self.stored_angles:
+                    omega = self._encoded_torsion_value(
+                        angle_dict.get(f"{res_idx}_omega"),
+                        self._residue_angle_radians(base_residue, "omega"),
+                    )
+                if "theta" in self.stored_angles:
+                    theta = self._bond_angle_value(
+                        angle_dict.get(f"{res_idx}_theta"),
+                        center_deg=self.theta_center_deg,
+                        span_deg=self.theta_span_deg,
+                        base_radians=self._residue_angle_radians(base_residue, "theta"),
+                    )
+
+            tau = None
+            if "tau" in self.stored_angles:
+                tau = self._bond_angle_value(
+                    angle_dict.get(f"{res_idx}_tau"),
+                    center_deg=self.tau_center_deg,
+                    span_deg=self.tau_span_deg,
+                    base_radians=self._residue_angle_radians(base_residue, "tau"),
+                )
+
+            residues.append(
+                ResidueGeometry(
+                    name=one_to_three(aa),
+                    phi=self._encoded_torsion_value(
+                        angle_dict.get(f"{res_idx}_phi"),
+                        self._residue_angle_radians(base_residue, "phi"),
+                    ),
+                    psi=self._encoded_torsion_value(
+                        angle_dict.get(f"{res_idx}_psi"),
+                        self._residue_angle_radians(base_residue, "psi"),
+                    ),
+                    omega=omega,
+                    tau=tau,
+                    theta=theta,
+                    chi=chi_values,
+                    bond_lengths=self._encoded_bond_lengths(
+                        res_idx,
+                        base_residue=base_residue,
+                        template_residue=template_residue,
+                        length_values=length_values,
+                    ),
+                    chain_id=chain_id,
+                    resseq=resseq,
+                    icode=icode,
+                )
+            )
+
+        residue_geometry = ResidueGeometryStructure(
+            residues=residues,
+            name=f"qtf:{self.sequence}",
+            angle_units=self.angle_units,
+            metadata={
+                "source": "qtf",
+                "sequence": self.sequence,
+                "angle_source": "pheat.residue_angle_specs",
+                "selective_chi_map": {
+                    str(key): list(value)
+                    for key, value in self.selective_chi_map.items()
+                },
+                "stored_angles": list(self.stored_angles),
+                "stored_lengths": list(self.stored_lengths),
+                "max_chi": self.max_chi,
+                "bond_angle_encoding": self.bond_angle_encoding,
+                "tau_center_deg": self.tau_center_deg,
+                "tau_span_deg": self.tau_span_deg,
+                "theta_center_deg": self.theta_center_deg,
+                "theta_span_deg": self.theta_span_deg,
+                "length_encoding_scope": self.length_encoding_scope,
+                "backbone_length_span": self.backbone_length_span,
+                "sidechain_length_span": self.sidechain_length_span,
+                "total_angle_dofs": self.total_angle_dofs,
+                "total_length_dofs": self.total_length_dofs,
+            },
+            stored_angles=self.stored_angles,
+            stored_lengths=self.stored_lengths,
+            disulfide_bonds=self._template_disulfide_bonds(),
+        )
+        self.last_residue_geometry = residue_geometry
+        return residue_geometry
+
+    def structure_from_angle_vector(self, angle_vector: np.ndarray):
+        """Build a PHEAT heavy-atom structure from a QTF angle vector."""
+
+        structure = structure_from_residue_geometry(
+            self.angle_vector_to_residue_geometry(angle_vector),
+            include_terminal_oxt=self.include_terminal_oxt,
+            geometry_mode=self.geometry_mode,
+            geometry_table=self.geometry_table,
+            geometry_profile=self.geometry_profile,
+        )
+        self.last_structure = structure
+        return structure
+
+    def set_base_residue_geometry(self, residue_geometry: Optional[ResidueGeometryStructure]) -> None:
+        """Set the geometry used as the zero-control baseline for active DOFs."""
+
+        if residue_geometry is not None and len(residue_geometry.residues) != self.n_residues:
+            raise ValueError(
+                "base_residue_geometry residue count must match the folder sequence "
+                f"({len(residue_geometry.residues)} != {self.n_residues})"
+            )
+        self.base_residue_geometry = residue_geometry
+
+    def update_geometry_encoding(
+        self,
+        *,
+        stored_angles=_UNSET,
+        stored_lengths=_UNSET,
+        max_chi=_UNSET,
+        selective_chi_map=_UNSET,
+        length_encoding_scope=_UNSET,
+        backbone_length_span=_UNSET,
+        sidechain_length_span=_UNSET,
+    ) -> bool:
+        """Update active geometry DOFs and rebuild the circuit when needed."""
+
+        old_signature = self.geometry_encoding_signature()
+        if stored_angles is not _UNSET:
+            self.stored_angles = normalize_stored_angles(stored_angles or ())
+        if stored_lengths is not _UNSET:
+            self.stored_lengths = ResidueGeometryStructure(
+                residues=[],
+                stored_lengths=stored_lengths,
+            ).stored_lengths
+        if max_chi is not _UNSET:
+            self.max_chi = normalize_max_chi(max_chi)
+        if selective_chi_map is not _UNSET:
+            self.selective_chi_map = dict(selective_chi_map or {})
+        if length_encoding_scope is not _UNSET:
+            self.length_encoding_scope = _normalize_length_encoding_scope(length_encoding_scope)
+        if backbone_length_span is not _UNSET:
+            self.backbone_length_span = float(backbone_length_span)
+        if sidechain_length_span is not _UNSET:
+            self.sidechain_length_span = float(sidechain_length_span)
+        if self.backbone_length_span <= 0:
+            raise ValueError("backbone_length_span must be positive.")
+        if self.sidechain_length_span <= 0:
+            raise ValueError("sidechain_length_span must be positive.")
+
+        self._rebuild_dof_map()
+        changed = self.geometry_encoding_signature() != old_signature
+        if changed:
+            self._rebuild_quantum_register()
+        return changed
+
+    def geometry_encoding_signature(self) -> tuple:
+        selective = tuple(
+            (str(key), tuple(str(item) for item in value))
+            for key, value in sorted((self.selective_chi_map or {}).items())
+        )
+        return (
+            tuple(self.stored_angles),
+            tuple(self.stored_lengths),
+            self.max_chi,
+            selective,
+            self.length_encoding_scope,
+            float(self.backbone_length_span),
+            float(self.sidechain_length_span),
+            tuple((spec["kind"], spec.get("residue_index"), spec.get("type"), spec.get("key")) for spec in self.dof_specs),
+        )
+
+    def structure_from_coords_labels(self, coords, labels) -> HeavyAtomStructure:
+        atoms = []
+        for serial, (pos, label) in enumerate(zip(coords, labels), start=1):
+            if len(label) >= 8:
+                rid, atom_name, element, chain_id, resseq, icode, resname, record_name = label[:8]
+            else:
+                rid, atom_name, element = label[:3]
+                template_residue = self._template_residue(int(rid))
+                chain_id = template_residue.chain_id if template_residue is not None else "A"
+                resseq = template_residue.resseq if template_residue is not None else int(rid) + 1
+                icode = template_residue.icode if template_residue is not None else ""
+                resname = one_to_three(self.sequence[int(rid)])
+                record_name = "ATOM"
+            rid = int(rid)
+            atom_name = str(atom_name).strip()
+            atoms.append(
+                Atom(
+                    name=atom_name,
+                    element=str(element).strip().upper() or atom_name[0].upper(),
+                    x=float(pos[0]),
+                    y=float(pos[1]),
+                    z=float(pos[2]),
+                    resname=str(resname).strip().upper() or one_to_three(self.sequence[rid]),
+                    chain_id=str(chain_id or ""),
+                    resseq=int(resseq),
+                    icode=str(icode or ""),
+                    record_name=str(record_name or "ATOM"),
+                    serial=serial,
+                    occupancy=1.0,
+                    bfactor=0.0,
+                )
+            )
+        return HeavyAtomStructure(
+            atoms=atoms,
+            name=f"qtf:{self.sequence}",
+            metadata={"source": "qtf"},
+            disulfide_bonds=self._template_disulfide_bonds(),
+            atom_scope="heavy",
+        )
+
+    @staticmethod
+    def _structure_to_arrays(structure) -> tuple[np.ndarray, list, list]:
+        coords = []
+        labels = []
+        residue_index = {key: index for index, key in enumerate(structure.residue_keys())}
+        for atom in structure.atoms:
+            rid = residue_index.get(atom.residue_key, int(atom.resseq) - 1)
+            coords.append([atom.x, atom.y, atom.z])
+            labels.append((rid, atom.name.strip().upper(), atom.element.strip().upper()))
+        return np.asarray(coords, dtype=float), labels, []
+
     def build_full_structure(
         self, angle_vector: np.ndarray
     ) -> tuple[np.ndarray, list, list]:
-        """Build 3-D Cartesian coordinates from a torsion-angle vector.
+        """Build PHEAT-derived 3-D Cartesian coordinates from a torsion-angle vector.
 
-        The angle vector is indexed by ``dof_map``.  Most peptide-bond torsion
-        angles (ω) are fixed at π (trans-amide); the only exception is the ω
-        **preceding a proline residue** (cis-Pro occurs in ~5 % of cases and
-        non-planar trans-Pro in another ~5 %).  When the DOF map contains an
-        entry ``{"res": i, "type": "omega"}`` the value is read from the angle
-        vector and used directly; otherwise ω defaults to π.
-
-        Implementation note — O(1) atom lookup
-        ----------------------------------------
-        Atom positions are accumulated in a plain Python list ``coords``.
-        Earlier versions located backbone atoms via a ``get_idx`` closure that
-        scanned ``labels`` in reverse — O(N) per call, making the whole
-        function O(N²) in the number of residues.  The current implementation
-        maintains ``label_idx``, a ``dict[(res_id, atom_name) → list_index]``
-        that is updated whenever an atom is appended through the ``_append``
-        helper, giving O(1) lookups throughout.
+        The angle vector is indexed by ``dof_map`` and converted to a PHEAT
+        residue-geometry structure before PHEAT reconstructs heavy atoms.
 
         Returns
         -------
@@ -1204,151 +1114,27 @@ class QuantumBiophysicsFolder:
         labels : list of (res_id, atom_name, element)
         bonds  : list of (atom_idx_a, atom_idx_b)
         """
-        coords: list[np.ndarray] = []
-        labels: list[tuple] = []
-        bonds: list[tuple] = []
-
-        # O(1) backbone-atom lookup — keeps (res_id, atom_name) → list index.
-        # Updated in lock-step with every labels.append() via _append() below.
-        label_idx: dict[tuple[int, str], int] = {}
-
-        def _append(res_id: int, atom_name: str, element: str, pos: np.ndarray) -> int:
-            """Append one atom and register it in label_idx; return its index."""
-            idx = len(coords)
-            coords.append(pos)
-            labels.append((res_id, atom_name, element))
-            label_idx[(res_id, atom_name)] = idx
-            return idx
-
-        angle_dict = {f"{x['res']}_{x['type']}": val for x, val in zip(self.dof_map, angle_vector)}
-
-        # Seed backbone frame
-        _append(0, "N", "N", np.array([0.0, 0.0, 0.0]))
-        _append(0, "CA", "C", np.array([1.46, 0.0, 0.0]))
-        _append(0, "C", "C", np.array([1.46 + 1.51 * np.cos(1.9), 1.51 * np.sin(1.9), 0.0]))
-        bonds.extend([(0, 1), (1, 2)])
-
-        for i in range(self.n_residues):
-            idx_N  = label_idx[(i, "N")]
-            idx_CA = label_idx[(i, "CA")]
-            idx_C  = label_idx[(i, "C")]
-
-            # Side chain
-            topo = self.SIDE_CHAIN_TOPO.get(self.sequence[i], self.SIDE_CHAIN_TOPO["DEFAULT"])
-            sc_map: dict[str, int] = {}
-            for atom_def in topo:
-                name, parent_name, b_len, b_ang, tor_def = atom_def
-                elem = self._infer_element_from_atom_name(name)
-                if isinstance(tor_def, str) and "chi" in tor_def:
-                    t_val = angle_dict.get(f"{i}_{tor_def.replace('_branch', '')}", 0.0)
-                    if "branch" in tor_def:
-                        t_val += 2.09
-                else:
-                    t_val = float(tor_def)
-
-                if name == "CB":
-                    u_nc = coords[idx_N] - coords[idx_CA]
-                    u_cc = coords[idx_C] - coords[idx_CA]
-                    n_plane = np.cross(u_nc, u_cc)
-                    n_plane /= np.linalg.norm(n_plane) + 1e-9
-                    u_mid = -(u_nc + u_cc)
-                    u_mid /= np.linalg.norm(u_mid) + 1e-9
-                    p_CB = coords[idx_CA] + b_len * (np.cos(0.9) * u_mid + np.sin(0.9) * n_plane)
-                    cb_idx = _append(i, name, elem, p_CB)
-                    bonds.append((idx_CA, cb_idx))
-                    sc_map["CB"] = cb_idx
-                else:
-                    p_name = "CB"
-                    if name.startswith("CD"):
-                        p_name = "CG"
-                    if name.startswith("CE"):
-                        p_name = "CD"
-                    if name.startswith("CZ"):
-                        p_name = "CE"
-                    if name.startswith("NZ"):
-                        p_name = "CE"
-                    if name.startswith("OE") or name.startswith("OD"):
-                        p_name = "CD" if name.startswith("OE") else "CG"
-                    if name.startswith("SG"):
-                        p_name = "CB"
-                    if name.startswith("CG"):
-                        p_name = "CB"
-                    if name.startswith("CD") and self.sequence[i] == "L":
-                        p_name = "CG"
-                    if name.startswith("HG") and name != "HG1":
-                        p_name = "OG"
-                    if name == "HG1":
-                        p_name = "OG1"
-                    if name == "HH":
-                        p_name = "OH"
-                    if name == "HE1":
-                        p_name = "NE1"
-                    if name == "HE2":
-                        p_name = "NE2"
-
-                    idx_c = sc_map.get(p_name, -1)
-                    if idx_c == -1:
-                        idx_c = len(coords) - 1
-                    c = coords[idx_c]
-
-                    grandp = "CA" if p_name == "CB" else "CB"
-                    if p_name == "OG":
-                        grandp = "CB"
-                    if p_name == "OG1":
-                        grandp = "CB"
-                    if p_name == "OH":
-                        grandp = "CZ"
-                    if p_name == "NE1":
-                        grandp = "CD1"
-                    if p_name == "NE2":
-                        grandp = "CD2"
-
-                    if grandp == "CA":
-                        b = coords[idx_CA]
-                        a = coords[idx_N]
-                    else:
-                        b = coords[sc_map.get(grandp, idx_c - 1)]
-                        a = coords[idx_CA]
-
-                    new_pos = self._nerf_step(a, b, c, b_len, b_ang, t_val)
-                    new_idx = _append(i, name, elem, new_pos)
-                    bonds.append((idx_c, new_idx))
-                    sc_map[name] = new_idx
-
-            # Carbonyl oxygen
-            p_O = self._nerf_step(coords[idx_N], coords[idx_CA], coords[idx_C], 1.23, 2.1, np.pi)
-            o_idx = _append(i, "O", "O", p_O)
-            bonds.append((idx_C, o_idx))
-
-            # Next residue backbone
-            if i < self.n_residues - 1:
-                psi = angle_dict.get(f"{i}_psi", -0.5)
-                p_next_N = self._nerf_step(coords[idx_N], coords[idx_CA], coords[idx_C], 1.33, 2.0, psi)
-                n_idx = _append(i + 1, "N", "N", p_next_N)
-                bonds.append((idx_C, n_idx))
-
-                # ω (peptide-bond torsion): π for all residue pairs except
-                # when residue i+1 is proline, in which case ω is an explicit
-                # DOF and its value is read from angle_dict.
-                omega = angle_dict.get(f"{i}_omega", np.pi)
-                if f"{i}_omega" not in angle_dict and i < len(self.fixed_omegas):
-                    omega = float(self.fixed_omegas[i])
-                omega = self._bounded_omega(omega)
-                p_next_CA = self._nerf_step(coords[idx_CA], coords[idx_C], p_next_N, 1.46, 2.1, omega)
-                ca_idx = _append(i + 1, "CA", "C", p_next_CA)
-                bonds.append((n_idx, ca_idx))
-
-                phi = angle_dict.get(f"{i + 1}_phi", -1.0)
-                p_next_C = self._nerf_step(coords[idx_C], p_next_N, p_next_CA, 1.51, 1.9, phi)
-                c_idx = _append(i + 1, "C", "C", p_next_C)
-                bonds.append((ca_idx, c_idx))
-
-        return np.array(coords), labels, bonds
+        return self._structure_to_arrays(self.structure_from_angle_vector(angle_vector))
 
     def _initialize_topology_cache(self) -> None:
-        """Pre-compute static atom properties for vectorised energy evaluation."""
+        """Pre-compute static atom properties for vectorised energy evaluation.
+
+        A single call to ``build_full_structure`` is made here to harvest the
+        atom label list (``static_labels``).  The resulting coordinates are
+        **discarded** — only the labels, element symbols, and residue-index
+        mapping are retained for use by the energy function.
+
+        The seed torsion vector is ``_TOPOLOGY_SEED_ANGLE`` (0.1 rad) rather
+        than all-zeros.  All-zero torsions place every successive backbone
+        atom exactly along the same direction, making every cross product in
+        ``_nerf_step`` identically zero.  Although the 1e-9 floor in the
+        normalisation prevents a division-by-zero crash, the resulting
+        reference frames are degenerate and the coordinates are meaningless.
+        Using a small non-zero seed is costless (coordinates are unused) and
+        removes this brittleness.
+        """
         seed = np.full(self.total_angles, _TOPOLOGY_SEED_ANGLE)
-        dummy_coords, self.static_labels, static_bonds = self.build_full_structure(seed)
+        dummy_coords, self.static_labels, _ = self.build_full_structure(seed)
         n_atoms = len(dummy_coords)
 
         self.atom_to_res = np.array([x[0] for x in self.static_labels], dtype=int)
@@ -1356,7 +1142,7 @@ class QuantumBiophysicsFolder:
         self.atom_elems = np.array([x[2] for x in self.static_labels])
 
         self.q_vector = np.zeros(n_atoms)
-        for k, (rid, name, _elem) in enumerate(self.static_labels):
+        for k, (rid, name, _) in enumerate(self.static_labels):
             q = self.CHARGES.get(name, 0.0)
             res_name = self.sequence[rid]
             if res_name == "H":
@@ -1369,25 +1155,23 @@ class QuantumBiophysicsFolder:
                     q = 0.0
             self.q_vector[k] = q
 
-        self.lj_type_vector = np.array([
-            self._assign_lj_type(rid, name, elem)
-            for rid, name, elem in self.static_labels
-        ])
-        self.vdw_radii_vector = np.array([
-            self.LJ_TYPE_PARAMS.get(t, self.LJ_TYPE_PARAMS["X"])["radius"]
-            for t in self.lj_type_vector
-        ], dtype=float)
-        self.lj_epsilon_vector = np.array([
-            self.LJ_TYPE_PARAMS.get(t, self.LJ_TYPE_PARAMS["X"])["epsilon"]
-            for t in self.lj_type_vector
-        ], dtype=float)
+        self.vdw_radii_vector = np.array([self.VDW_RADII.get(x[2], 1.7) for x in self.static_labels])
+        self.mask_heavy = np.array([not x.startswith("H") for x in self.atom_names], dtype=bool)
 
+        hydro_res_set = {"A", "V", "L", "I", "M", "F", "W", "P", "C"}
+        self.mask_hydrophobic = np.zeros(n_atoms, dtype=bool)
+        for k, (rid, name, _) in enumerate(self.static_labels):
+            if self.sequence[rid] in hydro_res_set and name.startswith("C"):
+                self.mask_hydrophobic[k] = True
+
+        res_diff_matrix = np.abs(self.atom_to_res[:, None] - self.atom_to_res[None, :])
+        self.mask_non_bonded = res_diff_matrix >= 2
         adjacency = [set() for _ in range(n_atoms)]
+        _, _, static_bonds = self.build_full_structure(seed)
         for i, j in static_bonds:
             if 0 <= i < n_atoms and 0 <= j < n_atoms:
                 adjacency[i].add(j)
                 adjacency[j].add(i)
-
         graph_dist = np.full((n_atoms, n_atoms), 99, dtype=int)
         np.fill_diagonal(graph_dist, 0)
         for i in range(n_atoms):
@@ -1402,33 +1186,17 @@ class QuantumBiophysicsFolder:
                         if nbr in visited:
                             continue
                         visited.add(nbr)
-                        if depth < graph_dist[i, nbr]:
-                            graph_dist[i, nbr] = depth
-                            graph_dist[nbr, i] = depth
+                        graph_dist[i, nbr] = min(graph_dist[i, nbr], depth)
+                        graph_dist[nbr, i] = min(graph_dist[nbr, i], depth)
                         next_frontier.add(nbr)
                 frontier = next_frontier
-
         offdiag = ~np.eye(n_atoms, dtype=bool)
-        self.mask_nonbonded_graph = offdiag & (graph_dist > 3)
-        self.mask_14_pairs = offdiag & (graph_dist == 3)
-
-        self.mask_heavy = np.array([not x.startswith("H") for x in self.atom_names], dtype=bool)
-
-        hydro_res_set = set(list("AVLIMFWYPC"))
-        self.mask_hydrophobic = np.zeros(n_atoms, dtype=bool)
-        for k, (rid, name, elem) in enumerate(self.static_labels):
-            aa = self.sequence[rid]
-            if aa not in hydro_res_set:
-                continue
-            if name.startswith("C") and name not in ("C", "CA"):
-                self.mask_hydrophobic[k] = True
-            elif elem == "S":
-                self.mask_hydrophobic[k] = True
-
-        res_diff_matrix = np.abs(self.atom_to_res[:, None] - self.atom_to_res[None, :])
-        self.mask_non_bonded = res_diff_matrix >= 2
-        self.mask_non_bonded_vdw = self.mask_nonbonded_graph
-        self.mask_non_bonded_vdw_14 = self.mask_14_pairs
+        self.mask_non_bonded_vdw = offdiag & (graph_dist > 3)
+        self.mask_non_bonded_vdw_14 = offdiag & (graph_dist == 3)
+        self.atom_lookup = {
+            (int(rid), str(name).upper()): idx
+            for idx, (rid, name, _elem) in enumerate(self.static_labels)
+        }
 
         self.idx_N_atoms = np.where(self.atom_names == "N")[0]
         self.idx_O_atoms = np.where(self.atom_names == "O")[0]
@@ -1439,214 +1207,149 @@ class QuantumBiophysicsFolder:
     # Energy function
     # ------------------------------------------------------------------
 
+    def _angle_vector_from_params(
+        self,
+        params,
+        *,
+        angle_mode: str,
+        backend=None,
+        shots: int = 4096,
+        transpile_optimization_level=_UNSET,
+        transpile_seed=_UNSET,
+    ):
+        if angle_mode == "statevector":
+            return self._get_angles(params, mode="statevector")
+        if angle_mode == "sampler":
+            if backend is None:
+                raise ValueError("sampler angle mode requires a backend.")
+            return self._get_angles(
+                params,
+                mode="sampler",
+                backend=backend,
+                shots=shots,
+                transpile_optimization_level=transpile_optimization_level,
+                transpile_seed=transpile_seed,
+            )
+        raise ValueError(f"Unknown angle mode: {angle_mode}")
+
+    @staticmethod
+    def _angle_mode_for_backend(backend) -> str:
+        return "statevector" if backend is None else "sampler"
+
+    def score_model_for_params(
+        self,
+        params,
+        model: str,
+        *,
+        angle_mode: str,
+        backend=None,
+        shots: int = 4096,
+        options: Optional[dict[str, Any]] = None,
+        transpile_optimization_level=_UNSET,
+        transpile_seed=_UNSET,
+    ) -> tuple[dict, float]:
+        active_model = canonical_score_model(model)
+        angle_vec = self._angle_vector_from_params(
+            params,
+            angle_mode=angle_mode,
+            backend=backend,
+            shots=shots,
+            transpile_optimization_level=transpile_optimization_level,
+            transpile_seed=transpile_seed,
+        )
+        if is_qtf_score_model(active_model):
+            score = score_classic_folder(
+                self,
+                params,
+                model=active_model,
+                angle_vector=angle_vec,
+                options=options,
+                return_terms=True,
+            )
+            payload = score.to_dict()
+            payload["status"] = "ok"
+            return payload, float(score.total)
+
+        structure = self.structure_from_angle_vector(angle_vec)
+        score = score_pheat_structure(structure, model=active_model, **dict(options or {}))
+        payload = score.to_dict()
+        payload["status"] = "ok"
+        return payload, float(score.total)
+
     def energy_function(self, params: np.ndarray, return_terms: bool = False) -> float:
-        """Evaluate physical energy of the structure encoded by *params*."""
-        if not self._cache_initialized:
-            self._initialize_topology_cache()
+        """Evaluate the configured QTF or PHEAT score for the encoded structure."""
+        active_model = canonical_score_model(getattr(self, "active_score_model", self.score_model))
+        try:
+            angle_probe = self._get_angles(params, mode=self.optimizer_angle_mode, backend=self.optimizer_backend, shots=self.optimizer_shots)
+            if not np.isfinite(angle_probe).all():
+                n_bad = int(np.count_nonzero(~np.isfinite(angle_probe)))
+                penalty = 1e6 + 1e3 * n_bad
+                self.last_energy_terms = {"non_finite_penalty": penalty, "total": penalty}
+                if return_terms:
+                    return dict(self.last_energy_terms)
+                return float(penalty)
+            score_payload, objective = self.score_model_for_params(
+                params,
+                active_model,
+                angle_mode=self.optimizer_angle_mode,
+                backend=self.optimizer_backend,
+                shots=self.optimizer_shots,
+                options=getattr(self, "active_score_options", None),
+                transpile_optimization_level=self.transpile_optimization_level,
+                transpile_seed=self.transpile_seed,
+            )
+            self.last_score_error = None
+        except Exception as exc:
+            score_payload = {
+                "model": active_model,
+                "status": "unavailable",
+                "error": str(exc),
+                "total": None,
+                "units": None,
+                "terms": {},
+                "warnings": [],
+                "citations": [],
+                "metadata": {},
+            }
+            objective = PHEAT_FAILURE_PENALTY
+            self.last_score_error = str(exc)
 
-        gamma = 15.0
-        constraint_strength = 50.0
-        if self.current_stage == 3:
-            gamma = 5.0
-            constraint_strength = 5.0
-
-        angle_vec = self._get_angles(params)
-        if not np.isfinite(angle_vec).all():
-            n_bad = int(np.count_nonzero(~np.isfinite(angle_vec)))
-            penalty = 1e6 + 1e3 * n_bad
-            if return_terms:
-                return {"non_finite_penalty": penalty}
-            return penalty
-        if self.stage_backend == "rosetta":
-            return self._score_stage_rosetta(angle_vec, return_terms=return_terms)
-        if self.stage_backend == "openmm":
-            return self._score_stage_openmm(angle_vec, return_terms=return_terms)
-
-        coords, _, _ = self.build_full_structure(angle_vec)
-        total_energy = 0.0
-        terms = {
-            "constraint": 0.0,
-            "sasa": 0.0,
-            "hbond": 0.0,
-            "electrostatics": 0.0,
-            "disulfide": 0.0,
-            "vdw_repulsion": 0.0,
-            "rotamer": 0.0,
-            "pi_stacking": 0.0,
-            "rama": 0.0,
-            "geometry": 0.0,
-            "adjacent_heavy_sterics": 0.0,
-            "adjacent_backbone_sterics": 0.0,
-            "energy_backend_custom": 1.0,
-            "energy_backend_rosetta": 0.0,
-            "energy_backend_openmm": 0.0,
+        self.last_score = score_payload
+        raw_terms = dict(score_payload.get("terms", {}) or {})
+        self.last_energy_terms = {
+            "score_model": active_model,
+            "score_total": float(objective),
+            "total": float(objective),
+            **{f"{active_model}_{key}": float(value) for key, value in raw_terms.items()},
         }
 
-        def add_term(name: str, value: float) -> None:
-            nonlocal total_energy
-            v = float(value)
-            terms[name] += v
-            total_energy += v
-
-        if _ACCELERATE_AVAILABLE:
-            D = _dist_accel(coords)
-        else:
-            diffs = coords[:, None, :] - coords[None, :, :]
-            D = np.sqrt(np.sum(diffs ** 2, axis=-1)) + 1e-9
-
-        ca_indices = [i for i, lbl in enumerate(self.static_labels) if lbl[1] == "CA"]
-        if len(ca_indices) >= 2:
-            start_ca = coords[ca_indices[0]]
-            end_ca = coords[ca_indices[-1]]
-            dist_ends = float(np.linalg.norm(start_ca - end_ca))
-            target_e2e = float(4.5 + 0.40 * max(0, self.n_residues - 5))
-            slack_e2e = float(1.5 + 0.05 * self.n_residues)
-            if self.use_e2e_constraint:
-                deviation = max(0.0, abs(dist_ends - target_e2e) - slack_e2e)
-                add_term("constraint", self.e2e_scale * constraint_strength * (deviation ** 2))
-
-        if _ACCELERATE_AVAILABLE:
-            add_term("sasa", _sasa_accel(D, self.mask_hydrophobic, gamma))
-        elif np.sum(self.mask_hydrophobic) > 0:
-            hydro_dists = D[self.mask_hydrophobic, :]
-            weights = 1.0 / (1.0 + np.exp(1.0 * (hydro_dists - 6.0)))
-            neighbor_counts = np.sum(weights, axis=1) - 1.0
-            burial_fractions = np.clip(neighbor_counts / 15.0, 0.0, 1.0)
-            add_term("sasa", np.sum(gamma * 30.0 * (1.0 - burial_fractions)))
-
-        e_hbond = 0.0
-        for i_n in self.idx_N_atoms:
-            res_d = self.atom_to_res[i_n]
-            idx_ca = i_n + 1
-            idx_prev_c = i_n - 2
-            if idx_prev_c < 0 or self.atom_names[idx_prev_c] != "C":
-                pos_h = coords[i_n] + np.array([0, 0, 1.0])
-                pos_n = coords[i_n]
-            else:
-                p_c = coords[idx_prev_c]
-                p_n = coords[i_n]
-                p_ca = coords[idx_ca]
-                v_nc = p_c - p_n
-                v_nc /= np.linalg.norm(v_nc)
-                v_nca = p_ca - p_n
-                v_nca /= np.linalg.norm(v_nca)
-                v_h = -(v_nc + v_nca)
-                v_h /= np.linalg.norm(v_h)
-                pos_h = p_n + v_h * 1.01
-                pos_n = p_n
-            o_coords = coords[self.idx_O_atoms]
-            o_res = self.atom_to_res[self.idx_O_atoms]
-            valid_mask = np.abs(o_res - res_d) >= 2
-            if not np.any(valid_mask):
-                continue
-            valid_o_coords = o_coords[valid_mask]
-            d_ho = np.linalg.norm(valid_o_coords - pos_h, axis=1)
-            close_mask = d_ho < 3.5
-            if not np.any(close_mask):
-                continue
-            final_d_ho = d_ho[close_mask]
-            final_o_coords = valid_o_coords[close_mask]
-            v_hn = pos_n - pos_h
-            v_hn /= np.linalg.norm(v_hn)
-            v_ho = final_o_coords - pos_h
-            v_ho /= np.linalg.norm(v_ho, axis=1)[:, None]
-            angle_cos = np.dot(v_ho, v_hn)
-            ang_mask = angle_cos < -0.4
-            radial_term = np.exp(-(final_d_ho - 2.0) ** 2 / 0.5)
-            angular_term = (np.abs(angle_cos) - 0.4) * 2.0
-            e_hbond += np.sum(-25.0 * radial_term * angular_term * ang_mask)
-        add_term("hbond", e_hbond)
-
-        if _ACCELERATE_AVAILABLE:
-            add_term("electrostatics", _elec_accel(
-                self.q_vector, D, self.mask_non_bonded,
-                _COULOMB_PREFACTOR, _DIELECTRIC,
-            ))
-        else:
-            add_term("electrostatics", self._electrostatic_energy(D))
-
-        e_disulf = 0.0
-        if len(self.idx_SG_atoms) > 1:
-            sg_dists = D[np.ix_(self.idx_SG_atoms, self.idx_SG_atoms)]
-            sg_mask = np.triu(np.ones_like(sg_dists, dtype=bool), k=1)
-            valid_dists = sg_dists[sg_mask]
-            bond_strengths = np.exp(-(valid_dists - 2.05) ** 2 / 0.5)
-            active_bonds = valid_dists < 3.0
-            e_disulf -= np.sum(25.0 * bond_strengths * active_bonds)
-            full_strengths = np.exp(-(sg_dists - 2.05) ** 2 / 0.5) * (sg_dists < 3.0)
-            np.fill_diagonal(full_strengths, 0.0)
-            saturation = np.sum(full_strengths, axis=1)
-            overload = saturation - 1.0
-            penalty_mask = overload > 0.1
-            if np.any(penalty_mask):
-                e_disulf += np.sum(40.0 * overload[penalty_mask] ** 2)
-        add_term("disulfide", e_disulf)
-
-        if _ACCELERATE_AVAILABLE:
-            Sigma_mat = self.vdw_radii_vector[:, None] + self.vdw_radii_vector[None, :]
-            heavy_mat = self.mask_heavy[:, None] & self.mask_heavy[None, :]
-            vdw_mask = np.triu(self.mask_non_bonded_vdw & heavy_mat, k=1)
-            vdw_14_mask = np.triu(self.mask_non_bonded_vdw_14 & heavy_mat, k=1)
-            add_term("vdw_repulsion", _vdw_accel(D, Sigma_mat, vdw_mask, vdw_14_mask, 0.35))
-        else:
-            Sigma_mat = self.vdw_radii_vector[:, None] + self.vdw_radii_vector[None, :]
-            heavy_mat = self.mask_heavy[:, None] & self.mask_heavy[None, :]
-            vdw_mask = np.triu(self.mask_non_bonded_vdw & heavy_mat, k=1)
-            vdw_14_mask = np.triu(self.mask_non_bonded_vdw_14 & heavy_mat, k=1)
-
-            def _add_vdw(mask: np.ndarray, scale: float) -> None:
-                if not np.any(mask):
-                    return
-                r_vdw = D[mask]
-                s_vdw = Sigma_mat[mask]
-                collision_mask = r_vdw < s_vdw
-                if not np.any(collision_mask):
-                    return
-                r_col = r_vdw[collision_mask]
-                s_col = s_vdw[collision_mask]
-                term = (s_col / (r_col + 0.1)) ** 12
-                high_e = term > 50.0
-                if np.any(high_e):
-                    term[high_e] = 50.0 + np.log(term[high_e] - 49.0)
-                add_term("vdw_repulsion", scale * np.sum(0.1 * term))
-
-            _add_vdw(vdw_mask, 1.0)
-            _add_vdw(vdw_14_mask, 0.35)
-
-        angle_dict = {f"{x['res']}_{x['type']}": val for x, val in zip(self.dof_map, angle_vec)}
-        add_term("rotamer", self._calculate_rotamer_energy(angle_dict))
-        add_term("pi_stacking", self._calculate_aromatic_quadrupole(coords, self.static_labels, self.atom_to_res))
-
-        e_rama = 0.0
-        for i in range(self.n_residues):
-            if f"{i}_phi" in angle_dict and f"{i}_psi" in angle_dict:
-                phi = angle_dict[f"{i}_phi"]
-                psi = angle_dict[f"{i}_psi"]
-                aa = self.sequence[i]
-                d_helix = (phi - (-1.0)) ** 2 + (psi - (-0.8)) ** 2
-                d_sheet = (phi - (-2.3)) ** 2 + (psi - 2.4) ** 2
-                if aa == "G":
-                    d_helix_L = (phi - 1.0) ** 2 + (psi - 0.8) ** 2
-                    d_sheet_L = (phi - 2.3) ** 2 + (psi - (-2.4)) ** 2
-                    e_rama += -3.0 * np.exp(-min(d_helix, d_sheet, d_helix_L, d_sheet_L) / 0.6)
-                else:
-                    d_forbidden = (phi - (-2.0)) ** 2 + (psi - 1.0) ** 2
-                    e_rama += -3.0 * np.exp(-d_helix / 0.6) - 3.0 * np.exp(-d_sheet / 0.6) + 5.0 * np.exp(-d_forbidden / 1.0)
-        add_term("rama", e_rama)
-
-        add_term("geometry", self._calculate_geometry_integrity(coords, self.static_labels, self.atom_to_res))
-        e_local_sterics = self._calculate_adjacent_heavy_sterics(coords, self.static_labels, self.atom_to_res)
-        add_term("adjacent_heavy_sterics", e_local_sterics)
-        terms["adjacent_backbone_sterics"] = float(e_local_sterics)
+        candidate_records = getattr(self, "candidate_records", None)
+        if candidate_records is not None:
+            iteration = int(
+                getattr(self.tracker, "current_iter", len(candidate_records))
+                if self.tracker is not None
+                else len(candidate_records)
+            )
+            candidate_records.append(
+                {
+                    "candidate_id": len(candidate_records),
+                    "iteration": iteration,
+                    "phase_index": getattr(self, "current_stage", None),
+                    "phase_name": getattr(self, "current_phase_name", None),
+                    "phase_label": getattr(self, "current_phase_label", None),
+                    "score_model": active_model,
+                    "objective": float(objective),
+                    "status": score_payload.get("status"),
+                    "params": np.asarray(params, dtype=float).copy(),
+                }
+            )
 
         if self.tracker is not None:
-            self.tracker.log(total_energy)
+            self.tracker.log(objective)
 
-        terms["total"] = float(total_energy)
         if return_terms:
-            self.last_energy_terms = dict(terms)
-
-        return total_energy
+            return objective, dict(self.last_energy_terms)
+        return objective
 
     def _electrostatic_energy(self, D: np.ndarray) -> float:
         """Coulomb electrostatic energy in kcal/mol.
@@ -1673,11 +1376,11 @@ class QuantumBiophysicsFolder:
             key = f"{i}_chi1"
             if key in angle_dict:
                 chi = angle_dict[key]
-                if res_name in ("V", "I", "T"):
+                if res_name in ("V", "I", "T", "VAL", "ILE", "THR"):
                     energy += -3.0 * (np.exp(-(chi - np.pi) ** 2 / 0.5) + np.exp(-(chi - (-1.047)) ** 2 / 0.5))
-                elif res_name == "P":
+                elif res_name in ("P", "PRO"):
                     energy += 10.0 * min((chi - (-0.5)) ** 2, (chi - 0.5) ** 2)
-                elif res_name in ("W", "F", "Y", "H"):
+                elif res_name in ("W", "F", "Y", "H", "TRP", "PHE", "TYR", "HIS"):
                     energy += -2.0 * (np.exp(-(chi - np.pi) ** 2 / 0.5) + np.exp(-(chi - (-1.047)) ** 2 / 0.5))
                 else:
                     energy += 1.0 * (1.0 + np.cos(3.0 * chi))
@@ -1688,7 +1391,7 @@ class QuantumBiophysicsFolder:
     ) -> float:
         aromatics: list[tuple] = []
         for r_idx in np.unique(atom_to_res_idx):
-            if self.sequence[r_idx] in ("F", "Y", "W"):
+            if self.sequence[r_idx] in ("F", "Y", "W", "H", "PHE", "TYR", "TRP", "HIS"):
                 mask = atom_to_res_idx == r_idx
                 r_coords = coords[mask]
                 r_names = self.atom_names[mask]
@@ -1716,152 +1419,6 @@ class QuantumBiophysicsFolder:
                     energy_pi -= 5.0 * np.exp(-(dist - 3.8) ** 2)
         return energy_pi
 
-    @staticmethod
-    def _huber(x: float, delta: float) -> float:
-        """Huber loss: quadratic for |x| ≤ delta, linear beyond.
-
-        The Huber loss is continuously differentiable at the transition point
-        |x| = delta (both branches equal delta² and their derivatives equal
-        ±2·delta there), so the combined landscape remains smooth.
-
-        For |x| ≤ delta:  L = x²
-        For |x| > delta:  L = 2·delta·|x| − delta²
-
-        Parameters
-        ----------
-        x:
-            Residual, e.g. a bond-length deviation in Å or a volume error
-            in Å³.
-        delta:
-            Transition threshold.  Choose to match the scale of tolerable
-            distortion; ``_HUBER_DELTA_GEOM`` (1.0 Å) is the default for all
-            geometry-integrity terms.
-
-        Returns
-        -------
-        float
-            Non-negative Huber-loss value.
-        """
-        ax = abs(x)
-        if ax <= delta:
-            return float(x * x)
-        return float(2.0 * delta * ax - delta * delta)
-
-    def _calculate_geometry_integrity(
-        self, coords: np.ndarray, labels: list, atom_to_res_idx: np.ndarray, return_terms: bool = False
-    ) -> float | tuple[float, dict[str, float]]:
-        """Evaluate hard geometry constraints as soft energy penalties."""
-        energy = 0.0
-        geom_terms = {"pro_ring": 0.0, "chirality": 0.0, "planarity": 0.0}
-
-        res_map: dict[int, dict[str, int]] = {}
-        for k, lbl in enumerate(labels):
-            r, atom = lbl[0], lbl[1]
-            if r not in res_map:
-                res_map[r] = {}
-            res_map[r][atom] = k
-        for r in range(self.n_residues):
-            atoms = res_map.get(r, {})
-            res_name = self.sequence[r]
-            if res_name == "P" and "CD" in atoms and "N" in atoms:
-                d = np.linalg.norm(coords[atoms["CD"]] - coords[atoms["N"]])
-                dev = d - 1.47
-                if abs(dev) > 0.1:
-                    penalty = 50.0 * self._huber(dev, _HUBER_DELTA_GEOM)
-                    energy += penalty
-                    geom_terms["pro_ring"] += penalty
-            if all(k in atoms for k in ("CA", "N", "C", "CB")):
-                ca = coords[atoms["CA"]]
-                n = coords[atoms["N"]]
-                c = coords[atoms["C"]]
-                cb = coords[atoms["CB"]]
-                volume = np.dot(np.cross(n - ca, c - ca), cb - ca)
-                if volume < 1.0:
-                    penalty = 50.0 * self._huber(1.0 - volume, _HUBER_DELTA_GEOM)
-                    energy += penalty
-                    geom_terms["chirality"] += penalty
-            if r < self.n_residues - 1:
-                next_atoms = res_map.get(r + 1, {})
-                if all(k in atoms for k in ("C", "CA")) and all(k in next_atoms for k in ("N", "CA")):
-                    p1, p2 = coords[atoms["CA"]], coords[atoms["C"]]
-                    p3, p4 = coords[next_atoms["N"]], coords[next_atoms["CA"]]
-                    b1, b2, b3 = p2 - p1, p3 - p2, p4 - p3
-                    n1 = np.cross(b1, b2)
-                    n2 = np.cross(b2, b3)
-                    n1_norm = np.linalg.norm(n1)
-                    n2_norm = np.linalg.norm(n2)
-                    if n1_norm > 1e-8 and n2_norm > 1e-8:
-                        n1 /= n1_norm
-                        n2 /= n2_norm
-                        twist_penalty = 1.0 - abs(np.dot(n1, n2))
-                        if twist_penalty > 0.05:
-                            penalty = 20.0 * twist_penalty
-                            energy += penalty
-                            geom_terms["planarity"] += penalty
-        if return_terms:
-            return energy, geom_terms
-        return energy
-
-    def _calculate_adjacent_heavy_sterics(self, coords, labels, atom_to_res_idx, return_terms=False):
-        """
-        Penalize obvious clashes between heavy atoms on adjacent residues.
-
-        This is intentionally narrower than the full VDW term:
-          - it only looks at residue i and i+1
-          - it only considers heavy atoms
-          - it only activates when atoms are pushed into an unrealistically short range
-
-        The goal is to suppress local backbone overlaps that produce fake bonds in
-        viewers, while still allowing legitimate backbone H-bonding geometry.
-        """
-        coords = np.asarray(coords, dtype=float)
-        labels = list(labels)
-
-        res_map = {}
-        for k, lbl in enumerate(labels):
-            r = int(lbl[0])
-            atom = str(lbl[1])
-            if r not in res_map:
-                res_map[r] = {}
-            res_map[r][atom] = k
-
-        scale = 10.0
-        min_allowed_A = 1.35
-        threshold_frac = 0.55
-        overlap_width_A = 0.50
-        overlap_width_A = max(overlap_width_A, 1e-3)
-
-        energy = 0.0
-        terms = {
-            "adjacent_heavy_sterics": 0.0,
-        }
-
-        for r in range(self.n_residues - 1):
-            left = res_map.get(r, {})
-            right = res_map.get(r + 1, {})
-            for a1, i in left.items():
-                if str(labels[i][2]).upper() == "H" or str(labels[i][1]).upper().startswith("H"):
-                    continue
-                for a2, j in right.items():
-                    if str(labels[j][2]).upper() == "H" or str(labels[j][1]).upper().startswith("H"):
-                        continue
-                    if a1 == "C" and a2 == "N":
-                        continue
-                    d = float(np.linalg.norm(coords[i] - coords[j]))
-                    threshold_A = max(min_allowed_A, threshold_frac * (float(self.vdw_radii_vector[i]) + float(self.vdw_radii_vector[j])))
-                    if d >= threshold_A:
-                        continue
-                    shortfall = threshold_A - d
-                    # Quadratic wall with a soft activation range so the penalty
-                    # stays mild near the edge but rises quickly for real overlaps.
-                    penalty = scale * (shortfall / overlap_width_A) ** 2
-                    energy += penalty
-                    terms["adjacent_heavy_sterics"] += penalty
-
-        if return_terms:
-            return energy, terms
-        return energy
-
     # ------------------------------------------------------------------
     # Initialisation helpers
     # ------------------------------------------------------------------
@@ -1874,26 +1431,28 @@ class QuantumBiophysicsFolder:
         n_attempts:
             Number of random samples to evaluate.
         seed:
-            Random seed.  When ``None`` a deterministic seed is derived from
-            the protein sequence so results are reproducible per sequence.
+            Random seed. When ``None``, NumPy uses non-deterministic entropy.
         """
-        if seed is None:
-            seed = int(hashlib.sha256(self.sequence.encode()).hexdigest(), 16) % (2 ** 32)
-
         rng = np.random.default_rng(seed)
-        logger.debug("Scouting %d starting points (seed=%d)", n_attempts, seed)
+        logger.info(
+            "Scouting %d starting points (seed=%s, score_model=%s)",
+            n_attempts,
+            "unseeded" if seed is None else seed,
+            getattr(self, "active_score_model", self.score_model),
+        )
 
         best_params: np.ndarray | None = None
         best_energy = float("inf")
         for _ in range(n_attempts):
-            trial_params = rng.uniform(-0.8, 0.8, self.n_params)
+            trial_params = rng.uniform(-np.pi, np.pi, self.n_params)
             e = self.energy_function(trial_params)
             if e < best_energy:
                 best_energy = e
                 best_params = trial_params
 
-        logger.debug("Best start found: energy=%.2f", best_energy)
-        assert best_params is not None
+        logger.info("Best start found: energy=%.2f", best_energy)
+        if best_params is None:
+            raise ValueError("get_smart_initialization: n_attempts must be at least 1.")
         return best_params
 
     # ------------------------------------------------------------------
@@ -1905,8 +1464,9 @@ class QuantumBiophysicsFolder:
         max_iter: int = 2000,
         initial_params: np.ndarray | None = None,
         scout_attempts: int | None = None,
+        phase_schedule: list[dict] | None = None,
     ) -> tuple[np.ndarray, list, list, LandscapeTracker, np.ndarray, float]:
-        """Run the three-stage optimisation curriculum.
+        """Run the configurable optimisation phase curriculum.
 
         Parameters
         ----------
@@ -1932,6 +1492,9 @@ class QuantumBiophysicsFolder:
             a few dozen points.  Pass an explicit integer to override —
             e.g. ``scout_attempts=1`` for the fastest possible run during
             testing, or ``scout_attempts=200`` for a thorough global search.
+        phase_schedule:
+            Optional configurable phase list. When omitted, the default
+            collapse/refine/relax curriculum is used.
 
         Returns
         -------
@@ -1947,148 +1510,152 @@ class QuantumBiophysicsFolder:
         else:
             init_params = initial_params
 
-        logger.info("Stage 1: Mechanical Collapse (high force)…")
-        self.tracker.mark_stage("Stage1")
-        self.current_stage = 1
-        # COBYLA emits a warning ("Invalid MAXFUN; it should be at
-        # least num_vars + 2; it is set to N") whenever ``maxiter`` is
-        # below ``n_params + 2``. For small ``max_iter`` budgets (e.g.
-        # the smoke-test ``max_iter=10`` used by
-        # ``TestFoldScoutBudget``) this floor is violated, the warning
-        # leaks into the ensemble output, and the user is left
-        # wondering whether the run is broken. Enforce the floor
-        # explicitly so the warning is structurally impossible.
-        safe_maxiter = max(int(max_iter), int(self.n_params) + 2)
-        res_1 = minimize(self.energy_function, init_params, method="COBYLA",
-                         options={"maxiter": safe_maxiter, "rhobeg": 1.0})
-        logger.info("  Collapse energy: %.2f", res_1.fun)
-
-        logger.info("Stage 2: Physics Refinement (high force)…")
-        self.tracker.mark_stage("Stage2")
-        self.current_stage = 2
-        res_2 = minimize(self.energy_function, res_1.x, method="SLSQP",
-                         tol=1e-6, options={"maxiter": max_iter, "disp": False})
-        logger.info("  Refinement energy: %.2f", res_2.fun)
-
-        logger.info("Stage 3: Natural Relaxation (releasing constraints)…")
-        self.tracker.mark_stage("Stage3")
-        self.current_stage = 3
-        res_3 = minimize(self.energy_function, res_2.x, method="SLSQP",
-                         tol=1e-6, options={"maxiter": max_iter, "disp": False})
-        logger.info("  Final energy: %.2f", res_3.fun)
-
-        self.energy_function(res_3.x, return_terms=True)
-        coords, labels, bonds = self._final_output_structure_from_params(res_3.x)
-        final_energy = self.last_energy_terms.get(
-            "total",
-            self.last_energy_terms.get(
-                "rosetta_total",
-                self.last_energy_terms.get("openmm_potential_kj_mol", float(res_3.fun)),
-            ),
-        )
-        return coords, labels, bonds, self.tracker, res_3.x, float(final_energy)
-
-    def compute_sidechain_centroids(self, coords, labels):
-        """
-        Compute one heavy-atom sidechain centroid per residue from rebuilt coordinates.
-        Backbone atoms and hydrogens are excluded.
-        """
-        backbone_atoms = {'N', 'CA', 'C', 'O', 'OXT'}
-        by_residue = {}
-
-        for pos, (res_id, atom_name, elem) in zip(coords, labels):
-            if atom_name in backbone_atoms:
-                continue
-            if atom_name.startswith('H') or elem == 'H':
-                continue
-            by_residue.setdefault(int(res_id), []).append(np.asarray(pos, dtype=float))
-
-        return {
-            rid: np.mean(np.vstack(points), axis=0)
-            for rid, points in by_residue.items()
-            if points
-        }
-
-    def _aa1_to_3(self, aa):
-        aa1_to_3 = {
-            'A': 'ALA', 'R': 'ARG', 'N': 'ASN', 'D': 'ASP', 'C': 'CYS',
-            'Q': 'GLN', 'E': 'GLU', 'G': 'GLY', 'H': 'HIS', 'I': 'ILE',
-            'L': 'LEU', 'K': 'LYS', 'M': 'MET', 'F': 'PHE', 'P': 'PRO',
-            'S': 'SER', 'T': 'THR', 'W': 'TRP', 'Y': 'TYR', 'V': 'VAL',
-        }
-        return aa1_to_3.get(str(aa).upper(), 'UNK')
-
-    def _format_pdb_atom_line(self, serial, atom_name, res_name, chain_id, resseq, x, y, z, element='C'):
-        """Backwards-compatible thin wrapper around the canonical
-        PDB atom-line formatter in :mod:`qtf.utils.pdb`.
-
-        The implementation now lives in ``qtf.utils.pdb._format_atom_line``;
-        this method is kept so external subclasses that override it
-        continue to work (B5).
-        """
-        from qtf.utils.pdb import _format_atom_line as _fmt
-        return _fmt(serial, atom_name, res_name, chain_id, resseq, x, y, z, element)
-
-    def save_pdb(self, coords, labels, filename="structure.pdb", energy=0.0, chain_id='A', resseqs=None, resnames=None, remarks=None, include_hydrogens=True):
-        """
-        Save arbitrary coordinates/labels to a PDB file viewable in PyMOL or Chimera.
-
-        This is a thin wrapper around the canonical
-        :func:`qtf.utils.pdb.save_pdb` (B5). The folder method's
-        signature is preserved for backward compatibility, but the
-        implementation is centralised so fixes and feature work on
-        PDB I/O only have to happen in one place.
-
-        Args:
-            coords: array-like of shape (N, 3)
-            labels: iterable of (res_id, atom_name, element)
-            filename: output PDB path
-            energy: optional energy remark value
-            chain_id: output chain identifier
-            resseqs: optional list/dict mapping res_id -> residue number
-            resnames: optional list/dict mapping res_id -> residue name (3-letter preferred)
-            remarks: optional iterable of additional REMARK strings
-            include_hydrogens: if False, omit atoms whose element/name is hydrogen
-        """
-        from qtf.utils.pdb import save_pdb as _save_pdb
-        _save_pdb(
-            coords=coords,
-            labels=labels,
-            filename=filename,
-            energy=energy,
-            chain_id=chain_id,
-            resseqs=resseqs,
-            resnames=resnames,
-            remarks=remarks,
-            include_hydrogens=include_hydrogens,
-            sequence=self.sequence,
-        )
-
-    def save_reduced_pdb(self, ca_coords, filename="structure_ca.pdb", sidechain_centroids=None, energy=0.0,
-                         chain_id='A', resseqs=None, resnames=None):
-        """
-        Save a reduced PDB containing CA only, or CA plus one sidechain centroid pseudoatom (SC) per residue.
-        """
-        ca_coords = np.asarray(ca_coords, dtype=float)
-        labels = []
-        coords_out = []
-        n_res = len(ca_coords)
-
-        for i in range(n_res):
-            coords_out.append(ca_coords[i])
-            labels.append((i, 'CA', 'C'))
-            if sidechain_centroids is not None and i in sidechain_centroids:
-                sc = np.asarray(sidechain_centroids[i], dtype=float)
-                coords_out.append(sc)
-                labels.append((i, 'SC', 'C'))
-
-        remarks = [
-            'REDUCED REPRESENTATION GENERATED FROM QTF-OPTIMIZED STRUCTURE',
-            'CONTENTS: CA ONLY' if sidechain_centroids is None else 'CONTENTS: CA PLUS SIDCHAIN CENTROID PSEUDOATOMS (SC)',
+        phases = phase_schedule or [
+            {
+                "name": "collapse",
+                "label": "Mechanical collapse",
+                "optimizer": "COBYLA",
+                "objective": {
+                    "options": {
+                        "hydrophobic_gamma": 15.0,
+                        "end_to_end_weight": 50.0,
+                        "end_to_end_target": 5.5,
+                    }
+                },
+                "optimizer_options": {"rhobeg": 1.0},
+            },
+            {
+                "name": "refine",
+                "label": "Physics refinement",
+                "optimizer": "SLSQP",
+                "objective": {
+                    "options": {
+                        "hydrophobic_gamma": 15.0,
+                        "end_to_end_weight": 50.0,
+                        "end_to_end_target": 5.5,
+                    }
+                },
+                "tol": 1e-6,
+                "optimizer_options": {"disp": False},
+            },
+            {
+                "name": "relax",
+                "label": "Natural relaxation",
+                "optimizer": "SLSQP",
+                "objective": {
+                    "options": {
+                        "hydrophobic_gamma": 5.0,
+                        "end_to_end_weight": 5.0,
+                        "end_to_end_target": 5.5,
+                    }
+                },
+                "tol": 1e-6,
+                "optimizer_options": {"disp": False},
+            },
         ]
-        self.save_pdb(coords_out, labels, filename=filename, energy=energy, chain_id=chain_id,
-                      resseqs=resseqs, resnames=resnames, remarks=remarks)
 
-# ==========================================
-# 4. ORCHESTRATOR: ENSEMBLE MANAGER
-# ==========================================
+        params = init_params
+        self.phase_results = []
+        self.phase_structures = []
+        result = None
+        for index, phase in enumerate(phases, start=1):
+            name = str(phase.get("name") or f"phase-{index}")
+            label = str(phase.get("label") or name)
+            optimizer = str(phase.get("optimizer") or "SLSQP")
+            options = {"maxiter": int(phase.get("maxiter") or max_iter)}
+            options.update(dict(phase.get("optimizer_options") or phase.get("options") or {}))
+            tol = phase.get("tol")
+            objective = phase.get("objective") or {}
+            self.active_score_options = dict(objective.get("options") or {})
+            if phase.get("score_model"):
+                self.active_score_model = canonical_score_model(phase["score_model"])
+            self.current_stage = index
+            self.current_phase_name = name
+            self.current_phase_label = label
+            self.tracker.mark_stage(f"Phase{index}:{name}")
+            logger.info("Phase %d: %s (%s)…", index, label, optimizer)
+            kwargs = {"method": optimizer, "options": options}
+            if tol is not None:
+                kwargs["tol"] = float(tol)
+            result = minimize(self.energy_function, params, **kwargs)
+            params = result.x
+            coords_i, labels_i, bonds_i = self.build_full_structure(self._get_angles(params))
+            self.phase_structures.append(
+                {
+                    "index": index,
+                    "name": name,
+                    "label": label,
+                    "coords": coords_i,
+                    "labels": labels_i,
+                    "bonds": bonds_i,
+                    "params": params,
+                    "energy": float(result.fun),
+                    "success": bool(getattr(result, "success", False)),
+                    "status": getattr(result, "status", None),
+                    "message": str(getattr(result, "message", "")),
+                }
+            )
+            self.phase_results.append(
+                {
+                    "index": index,
+                    "name": name,
+                    "label": label,
+                    "optimizer": optimizer,
+                    "energy": float(result.fun),
+                    "success": bool(getattr(result, "success", False)),
+                    "status": getattr(result, "status", None),
+                    "message": str(getattr(result, "message", "")),
+                    "objective": objective,
+                }
+            )
+            logger.info("  %s energy: %.2f", label, result.fun)
+
+        self.active_score_options = None
+        if result is None:
+            raise ValueError("fold() phase_schedule must contain at least one phase.")
+        coords, labels, bonds = self.build_full_structure(self._get_angles(result.x))
+        logger.info("  Final energy: %.2f", result.fun)
+        return coords, labels, bonds, self.tracker, result.x, float(result.fun)
+
+    def save_pdb(self, coords, labels, filename="structure.pdb", energy=0.0):
+        write_pdb(
+            self.structure_from_coords_labels(coords, labels),
+            filename,
+            remarks=[f"ENERGY: {float(energy):.3f}"],
+        )
+
+    def save_reduced_pdb(self, ca_coords, filename="reduced.pdb", sidechain_centroids=None, energy=0.0):
+        atoms = []
+        for serial, pos in enumerate(ca_coords, start=1):
+            rid = serial - 1
+            template_residue = self._template_residue(rid)
+            chain_id = template_residue.chain_id if template_residue is not None else "A"
+            resseq = template_residue.resseq if template_residue is not None else rid + 1
+            icode = template_residue.icode if template_residue is not None else ""
+            atoms.append(
+                Atom(
+                    name="CA",
+                    element="C",
+                    x=float(pos[0]),
+                    y=float(pos[1]),
+                    z=float(pos[2]),
+                    resname=one_to_three(self.sequence[rid]),
+                    chain_id=chain_id,
+                    resseq=resseq,
+                    icode=icode,
+                    record_name="ATOM",
+                    serial=serial,
+                    occupancy=1.0,
+                    bfactor=0.0,
+                )
+            )
+        write_pdb(
+            HeavyAtomStructure(
+                atoms=atoms,
+                name=f"qtf:{self.sequence}:ca",
+                metadata={"source": "qtf", "representation": "ca"},
+                disulfide_bonds=self._template_disulfide_bonds(),
+            ),
+            filename,
+            remarks=[f"ENERGY: {float(energy):.3f}"],
+        )

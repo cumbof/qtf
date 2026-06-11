@@ -1,0 +1,1399 @@
+recipes:
+  qtf-three-stage-main:
+    description: Main-equivalent three-stage fold recipe for quick mechanical collapse, refinement, and relaxation.
+    circuit_template:
+      description: Qiskit library ansatz used by the legacy recipe.
+      source: qiskit-library
+      name: EfficientSU2
+      options:
+        reps: auto
+        entanglement: circular
+    fold:
+      description: Default outer-loop controls used by qtf fold before phase-specific overrides are applied.
+      force_field: protein-coarse-charge-v1
+      max_iter: 2000
+      scout_attempts: 50
+    geometry:
+      description: Legacy angle-only geometry defaults; phases decide which angles are activated.
+      stored_angles: []
+      stored_lengths: []
+      max_chi: null
+    metrics:
+      description: Reference comparison atom sets reported when a known structure is available.
+      atom_sets:
+        - ca
+        - backbone
+        - all-heavy
+      rmsd_alignment_atom_set: same-as-rmsd
+    report:
+      description: Report only protein heavy atoms by default.
+      structure_domain: protein-heavy
+    basis_circuit_batching: auto
+    result:
+      description: Score and select the final phase structure with the PHEAT coarse physics objective.
+      primary: last_phase_structure
+      score_model: pheat-physics
+      score_options:
+        charge_profile: protein-coarse-charge-v1
+        hydrophobic_gamma: 5.0
+        end_to_end_weight: 5.0
+    scouting:
+      description: Generate collapsed starting candidates using a stronger hydrophobic/end-to-end bias.
+      score_model: pheat-physics
+      backend: inherit
+      shots: null
+      attempts: 50
+      score_options:
+        charge_profile: protein-coarse-charge-v1
+        hydrophobic_gamma: 15.0
+        end_to_end_weight: 50.0
+    phases:
+      - name: collapse
+        label: Mechanical collapse
+        description: Drive the chain into a compact starting shape before refinement.
+        optimizer: COBYLA
+        score_model: pheat-physics
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        score_options:
+          charge_profile: protein-coarse-charge-v1
+          hydrophobic_gamma: 15.0
+          end_to_end_weight: 50.0
+          end_to_end_target: 5.5
+        options:
+          rhobeg: 1.0
+      - name: refine
+        label: Physics refinement
+        description: Improve the collapsed structure with the same strong coarse objective.
+        optimizer: SLSQP
+        score_model: pheat-physics
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        tol: 1.0e-6
+        score_options:
+          charge_profile: protein-coarse-charge-v1
+          hydrophobic_gamma: 15.0
+          end_to_end_weight: 50.0
+          end_to_end_target: 5.5
+        options:
+          disp: false
+      - name: relax
+        label: Natural relaxation
+        description: Reduce the coarse bias and relax toward the final PHEAT coarse physics score.
+        optimizer: SLSQP
+        score_model: pheat-physics
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        tol: 1.0e-6
+        score_options:
+          charge_profile: protein-coarse-charge-v1
+          hydrophobic_gamma: 5.0
+          end_to_end_weight: 5.0
+          end_to_end_target: 5.5
+        options:
+          disp: false
+    readouts: []
+
+  qtf-pheat-coarse-to-fine-lengths: &qtf_pheat_coarse_to_fine_lengths
+    description: Coarse-to-fine PHEAT recipe that progressively activates backbone angles, shared bond lengths, and per-residue bond lengths while guarding unsafe handoffs.
+    circuit_template:
+      description: Compact QTF brickwork template used for all phases; qubit count scales with active geometry DOFs.
+      source: qtf
+      name: brickwork-ryrz-nearest-neighbor
+      options:
+        reps: auto
+        rotation_gates:
+          - ry
+          - rz
+        entangler: cx
+        entanglement_pattern: even_odd_linear
+        final_rotation_layer: true
+    fold:
+      description: Default run controls for realistic multi-phase PHEAT optimization.
+      force_field: protein-coarse-charge-v1
+      max_iter: 2000
+      scout_attempts: 50
+    geometry:
+      description: Global geometry defaults inherited by phases unless a phase activates a narrower or richer encoding.
+      stored_angles: []
+      stored_lengths: []
+      max_chi: 0
+      length_encoding_scope: shared-by-type
+      backbone_length_span: 0.08
+      sidechain_length_span: 0.12
+    metrics:
+      description: Diagnostic comparison atom sets; RMSD is reported only when a reference structure is supplied and is not used for scoring.
+      atom_sets:
+        - ca
+        - backbone
+        - all-heavy
+      rmsd_alignment_atom_set: same-as-rmsd
+    report:
+      description: Limit report scoring and visualization to protein heavy atoms.
+      structure_domain: protein-heavy
+    basis_circuit_batching: auto
+    result:
+      description: Select the retained primary structure with the heavy-MM plus physical-integrity barrier score.
+      primary: last_phase_structure
+      score_model: pheat-heavy-mm-physical
+      score_options:
+        domain: protein-heavy
+        physical_integrity_weight: 1000.0
+    evaluators:
+      geometry_integrity:
+        description: Native PHEAT geometry sanity check for bonds, planarity, chirality, and proline closure.
+        score_model: pheat-geometry-integrity
+        required: false
+        options:
+          domain: protein-heavy
+      physical_integrity:
+        description: Native PHEAT guard score for geometry integrity plus nonlocal clashes and severe short contacts.
+        score_model: pheat-physical-integrity
+        required: false
+        options:
+          domain: protein-heavy
+      goap_check:
+        description: Optional GOAP-style packing validation used for comparisons, not direct primary selection.
+        score_model: pheat-goap
+        required: false
+        options:
+          domain: protein-heavy
+      rg_compactness:
+        description: Radius-of-gyration compactness check used to flag over-extended folds.
+        score_model: pheat-rg
+        required: false
+        options:
+          domain: protein-heavy
+      gromacs_minimize:
+        description: Final force-field rerun/minimization validation to expose clashes that survive PHEAT scoring.
+        score_model: pheat-gromacs-mdrun
+        required: false
+        options:
+          domain: protein-heavy
+          prepare: auto
+          gromacs_forcefield: amber99sb-ildn
+          gromacs_water: none
+          gromacs_run_mode: minimize-rerun
+          gromacs_preflight: warn
+          gromacs_metrics: true
+          external_timeout_seconds: 600
+          prep_cache_mode: readwrite
+          gromacs_run_settings:
+            minimize_steps: 500
+            emtol: 1000.0
+            cutoff_nm: 1.0
+            mdrun_flags:
+              - -ntmpi
+              - "1"
+            grompp_maxwarn: 2
+    phase_comparisons:
+      description: Report evaluator deltas across consecutive phase ends without changing selection.
+      enabled: true
+      evaluators:
+        - geometry_integrity
+        - physical_integrity
+        - goap_check
+        - rg_compactness
+      compare: consecutive_phase_ends
+      affect_selection: false
+    reranking:
+      description: Score periodic physical-integrity checkpoints plus phase-end candidate pools, then select the best physical candidate for the next phase boundary.
+      enabled: true
+      evaluator: physical_integrity
+      triggers:
+        - when: every_evaluations
+          interval: 250
+        - when: phase_end
+      candidate_pool:
+        per_phase_top_k: 25
+        include_latest: true
+        include_phase_start: true
+      apply: next_phase_start
+    phase_readiness:
+      description: Require a physically ready incoming structure before activating backbone bond-length tuning phases.
+      enabled: true
+      evaluator: physical_integrity
+      phases:
+        - shared_backbone_lengths
+        - local_backbone_lengths
+        - post_length_physical_declash
+      on_fail: skip_phase
+      max_clash_count: 0
+      max_short_contact_count: 0
+      min_nonlocal_distance_a: 0.7
+    handoff_guard:
+      description: Default physical-integrity handoff guard; individual phases can override unsafe-transition policy.
+      enabled: true
+      evaluator: physical_integrity
+      fallback: phase_start
+      abort_on_reject: false
+      allow_improving_unsafe: true
+      max_clash_count: 0
+      max_short_contact_count: 0
+      min_nonlocal_distance_a: 0.7
+      unsafe_transition_max_short_contact_count: 2
+      unsafe_transition_min_nonlocal_distance_a: 0.65
+      unsafe_transition_require_clash_count_decrease: true
+      reject_on_score_worse: true
+      reject_on_clash_count_increase: true
+      reject_on_short_contact_count_increase: true
+      reject_on_min_nonlocal_distance_decrease: true
+      reject_on_nonfinite: true
+    validation:
+      description: Validate only the retained primary structure for the baseline recipe.
+      enabled: true
+      candidates:
+        - primary
+      evaluators:
+        - geometry_integrity
+        - physical_integrity
+        - rg_compactness
+        - gromacs_minimize
+    scouting:
+      description: Build compact starting candidates before the first optimizer phase.
+      score_model: pheat-hydropathy-physical
+      backend: inherit
+      shots: null
+      attempts: 50
+      score_options:
+        domain: protein-heavy
+        burial_method: contacts
+        physical_integrity_weight: 0.0001
+    phases:
+      - &qtf_length_phase_ca_collapse
+        name: ca_collapse
+        label: CA collapse
+        description: Optimize only coarse CA-level collapse variables with hydropathy-biased physical scoring.
+        optimizer: COBYLA
+        score_model: pheat-hydropathy-physical
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        geometry:
+          stored_angles: []
+          stored_lengths: []
+          max_chi: 0
+          length_encoding_scope: shared-by-type
+        score_options:
+          domain: protein-heavy
+          burial_method: contacts
+          physical_integrity_weight: 0.0001
+        options:
+          rhobeg: 1.0
+      - &qtf_length_phase_backbone_geometry
+        name: backbone_geometry
+        label: Backbone angle refinement
+        description: Activate omega, tau, and theta backbone angles to improve local backbone geometry.
+        optimizer: Powell
+        score_model: pheat-backbone-physical
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        geometry:
+          stored_angles:
+            - omega
+            - tau
+            - theta
+          stored_lengths: []
+          max_chi: 0
+          length_encoding_scope: shared-by-type
+        score_options:
+          domain: protein-heavy
+          physical_integrity_weight: 0.001
+        options:
+          xtol: 0.01
+          ftol: 0.01
+          maxfev: 10000
+          disp: true
+      - &qtf_length_phase_physical_declash
+        name: physical_declash
+        label: Physical declash
+        description: Expand to all angles and reduce nonlocal clashes before packing-oriented scoring.
+        optimizer: Powell
+        score_model: pheat-physical-integrity
+        handoff_guard:
+          enabled: true
+          allow_improving_unsafe: true
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        geometry:
+          stored_angles: all
+          stored_lengths: []
+          max_chi: null
+          length_encoding_scope: shared-by-type
+        score_options:
+          domain: protein-heavy
+        options:
+          xtol: 0.01
+          ftol: 0.01
+          maxfev: 35000
+          disp: true
+      - &qtf_length_phase_packing_orientation
+        name: packing_orientation
+        label: Heavy-atom packing orientation
+        description: Use GOAP-informed packing with a light physical-integrity barrier; strict guard prevents unsafe propagation.
+        optimizer: Powell
+        score_model: pheat-goap-physical
+        handoff_guard:
+          enabled: true
+          allow_improving_unsafe: false
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        geometry:
+          stored_angles: all
+          stored_lengths: []
+          max_chi: null
+          length_encoding_scope: shared-by-type
+        score_options:
+          domain: protein-heavy
+          physical_integrity_weight: 0.02
+        options:
+          xtol: 0.01
+          ftol: 0.01
+          maxfev: 16000
+          disp: true
+      - &qtf_length_phase_post_packing_declash
+        name: post_packing_declash
+        label: Post-packing physical declash
+        description: Re-run physical declashing after packing while keeping angle-only geometry active.
+        optimizer: Powell
+        score_model: pheat-physical-integrity
+        handoff_guard:
+          enabled: true
+          allow_improving_unsafe: false
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        geometry:
+          stored_angles: all
+          stored_lengths: []
+          max_chi: null
+          length_encoding_scope: shared-by-type
+        score_options:
+          domain: protein-heavy
+        options:
+          xtol: 0.01
+          ftol: 0.01
+          maxfev: 20000
+          disp: true
+      - &qtf_length_phase_shared_backbone_lengths
+        name: shared_backbone_lengths
+        label: Shared backbone length tuning
+        description: Introduce four shared backbone bond-length variables to tune global bond-length assumptions.
+        optimizer: Powell
+        score_model: pheat-heavy-mm-physical
+        handoff_guard:
+          enabled: true
+          allow_improving_unsafe: true
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        geometry:
+          stored_angles: all
+          stored_lengths: backbone
+          max_chi: null
+          length_encoding_scope: shared-by-type
+          backbone_length_span: 0.06
+        score_options:
+          domain: protein-heavy
+          physical_integrity_weight: 1000.0
+        options:
+          xtol: 0.005
+          ftol: 0.005
+          maxfev: 12000
+          disp: true
+      - &qtf_length_phase_local_backbone_lengths
+        name: local_backbone_lengths
+        label: Local backbone length relaxation
+        description: Replace shared bond lengths with per-residue backbone bond lengths for local strain relief.
+        optimizer: Powell
+        score_model: pheat-heavy-mm-physical
+        handoff_guard:
+          enabled: true
+          allow_improving_unsafe: true
+          unsafe_transition_max_short_contact_count: 0
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        geometry:
+          stored_angles: all
+          stored_lengths: backbone
+          max_chi: null
+          length_encoding_scope: per-residue
+          backbone_length_span: 0.015
+        score_options:
+          domain: protein-heavy
+          physical_integrity_weight: 1000.0
+        options:
+          xtol: 0.002
+          ftol: 0.002
+          maxfev: 12000
+          disp: true
+      - &qtf_length_phase_post_length_declash
+        name: post_length_physical_declash
+        label: Post-length physical declash
+        description: Final strict physical-integrity cleanup after local bond-length relaxation.
+        optimizer: Powell
+        score_model: pheat-physical-integrity
+        handoff_guard:
+          enabled: true
+          allow_improving_unsafe: false
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        geometry:
+          stored_angles: all
+          stored_lengths: backbone
+          max_chi: null
+          length_encoding_scope: per-residue
+          backbone_length_span: 0.015
+        score_options:
+          domain: protein-heavy
+        options:
+          xtol: 0.002
+          ftol: 0.002
+          maxfev: 20000
+          disp: true
+    readouts: []
+
+  qtf-pheat-coarse-to-fine-lengths-final-improving:
+    <<: *qtf_pheat_coarse_to_fine_lengths
+    description: Variant of the coarse-to-fine length recipe that retains a final unsafe-but-improving declash candidate when it reduces clashes, avoids short contacts, and stays above the hard nonlocal-distance floor.
+    validation:
+      description: Validate the retained primary, phase-end structures, and top reranked candidates so fallback and rejected-best behavior can be inspected.
+      enabled: true
+      candidates:
+        - primary
+        - phase_ends
+        - reranked_top
+      evaluators:
+        - geometry_integrity
+        - physical_integrity
+        - rg_compactness
+        - gromacs_minimize
+    phases:
+      - *qtf_length_phase_ca_collapse
+      - *qtf_length_phase_backbone_geometry
+      - *qtf_length_phase_physical_declash
+      - *qtf_length_phase_packing_orientation
+      - *qtf_length_phase_post_packing_declash
+      - *qtf_length_phase_shared_backbone_lengths
+      - *qtf_length_phase_local_backbone_lengths
+      - <<: *qtf_length_phase_post_length_declash
+        description: Final physical-integrity cleanup that can accept an unsafe but strictly improving candidate when no severe short contacts appear.
+        handoff_guard:
+          description: Accept final unsafe improvements if clashes decrease, short contacts stay at zero, and minimum nonlocal distance remains above 1.0 A.
+          enabled: true
+          allow_improving_unsafe: true
+          unsafe_transition_max_short_contact_count: 0
+          unsafe_transition_min_nonlocal_distance_a: 1.0
+          unsafe_transition_require_clash_count_decrease: true
+          reject_on_score_worse: true
+          reject_on_clash_count_increase: true
+          reject_on_short_contact_count_increase: true
+          reject_on_min_nonlocal_distance_decrease: false
+          reject_on_nonfinite: true
+    readouts: []
+
+
+  qtf-pheat-coarse-to-fine-lengths-progressive-declash:
+    <<: *qtf_pheat_coarse_to_fine_lengths
+    description: Recommended debugging recipe for larger proteins; it treats declashing as progressive phase-to-phase improvement instead of requiring zero clashes before bond-length tuning can run.
+    result:
+      description: Report the retained final phase structure with a moderate heavy-MM plus physical-integrity score; RMSD is report-only when a reference is present.
+      primary: last_phase_structure
+      score_model: pheat-heavy-mm-physical
+      score_options:
+        domain: protein-heavy
+        physical_integrity_weight: 1.0
+    phase_readiness:
+      description: Allow length-tuning phases once severe short contacts are gone and the minimum nonlocal distance is above the hard floor, even if ordinary clashes remain.
+      enabled: true
+      evaluator: physical_integrity
+      phases:
+        - shared_backbone_lengths
+        - local_backbone_lengths
+        - post_length_physical_declash
+      on_fail: skip_phase
+      max_clash_count: null
+      max_short_contact_count: 0
+      min_nonlocal_distance_a: 0.7
+    handoff_guard:
+      description: Guard all phase handoffs with physical-integrity checks, while accepting unsafe-but-improving candidates that remove clashes without introducing severe contacts.
+      enabled: true
+      evaluator: physical_integrity
+      fallback: phase_start
+      abort_on_reject: false
+      allow_improving_unsafe: true
+      max_clash_count: 0
+      max_short_contact_count: 0
+      min_nonlocal_distance_a: 0.7
+      unsafe_transition_max_short_contact_count: 0
+      unsafe_transition_min_nonlocal_distance_a: 0.7
+      unsafe_transition_require_clash_count_decrease: true
+      reject_on_score_worse: true
+      reject_on_clash_count_increase: true
+      reject_on_short_contact_count_increase: true
+      reject_on_min_nonlocal_distance_decrease: true
+      reject_on_nonfinite: true
+    validation:
+      description: Validate primary, phase-end, and reranked candidates so progressive handoffs and force-field sanity checks can be inspected.
+      enabled: true
+      candidates:
+        - primary
+        - phase_ends
+        - reranked_top
+      evaluators:
+        - geometry_integrity
+        - physical_integrity
+        - rg_compactness
+        - gromacs_minimize
+    phases:
+      - *qtf_length_phase_ca_collapse
+      - *qtf_length_phase_backbone_geometry
+      - <<: *qtf_length_phase_physical_declash
+        description: Aggressively reduce nonlocal clashes before packing; improving unsafe handoffs are allowed if severe contacts are removed.
+        handoff_guard:
+          enabled: true
+          allow_improving_unsafe: true
+          unsafe_transition_max_short_contact_count: 0
+          unsafe_transition_min_nonlocal_distance_a: 0.7
+          unsafe_transition_require_clash_count_decrease: true
+      - <<: *qtf_length_phase_packing_orientation
+        description: Use GOAP-informed packing with a stronger physical barrier; only physically improving unsafe candidates can propagate.
+        handoff_guard:
+          enabled: true
+          allow_improving_unsafe: true
+          unsafe_transition_max_short_contact_count: 0
+          unsafe_transition_min_nonlocal_distance_a: 0.7
+          unsafe_transition_require_clash_count_decrease: true
+        score_options:
+          domain: protein-heavy
+          physical_integrity_weight: 0.1
+      - <<: *qtf_length_phase_post_packing_declash
+        description: Re-run physical declashing after packing and keep unsafe candidates only when physical integrity improves.
+        handoff_guard:
+          enabled: true
+          allow_improving_unsafe: true
+          unsafe_transition_max_short_contact_count: 0
+          unsafe_transition_min_nonlocal_distance_a: 0.7
+          unsafe_transition_require_clash_count_decrease: true
+      - <<: *qtf_length_phase_shared_backbone_lengths
+        description: Introduce shared backbone bond lengths with a moderate physical barrier so length tuning can relieve strain without being dominated by clash count.
+        score_options:
+          domain: protein-heavy
+          physical_integrity_weight: 0.5
+        handoff_guard:
+          enabled: true
+          allow_improving_unsafe: true
+          unsafe_transition_max_short_contact_count: 0
+          unsafe_transition_min_nonlocal_distance_a: 0.7
+          unsafe_transition_require_clash_count_decrease: false
+      - <<: *qtf_length_phase_local_backbone_lengths
+        description: Relax per-residue backbone bond lengths with a moderate physical barrier and no tolerance for new severe contacts.
+        score_options:
+          domain: protein-heavy
+          physical_integrity_weight: 0.5
+        handoff_guard:
+          enabled: true
+          allow_improving_unsafe: true
+          unsafe_transition_max_short_contact_count: 0
+          unsafe_transition_min_nonlocal_distance_a: 0.7
+          unsafe_transition_require_clash_count_decrease: false
+      - <<: *qtf_length_phase_post_length_declash
+        description: Final physical-integrity cleanup after local bond-length relaxation; accepts only improving unsafe declash candidates.
+        handoff_guard:
+          enabled: true
+          allow_improving_unsafe: true
+          unsafe_transition_max_short_contact_count: 0
+          unsafe_transition_min_nonlocal_distance_a: 0.7
+          unsafe_transition_require_clash_count_decrease: true
+          reject_on_score_worse: true
+          reject_on_clash_count_increase: true
+          reject_on_short_contact_count_increase: true
+          reject_on_min_nonlocal_distance_decrease: true
+          reject_on_nonfinite: true
+    readouts: []
+
+  qtf-pheat-coarse-to-fine-guarded-diagnostic:
+    circuit_template:
+      source: qtf
+      name: brickwork-ryrz-nearest-neighbor
+      options:
+        reps: auto
+        rotation_gates:
+          - ry
+          - rz
+        entangler: cx
+        entanglement_pattern: even_odd_linear
+        final_rotation_layer: true
+    fold:
+      force_field: protein-coarse-charge-v1
+      max_iter: 1200
+      scout_attempts: 50
+    geometry:
+      stored_angles: []
+      stored_lengths: []
+      max_chi: 0
+      length_encoding_scope: shared-by-type
+      backbone_length_span: 0.08
+      sidechain_length_span: 0.12
+    metrics:
+      atom_sets:
+        - ca
+        - backbone
+        - all-heavy
+      rmsd_alignment_atom_set: same-as-rmsd
+    report:
+      structure_domain: protein-heavy
+    basis_circuit_batching: auto
+    result:
+      primary: last_phase_structure
+      score_model: pheat-goap-physical
+      score_options:
+        domain: protein-heavy
+        physical_integrity_weight: 0.02
+    evaluators:
+      geometry_integrity:
+        score_model: pheat-geometry-integrity
+        required: false
+        options:
+          domain: protein-heavy
+      physical_integrity:
+        score_model: pheat-physical-integrity
+        required: false
+        options:
+          domain: protein-heavy
+      goap_check:
+        score_model: pheat-goap
+        required: false
+        options:
+          domain: protein-heavy
+      gromacs_minimize:
+        score_model: pheat-gromacs-mdrun
+        required: false
+        options:
+          domain: protein-heavy
+          prepare: auto
+          gromacs_forcefield: amber99sb-ildn
+          gromacs_water: none
+          gromacs_run_mode: minimize-rerun
+          gromacs_preflight: warn
+          gromacs_metrics: true
+          external_timeout_seconds: 600
+          prep_cache_mode: readwrite
+          gromacs_run_settings:
+            minimize_steps: 500
+            emtol: 1000.0
+            cutoff_nm: 1.0
+            mdrun_flags:
+              - -ntmpi
+              - "1"
+            grompp_maxwarn: 2
+    phase_comparisons:
+      enabled: true
+      evaluators:
+        - geometry_integrity
+        - physical_integrity
+        - goap_check
+      compare: consecutive_phase_ends
+      affect_selection: false
+    reranking:
+      enabled: true
+      evaluator: physical_integrity
+      triggers:
+        - when: phase_end
+      candidate_pool:
+        per_phase_top_k: 25
+        include_latest: true
+        include_phase_start: true
+      apply: next_phase_start
+    handoff_guard:
+      enabled: true
+      evaluator: physical_integrity
+      fallback: phase_start
+      abort_on_reject: false
+      allow_improving_unsafe: true
+      max_clash_count: 0
+      max_short_contact_count: 0
+      min_nonlocal_distance_a: 0.7
+      unsafe_transition_max_short_contact_count: 2
+      unsafe_transition_min_nonlocal_distance_a: 0.65
+      unsafe_transition_require_clash_count_decrease: true
+      reject_on_score_worse: true
+      reject_on_clash_count_increase: true
+      reject_on_short_contact_count_increase: true
+      reject_on_min_nonlocal_distance_decrease: true
+      reject_on_nonfinite: true
+    validation:
+      enabled: true
+      candidates:
+        - primary
+      evaluators:
+        - geometry_integrity
+        - physical_integrity
+        - gromacs_minimize
+    scouting:
+      score_model: pheat-hydropathy-physical
+      backend: inherit
+      shots: null
+      attempts: 50
+      score_options:
+        domain: protein-heavy
+        burial_method: contacts
+        physical_integrity_weight: 0.0001
+    phases:
+      - name: ca_collapse
+        label: CA collapse
+        optimizer: COBYLA
+        score_model: pheat-hydropathy-physical
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        geometry:
+          stored_angles: []
+          stored_lengths: []
+          max_chi: 0
+          length_encoding_scope: shared-by-type
+        score_options:
+          domain: protein-heavy
+          burial_method: contacts
+          physical_integrity_weight: 0.0001
+        options:
+          rhobeg: 1.0
+      - name: backbone_geometry
+        label: Backbone angle refinement
+        optimizer: Powell
+        score_model: pheat-backbone-physical
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        geometry:
+          stored_angles:
+            - omega
+            - tau
+            - theta
+          stored_lengths: []
+          max_chi: 0
+          length_encoding_scope: shared-by-type
+        score_options:
+          domain: protein-heavy
+          physical_integrity_weight: 0.001
+        options:
+          xtol: 0.01
+          ftol: 0.01
+          maxfev: 10000
+          disp: true
+      - name: physical_declash
+        label: Physical declash
+        optimizer: Powell
+        score_model: pheat-physical-integrity
+        handoff_guard:
+          enabled: true
+          allow_improving_unsafe: true
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        geometry:
+          stored_angles: all
+          stored_lengths: []
+          max_chi: null
+          length_encoding_scope: shared-by-type
+        score_options:
+          domain: protein-heavy
+        options:
+          xtol: 0.01
+          ftol: 0.01
+          maxfev: 35000
+          disp: true
+      - name: packing_orientation
+        label: Heavy-atom packing orientation
+        optimizer: Powell
+        score_model: pheat-goap-physical
+        handoff_guard:
+          enabled: true
+          allow_improving_unsafe: false
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        geometry:
+          stored_angles: all
+          stored_lengths: []
+          max_chi: null
+          length_encoding_scope: shared-by-type
+        score_options:
+          domain: protein-heavy
+          physical_integrity_weight: 0.02
+        options:
+          xtol: 0.01
+          ftol: 0.01
+          maxfev: 16000
+          disp: true
+      - name: post_packing_declash
+        label: Post-packing physical declash
+        optimizer: Powell
+        score_model: pheat-physical-integrity
+        handoff_guard:
+          enabled: true
+          allow_improving_unsafe: false
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        geometry:
+          stored_angles: all
+          stored_lengths: []
+          max_chi: null
+          length_encoding_scope: shared-by-type
+        score_options:
+          domain: protein-heavy
+        options:
+          xtol: 0.01
+          ftol: 0.01
+          maxfev: 20000
+          disp: true
+    readouts: []
+
+  qtf-heavy-atom-phased:
+    circuit_template:
+      source: qtf
+      name: brickwork-ryrz-nearest-neighbor
+      options:
+        reps: auto
+        rotation_gates:
+          - ry
+          - rz
+        entangler: cx
+        entanglement_pattern: even_odd_linear
+        final_rotation_layer: true
+    fold:
+      force_field: protein-coarse-charge-v1
+      max_iter: 2000
+      scout_attempts: 50
+    geometry:
+      stored_angles: all
+      stored_lengths: []
+      max_chi: null
+    metrics:
+      atom_sets:
+        - ca
+        - backbone
+        - all-heavy
+      rmsd_alignment_atom_set: same-as-rmsd
+    report:
+      structure_domain: protein-heavy
+    basis_circuit_batching: auto
+    result:
+      primary: last_phase_structure
+      score_model: pheat-goap
+    evaluators:
+      geometry_integrity:
+        score_model: pheat-geometry-integrity
+        required: false
+        options: {}
+      ambertools_gb:
+        score_model: pheat-ambertools-sander
+        required: false
+        options:
+          prepare: auto
+          amber_solvent: gb
+          external_timeout_seconds: 300
+      gromacs_minimize:
+        score_model: pheat-gromacs-mdrun
+        required: false
+        options:
+          prepare: auto
+          gromacs_forcefield: amber99sb-ildn
+          gromacs_water: none
+          gromacs_run_mode: minimize-rerun
+          gromacs_preflight: warn
+          gromacs_metrics: true
+          external_timeout_seconds: 600
+          prep_cache_mode: readwrite
+          gromacs_run_settings:
+            minimize_steps: 500
+            emtol: 1000.0
+            cutoff_nm: 1.0
+            grompp_maxwarn: 1
+    phase_comparisons:
+      enabled: false
+      evaluators:
+        - ambertools_gb
+      compare: consecutive_phase_ends
+      affect_selection: false
+    reranking:
+      enabled: false
+      evaluator: ambertools_gb
+      triggers:
+        - when: phase_end
+        - when: every_evaluations
+          interval: 250
+      candidate_pool:
+        per_phase_top_k: 5
+        include_latest: true
+      apply: next_phase_start
+    validation:
+      enabled: false
+      candidates:
+        - primary
+        - phase_ends
+        - reranked_top
+      evaluators:
+        - geometry_integrity
+        - ambertools_gb
+        - gromacs_minimize
+    scouting:
+      score_model: pheat-generic
+      backend: inherit
+      shots: null
+      attempts: 50
+    phases:
+      - name: collapse
+        label: Coarse collapse
+        optimizer: COBYLA
+        score_model: pheat-dfire
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        options:
+          rhobeg: 1.0
+      - name: refine
+        label: Orientation refinement
+        optimizer: SLSQP
+        score_model: pheat-goap
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        tol: 1.0e-6
+        options:
+          disp: true
+      - name: relax
+        label: Heavy-atom relaxation
+        optimizer: SLSQP
+        score_model: pheat-heavy-mm
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        tol: 1.0e-6
+        options:
+          disp: true
+    readouts: []
+
+  qtf-pheat-native-robust:
+    circuit_template:
+      source: qtf
+      name: brickwork-ryrz-nearest-neighbor
+      options:
+        reps: auto
+        rotation_gates:
+          - ry
+          - rz
+        entangler: cx
+        entanglement_pattern: even_odd_linear
+        final_rotation_layer: true
+    fold:
+      force_field: protein-coarse-charge-v1
+      max_iter: 2000
+      scout_attempts: 50
+    geometry:
+      stored_angles: all
+      stored_lengths: []
+      max_chi: null
+    metrics:
+      atom_sets:
+        - ca
+        - backbone
+        - all-heavy
+      rmsd_alignment_atom_set: same-as-rmsd
+    report:
+      structure_domain: protein-heavy
+    basis_circuit_batching: auto
+    result:
+      primary: last_phase_structure
+      score_model: pheat-goap
+      score_options:
+        domain: protein-heavy
+    evaluators:
+      geometry_integrity:
+        score_model: pheat-geometry-integrity
+        required: false
+        options:
+          domain: protein-heavy
+      dfire_check:
+        score_model: pheat-dfire
+        required: false
+        options:
+          domain: protein-heavy
+      goap_check:
+        score_model: pheat-goap
+        required: false
+        options:
+          domain: protein-heavy
+      rg_check:
+        score_model: pheat-rg
+        required: false
+        options:
+          domain: protein-heavy
+      heavy_mm_check:
+        score_model: pheat-heavy-mm
+        required: false
+        options:
+          domain: protein-heavy
+    phase_comparisons:
+      enabled: true
+      evaluators:
+        - geometry_integrity
+        - goap_check
+        - rg_check
+      compare: consecutive_phase_ends
+      affect_selection: false
+    reranking:
+      enabled: true
+      evaluator: goap_check
+      triggers:
+        - when: phase_end
+      candidate_pool:
+        per_phase_top_k: 3
+        include_latest: true
+      apply: next_phase_start
+    validation:
+      enabled: true
+      candidates:
+        - primary
+        - phase_ends
+        - reranked_top
+      evaluators:
+        - geometry_integrity
+        - dfire_check
+        - goap_check
+        - rg_check
+        - heavy_mm_check
+    scouting:
+      score_model: pheat-mj
+      backend: inherit
+      shots: null
+      attempts: 50
+      score_options:
+        domain: protein-heavy
+    phases:
+      - name: collapse
+        label: Hydrophobic collapse
+        optimizer: COBYLA
+        score_model: pheat-hydropathy
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        score_options:
+          domain: protein-heavy
+          burial_method: contacts
+        options:
+          rhobeg: 1.0
+      - name: packing
+        label: Residue-contact packing
+        optimizer: COBYLA
+        score_model: pheat-mj
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        score_options:
+          domain: protein-heavy
+        options:
+          rhobeg: 0.75
+      - name: orientation
+        label: Distance-orientation refinement
+        optimizer: Powell
+        score_model: pheat-goap
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        score_options:
+          domain: protein-heavy
+        options:
+          xtol: 0.01
+          ftol: 0.01
+          disp: true
+      - name: polar_contacts
+        label: Polar-contact refinement
+        optimizer: Powell
+        score_model: pheat-hbond
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        score_options:
+          domain: protein-heavy
+        options:
+          xtol: 0.01
+          ftol: 0.01
+          disp: true
+      - name: backbone_torsions
+        label: Backbone torsion plausibility
+        optimizer: Powell
+        score_model: pheat-backbone
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        score_options:
+          domain: protein-heavy
+        options:
+          xtol: 0.01
+          ftol: 0.01
+          disp: true
+      - name: sidechain_rotamers
+        label: Side-chain rotamer plausibility
+        optimizer: Powell
+        score_model: pheat-rotamer
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        score_options:
+          domain: protein-heavy
+        options:
+          xtol: 0.01
+          ftol: 0.01
+          disp: true
+      - name: heavy_relax
+        label: Heavy-atom relaxation
+        optimizer: Powell
+        score_model: pheat-heavy-mm
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        score_options:
+          domain: protein-heavy
+        options:
+          xtol: 0.01
+          ftol: 0.01
+          disp: true
+    readouts: []
+
+  qtf-pheat-external-validation:
+    circuit_template:
+      source: qtf
+      name: brickwork-ryrz-nearest-neighbor
+      options:
+        reps: auto
+        rotation_gates:
+          - ry
+          - rz
+        entangler: cx
+        entanglement_pattern: even_odd_linear
+        final_rotation_layer: true
+    fold:
+      force_field: protein-coarse-charge-v1
+      max_iter: 2000
+      scout_attempts: 50
+    geometry:
+      stored_angles: all
+      stored_lengths: []
+      max_chi: null
+    metrics:
+      atom_sets:
+        - ca
+        - backbone
+        - all-heavy
+      rmsd_alignment_atom_set: same-as-rmsd
+    report:
+      structure_domain: protein-heavy
+    basis_circuit_batching: auto
+    result:
+      primary: last_phase_structure
+      score_model: pheat-goap
+      score_options:
+        domain: protein-heavy
+    evaluators:
+      geometry_integrity:
+        score_model: pheat-geometry-integrity
+        required: false
+        options:
+          domain: protein-heavy
+      openmm_prepared:
+        score_model: pheat-openmm-prepared
+        required: false
+        options:
+          domain: protein-heavy
+      ambertools_gb:
+        score_model: pheat-ambertools-sander
+        required: false
+        options:
+          domain: protein-heavy
+          prepare: auto
+          amber_solvent: gb
+          external_timeout_seconds: 300
+      gromacs_minimize:
+        score_model: pheat-gromacs-mdrun
+        required: false
+        options:
+          domain: protein-heavy
+          prepare: auto
+          gromacs_forcefield: amber99sb-ildn
+          gromacs_water: none
+          gromacs_run_mode: minimize-rerun
+          gromacs_preflight: warn
+          gromacs_metrics: true
+          external_timeout_seconds: 600
+          prep_cache_mode: readwrite
+          gromacs_run_settings:
+            minimize_steps: 500
+            emtol: 1000.0
+            cutoff_nm: 1.0
+            grompp_maxwarn: 1
+    phase_comparisons:
+      enabled: true
+      evaluators:
+        - openmm_prepared
+      compare: consecutive_phase_ends
+      affect_selection: false
+    reranking:
+      enabled: true
+      evaluator: ambertools_gb
+      triggers:
+        - when: phase_end
+      candidate_pool:
+        per_phase_top_k: 3
+        include_latest: true
+      apply: next_phase_start
+    validation:
+      enabled: true
+      candidates:
+        - primary
+        - phase_ends
+        - reranked_top
+      evaluators:
+        - geometry_integrity
+        - openmm_prepared
+        - ambertools_gb
+        - gromacs_minimize
+    scouting:
+      score_model: pheat-mj
+      backend: inherit
+      shots: null
+      attempts: 50
+      score_options:
+        domain: protein-heavy
+    phases:
+      - name: collapse
+        label: Hydrophobic collapse
+        optimizer: COBYLA
+        score_model: pheat-hydropathy
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        score_options:
+          domain: protein-heavy
+          burial_method: contacts
+        options:
+          rhobeg: 1.0
+      - name: packing
+        label: Residue-contact packing
+        optimizer: COBYLA
+        score_model: pheat-mj
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        score_options:
+          domain: protein-heavy
+        options:
+          rhobeg: 0.75
+      - name: orientation
+        label: Distance-orientation refinement
+        optimizer: Powell
+        score_model: pheat-goap
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        score_options:
+          domain: protein-heavy
+        options:
+          xtol: 0.01
+          ftol: 0.01
+          disp: true
+      - name: polar_contacts
+        label: Polar-contact refinement
+        optimizer: Powell
+        score_model: pheat-hbond
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        score_options:
+          domain: protein-heavy
+        options:
+          xtol: 0.01
+          ftol: 0.01
+          disp: true
+      - name: backbone_torsions
+        label: Backbone torsion plausibility
+        optimizer: Powell
+        score_model: pheat-backbone
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        score_options:
+          domain: protein-heavy
+        options:
+          xtol: 0.01
+          ftol: 0.01
+          disp: true
+      - name: sidechain_rotamers
+        label: Side-chain rotamer plausibility
+        optimizer: Powell
+        score_model: pheat-rotamer
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        score_options:
+          domain: protein-heavy
+        options:
+          xtol: 0.01
+          ftol: 0.01
+          disp: true
+      - name: heavy_relax
+        label: Heavy-atom relaxation
+        optimizer: Powell
+        score_model: pheat-heavy-mm
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        score_options:
+          domain: protein-heavy
+        options:
+          xtol: 0.01
+          ftol: 0.01
+          disp: true
+    readouts: []

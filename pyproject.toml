@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qtf"
-version = "0.4.1"
+version = "0.4.2"
 description = "Quantum Torsion Folding: a hybrid quantum-classical protein structure prediction package"
 readme = "README.md"
 license = { text = "MIT" }
@@ -36,6 +36,9 @@ dependencies = [
     "qiskit-aer>=0.14",
     "plotly>=5.18",
     "pandas>=2.0",
+    "pheat",
+    "PyYAML",
+    "jsonschema",
 ]
 
 [project.optional-dependencies]
@@ -71,16 +74,14 @@ Repository = "https://github.com/cumbof/QTF"
 Issues = "https://github.com/cumbof/QTF/issues"
 
 [project.scripts]
-qtf-run = "qtf.cli.run:main"
-qtf-fold = "qtf.cli.fold:main"
-qtf-bench = "qtf.cli.bench:main"
-qtf-eval = "qtf.cli.eval:main"
-qtf-grid-search = "qtf.cli.grid_search:main"
-qtf-relax = "qtf.cli.relax:main"
+qtf = "qtf.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["qtf*"]
+
+[tool.setuptools.package-data]
+"qtf.assets.recipes" = ["*.yaml", "*.json"]
 
 [tool.ruff]
 line-length = 120
