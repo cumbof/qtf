@@ -1,11 +1,11 @@
 # Core Concepts
 
-This page explains the three main ideas that make QTF work: **Holographic Encoding**,
+This page explains the three main ideas that make QTF work: the **quantum-to-angle mapping**,
 **NERF geometry**, and the **three-stage optimisation**.
 
 ---
 
-## Holographic Encoding
+## Encoding
 
 ### The qubit-scaling problem
 

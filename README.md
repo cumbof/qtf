@@ -18,7 +18,7 @@
 6. [CLI](#cli)
 7. [Quick Start](#quick-start)
 8. [Core Concepts](#core-concepts)
-   - [Holographic Encoding](#holographic-encoding)
+   - [Encoding](#encoding)
    - [Degrees of Freedom](#degrees-of-freedom)
    - [NERF Geometry Builder](#nerf-geometry-builder)
    - [Three-Stage Optimisation](#three-stage-optimisation)
@@ -49,7 +49,7 @@
 
 **QTF** (Quantum Torsion Folder) is a hybrid quantum-classical protein structure prediction package. Unlike traditional lattice-based quantum folding approaches that snap atoms onto a discrete grid, QTF works entirely in **continuous torsion space**: backbone dihedral angles (φ, ) and side-chain rotamer angles (χ₁–χ₅) are the fundamental degrees of freedom.
 
-The central idea is **Holographic Encoding**: instead of assigning one qubit per degree of freedom — which would require hundreds of qubits for realistic proteins — QTF uses only ⌈log₂ N⌉ qubits to represent N continuous angles. The phases of the complex amplitudes in the quantum statevector are extracted and mapped directly to torsion angles in [−π, π]. This allows near-term quantum hardware (or exact simulation) to parameterise rich conformational spaces with a logarithmically small quantum register.
+Rather than assigning one qubit per degree of freedom — which would require hundreds of qubits for realistic proteins — QTF uses only ⌈log₂ N⌉ qubits to represent N continuous angles. The phases of the complex amplitudes in the quantum statevector are extracted and mapped directly to torsion angles in [−π, π]. This allows near-term quantum hardware (or exact simulation) to parameterise rich conformational spaces with a logarithmically small quantum register.
 
 The quantum circuit acts as a **generative model** (the "Actor"), while a physics-based energy function acts as the **critic**. Classical optimisers (COBYLA and SLSQP) close the loop, tuning the circuit parameters until the energy is minimised. Multiple independent runs are managed by an ensemble manager and ranked by a comprehensive statistics module.
 
@@ -351,7 +351,7 @@ print(ranking.best_by_energy["energy"])
 
 ## Core Concepts
 
-### Holographic Encoding
+### Encoding
 
 Standard quantum approaches to protein folding assign one or more qubits per torsion angle, requiring O(N) qubits for a protein with N degrees of freedom. QTF instead exploits the **exponential dimensionality** of the quantum state space:
 
