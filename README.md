@@ -181,7 +181,7 @@ pip install qtf
 **Editable install from source (for development or contribution):**
 
 ```bash
-git clone https://github.com/cumbof/QTF.git
+git clone https://github.com/cumbof/qtf.git
 cd QTF
 pip install -e ".[dev]"
 ```
@@ -984,7 +984,7 @@ print(f"Radius of gyration  : {rg:.2f} Å")
 ## API Reference
 
 The full auto-generated API reference is available at
-**[https://cumbof.github.io/QTF/api](https://cumbof.github.io/QTF/api)**
+**[https://cumbof.github.io/qtf/api](https://cumbof.github.io/qtf/api)**
 or locally by building the docs:
 
 ```bash
