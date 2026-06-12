@@ -40,7 +40,7 @@
 14. [API Reference](#api-reference)
 15. [Reproducibility](#reproducibility)
 16. [Logging](#logging)
-17. [References](#references)
+17. [Credits](#credits)
 18. [License](#license)
 
 ---
