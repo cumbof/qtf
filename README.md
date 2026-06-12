@@ -1086,36 +1086,18 @@ logging.getLogger("qtf.core.ensemble").setLevel(logging.INFO)
 
 ---
 
-## References
+## Credits
 
-1. **Hydrophobicity Scale**:
-   Kyte, J., & Doolittle, R. F. (1982). A simple method for displaying the hydropathic character of a protein. *Journal of Molecular Biology*, 157(1), 105–132. https://doi.org/10.1016/0022-2836(82)90515-0
+If you use QTF in your research, please cite the following study:
 
-2. **AMBER Force Field**:
-
-5. **van der Waals Radii**:
-   Bondi, A. (1964). van der Waals volumes and radii. *Journal of Physical Chemistry*, 68(3), 441–451. https://doi.org/10.1021/j100785a001
-
-6. **Bond and Angle Parameters**:
-   Engh, R. A., & Huber, R. (1991). Accurate bond and angle parameters for X-ray protein structure refinement. *Acta Crystallographica Section A*, 47(4), 392–400. https://doi.org/10.1107/S0108767391001071
-
-7. **NERF Algorithm**:
-   Parsons, J., Holmes, J. B., Rojas, J. M., Tsai, J., & Strauss, C. E. M. (2005). Practical conversion from torsion space to Cartesian space for in silico protein synthesis. *Journal of Computational Chemistry*, 26(10), 1063–1068. https://doi.org/10.1002/jcc.20237
-
-8. **Kabsch Algorithm**:
-   Kabsch, W. (1978). A discussion of the solution for the best rotation to relate two sets of vectors. *Acta Crystallographica Section A*, 34(5), 827–828. https://doi.org/10.1107/S0567739478001680
-
-9. **EfficientSU2 Ansatz / VQE**:
-   Kandala, A., et al. (2017). Hardware-efficient variational quantum eigensolver for small molecules and quantum magnets. *Nature*, 549, 242–246. https://doi.org/10.1038/nature23879
-
-10. **Ramachandran Plot**:
-    Ramachandran, G. N., Ramakrishnan, C., & Sasisekharan, V. (1963). Stereochemistry of polypeptide chain configurations. *Journal of Molecular Biology*, 7(1), 95–99. https://doi.org/10.1016/S0022-2836(63)80023-6
-
-11. **COBYLA Optimiser**:
-    Powell, M. J. D. (1994). A direct search optimization method that models the objective and constraint functions by linear interpolation. In *Advances in Optimization and Numerical Analysis* (pp. 51–67). Kluwer Academic Publishers.
-
-12. **SLSQP Optimiser**:
-    Kraft, D. (1988). *A software package for sequential quadratic programming*. DFVLR-FB 88-28, Deutsche Forschungs- und Versuchsanstalt für Luft- und Raumfahrt.
+```bibtex
+@article{Cumbo2026quantum,
+    author  = {Cumbo, Fabio and Raubenolt, Bryan and Puram, Varun and Joshi, Jayadev and Blankenberg, Daniel},
+    title   = {Logarithmic-scale variational quantum eigensolver for torsion-space off-lattice protein structure prediction},
+    journal = {arXiv preprint},
+    year    = {2026}
+}
+```
 
 ---
 
