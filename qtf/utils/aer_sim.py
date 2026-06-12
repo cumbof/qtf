@@ -5,12 +5,8 @@ that transparently delegates to an ``AerSimulator`` backend (GPU when
 available, CPU otherwise) and falls back to the in-process
 ``Statevector`` when Aer is not installed.
 
-Environment variables
----------------------
-``QTF_AER_DEVICE``
-    One of ``"auto"`` (default), ``"gpu"``, or ``"cpu"``.  Forces the
-    target device when Aer *is* present.  ``"auto"`` tries GPU first,
-    then CPU.
+Device selection is fully automatic: GPU is tried first, then CPU,
+then the in-process fallback.
 """
 
 from __future__ import annotations

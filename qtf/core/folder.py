@@ -444,11 +444,7 @@ class QuantumBiophysicsFolder:
                 "conda install -c conda-forge openmm"
             )
 
-        self.use_e2e_constraint = _as_bool(
-            use_e2e_constraint,
-            "1"
-            not in ("0", "false", "no", "off"),
-        )
+        self.use_e2e_constraint = _as_bool(use_e2e_constraint, True)
         self.e2e_scale = float(
             e2e_scale if e2e_scale is not None else "1.0"
         )
@@ -640,7 +636,7 @@ class QuantumBiophysicsFolder:
         if self._rosetta_ready:
             return
         if not _PYROSETTA_AVAILABLE:
-            raise RuntimeError("PyRosetta is not installed, but QTF_STAGE3_BACKEND=rosetta was requested.")
+            raise RuntimeError("PyRosetta is not installed, but energy_backend='rosetta' was requested.")
         if not _PYROSETTA_INIT_DONE:
             pyrosetta.init(self.rosetta_flags)
             _PYROSETTA_INIT_DONE = True
@@ -649,6 +645,7 @@ class QuantumBiophysicsFolder:
             self._rosetta_scorefxn_fa = pyrosetta.create_score_function(self.rosetta_fullatom_weights)
         except Exception:
             self._rosetta_scorefxn_fa = pyrosetta.get_fa_scorefxn()
+        self._rosetta_blank_pose = pyrosetta.pose_from_sequence(self.sequence, "fa_standard")
         self._rosetta_ready = True
 
     def _ensure_openmm(self):
@@ -667,7 +664,7 @@ class QuantumBiophysicsFolder:
 
     def _build_rosetta_pose_from_angles(self, angle_vec):
         self._ensure_rosetta()
-        pose = pyrosetta.pose_from_sequence(self.sequence, "fa_standard")
+        pose = self._rosetta_blank_pose.clone()
         angle_dict = self._angle_dict_from_vector(angle_vec)
         for i in range(1, pose.total_residue()):
             pose.set_omega(i, float(np.rad2deg(angle_dict.get(f"{i-1}_omega", np.pi))))
@@ -921,87 +918,87 @@ class QuantumBiophysicsFolder:
             self._ensure_openmm()
             coords, labels, _ = self.build_full_structure(angle_vec)
             input_pdb = self._build_openmm_input_pdb(coords, labels)
-            workdir = tempfile.mkdtemp(prefix="qtf_openmm_")
-            prepared_pdb = os.path.join(workdir, "prepared_input.pdb")
-            minimized_pdb = os.path.join(workdir, "minimized.pdb")
-            result = {
-                "openmm_status": "not_run",
-                "openmm_message": "",
-                "openmm_workdir": workdir,
-                "openmm_prepared_pdb_path": prepared_pdb,
-                "openmm_minimized_full_pdb_path": "",
-                "openmm_potential_kj_mol": np.nan,
-                "openmm_potential_kcal_mol": np.nan,
-                "openmm_converged": False,
-                "openmm_final_max_force": np.nan,
-            }
+            with tempfile.TemporaryDirectory(prefix="qtf_openmm_") as workdir:
+                prepared_pdb = os.path.join(workdir, "prepared_input.pdb")
+                minimized_pdb = os.path.join(workdir, "minimized.pdb")
+                result = {
+                    "openmm_status": "not_run",
+                    "openmm_message": "",
+                    "openmm_workdir": workdir,
+                    "openmm_prepared_pdb_path": prepared_pdb,
+                    "openmm_minimized_full_pdb_path": "",
+                    "openmm_potential_kj_mol": np.nan,
+                    "openmm_potential_kcal_mol": np.nan,
+                    "openmm_converged": False,
+                    "openmm_final_max_force": np.nan,
+                }
 
-            qtf_gromacs.prepare_pdb_for_gromacs(input_pdb, Path(prepared_pdb))
-            pdb = _PDBFile(str(prepared_pdb))
-            modeller = _Modeller(pdb.topology, pdb.positions)
-            forcefield = _ForceField(self.openmm_forcefield)
-            modeller.addHydrogens(forcefield, pH=float(self.openmm_ph))
-            system = forcefield.createSystem(
-                modeller.topology,
-                nonbondedMethod=_NoCutoff,
-                constraints=_HBonds,
-                rigidWater=False,
-                removeCMMotion=False,
-            )
-            integrator = _mm.VerletIntegrator(1.0 * _unit.femtoseconds)
-            platform_name = (self.openmm_platform or "CPU").strip() or "CPU"
-            try:
-                platform = _mm.Platform.getPlatformByName(platform_name)
-            except Exception:
-                platform = _mm.Platform.getPlatform(0)
-            context = _mm.Context(system, integrator, platform)
-            context.setPositions(modeller.positions)
-
-            if self.openmm_do_minimize:
-                _mm.LocalEnergyMinimizer.minimize(
-                    context,
-                    tolerance=float(self.openmm_tolerance) * _unit.kilojoule_per_mole / _unit.nanometer,
-                    maxIterations=int(self.openmm_max_iterations),
+                qtf_gromacs.prepare_pdb_for_gromacs(input_pdb, Path(prepared_pdb))
+                pdb = _PDBFile(str(prepared_pdb))
+                modeller = _Modeller(pdb.topology, pdb.positions)
+                forcefield = _ForceField(self.openmm_forcefield)
+                modeller.addHydrogens(forcefield, pH=float(self.openmm_ph))
+                system = forcefield.createSystem(
+                    modeller.topology,
+                    nonbondedMethod=_NoCutoff,
+                    constraints=_HBonds,
+                    rigidWater=False,
+                    removeCMMotion=False,
                 )
+                integrator = _mm.VerletIntegrator(1.0 * _unit.femtoseconds)
+                platform_name = (self.openmm_platform or "CPU").strip() or "CPU"
+                try:
+                    platform = _mm.Platform.getPlatformByName(platform_name)
+                except Exception:
+                    platform = _mm.Platform.getPlatform(0)
+                context = _mm.Context(system, integrator, platform)
+                context.setPositions(modeller.positions)
 
-            state = context.getState(getEnergy=True, getPositions=True)
-            potential_kj = float(state.getPotentialEnergy().value_in_unit(_unit.kilojoule_per_mole))
-            result["openmm_status"] = "ok"
-            result["openmm_potential_kj_mol"] = potential_kj
-            result["openmm_potential_kcal_mol"] = float(potential_kj / 4.184)
-            result["openmm_converged"] = bool(self.openmm_do_minimize)
-            if self.openmm_do_minimize:
-                with open(minimized_pdb, "w") as handle:
-                    _PDBFile.writeFile(modeller.topology, state.getPositions(), handle)
-                result["openmm_minimized_full_pdb_path"] = minimized_pdb
-            else:
-                result["openmm_minimized_full_pdb_path"] = ""
+                if self.openmm_do_minimize:
+                    _mm.LocalEnergyMinimizer.minimize(
+                        context,
+                        tolerance=float(self.openmm_tolerance) * _unit.kilojoule_per_mole / _unit.nanometer,
+                        maxIterations=int(self.openmm_max_iterations),
+                    )
 
-            terms["openmm_potential_kj_mol"] = potential_kj
-            terms["openmm_potential_kcal_mol"] = float(potential_kj / 4.184)
-            terms["total"] = float(potential_kj)
-            terms["openmm_status_ok"] = 1.0
-            terms["openmm_minimize"] = 1.0 if self.openmm_do_minimize else 0.0
-            terms["openmm_error"] = 0.0
-            terms["openmm_forcefield_hash"] = float(abs(hash(self.openmm_forcefield)) % 1000000)
-            terms["openmm_platform_hash"] = float(abs(hash(platform_name)) % 1000000)
-            terms["openmm_max_iterations"] = float(self.openmm_max_iterations)
-            terms["openmm_tolerance"] = float(self.openmm_tolerance)
-            terms["openmm_ph"] = float(self.openmm_ph)
-            terms["openmm_status_hash"] = float(abs(hash(str(result.get("openmm_status", "")))) % 1000000)
-            terms["openmm_message_hash"] = float(abs(hash(str(result.get("openmm_message", "")))) % 1000000)
+                state = context.getState(getEnergy=True, getPositions=True)
+                potential_kj = float(state.getPotentialEnergy().value_in_unit(_unit.kilojoule_per_mole))
+                result["openmm_status"] = "ok"
+                result["openmm_potential_kj_mol"] = potential_kj
+                result["openmm_potential_kcal_mol"] = float(potential_kj / 4.184)
+                result["openmm_converged"] = bool(self.openmm_do_minimize)
+                if self.openmm_do_minimize:
+                    with open(minimized_pdb, "w") as handle:
+                        _PDBFile.writeFile(modeller.topology, state.getPositions(), handle)
+                    result["openmm_minimized_full_pdb_path"] = minimized_pdb
+                else:
+                    result["openmm_minimized_full_pdb_path"] = ""
 
-            if result.get("openmm_minimized_full_pdb_path"):
-                self._update_openmm_output_from_pdb(str(result["openmm_minimized_full_pdb_path"]))
-            else:
-                self._last_openmm_coords = coords
-                self._last_openmm_labels = labels
+                terms["openmm_potential_kj_mol"] = potential_kj
+                terms["openmm_potential_kcal_mol"] = float(potential_kj / 4.184)
+                terms["total"] = float(potential_kj)
+                terms["openmm_status_ok"] = 1.0
+                terms["openmm_minimize"] = 1.0 if self.openmm_do_minimize else 0.0
+                terms["openmm_error"] = 0.0
+                terms["openmm_forcefield_hash"] = float(abs(hash(self.openmm_forcefield)) % 1000000)
+                terms["openmm_platform_hash"] = float(abs(hash(platform_name)) % 1000000)
+                terms["openmm_max_iterations"] = float(self.openmm_max_iterations)
+                terms["openmm_tolerance"] = float(self.openmm_tolerance)
+                terms["openmm_ph"] = float(self.openmm_ph)
+                terms["openmm_status_hash"] = float(abs(hash(str(result.get("openmm_status", "")))) % 1000000)
+                terms["openmm_message_hash"] = float(abs(hash(str(result.get("openmm_message", "")))) % 1000000)
 
-            total = potential_kj
-            try:
-                os.unlink(input_pdb)
-            except OSError:
-                pass
+                if result.get("openmm_minimized_full_pdb_path"):
+                    self._update_openmm_output_from_pdb(str(result["openmm_minimized_full_pdb_path"]))
+                else:
+                    self._last_openmm_coords = coords
+                    self._last_openmm_labels = labels
+
+                total = potential_kj
+                try:
+                    os.unlink(input_pdb)
+                except OSError:
+                    pass
         except Exception as exc:
             total = 1.0e6
             terms["openmm_potential_kj_mol"] = float(total)
@@ -1061,7 +1058,11 @@ class QuantumBiophysicsFolder:
         # Default: statevector mode
         psi = _statevector_data(bound_circuit)
         phases = np.angle(psi)[: self.total_angles]
-        # Remove global phase: pin phases[0] to 0 and wrap into (-π, π].
+        # Remove global phase by subtracting the phase of |0...0⟩.  This pins
+        # phases[0] — the N-terminal φ — to 0 and keeps it from being optimised.
+        # That is harmless because the seed frame in build_full_structure()
+        # places residue 0's backbone independently of φ₀ (see NERF setup at
+        # lines 1227-1229).  Wrapping into (-π, π] follows.
         phases = (phases - np.angle(psi[0]) + np.pi) % (2 * np.pi) - np.pi
         return self._map_angle_vector_to_physical_ranges(phases)
 
@@ -1440,7 +1441,8 @@ class QuantumBiophysicsFolder:
     # Energy function
     # ------------------------------------------------------------------
 
-    def energy_function(self, params: np.ndarray, return_terms: bool = False) -> float:
+    def energy_function(self, params: np.ndarray, return_terms: bool = False,
+                         angle_override: np.ndarray | None = None) -> float:
         """Evaluate physical energy of the structure encoded by *params*."""
         if not self._cache_initialized:
             self._initialize_topology_cache()
@@ -1451,7 +1453,7 @@ class QuantumBiophysicsFolder:
             gamma = 5.0
             constraint_strength = 5.0
 
-        angle_vec = self._get_angles(params)
+        angle_vec = self._get_angles(params) if angle_override is None else angle_override
         if not np.isfinite(angle_vec).all():
             n_bad = int(np.count_nonzero(~np.isfinite(angle_vec)))
             penalty = 1e6 + 1e3 * n_bad

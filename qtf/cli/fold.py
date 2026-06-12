@@ -50,8 +50,7 @@ def main(argv=None):
                         help='Residue range used for RMSD; core excludes the first and last residues')
     parser.add_argument(
         '--average_reference_backbone',
-        default=False,
-        type=bool,
+        action='store_true',
         help=('How to select backbone from reference structure, either first model or average for NMR ensembles. '
               'Defaults to first model, which automatically works with Xray structures.')
     )
@@ -332,9 +331,7 @@ def main(argv=None):
     ensemble_json_path = os.path.join(job_output_dir, "ensemble_ranked.json")
     df_models.to_csv(ensemble_csv_path, index=False)
 
-    model_rows_json = [{k: _jsonify(v) for k, v in row.items()} for row in model_rows]
-    with open(ensemble_json_path, "w") as f:
-        json.dump(model_rows_json, f, indent=4)
+    df_models.to_json(ensemble_json_path, orient="records", indent=4)
 
     best_row = df_models.sort_values("energy").iloc[0]
     p_e2e = float(best_row["pred_e2e_A"])

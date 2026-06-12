@@ -21,23 +21,23 @@ def main() -> None:
     sub = parser.add_subparsers(dest="mode", required=True)
 
     fold_parser = sub.add_parser("fold", help="Run quantum folding prediction")
-    fold_parser.add_argument("args", nargs=argparse.REMAINDER,
+    fold_parser.add_argument("args", nargs='*',
                              help="Arguments forwarded to qtf-fold")
 
     bench_parser = sub.add_parser("bench", help="Run beam-search benchmark")
-    bench_parser.add_argument("args", nargs=argparse.REMAINDER,
+    bench_parser.add_argument("args", nargs='*',
                               help="Arguments forwarded to qtf-bench")
 
     eval_parser = sub.add_parser("eval", help="Score experimental/native structures")
-    eval_parser.add_argument("args", nargs=argparse.REMAINDER,
+    eval_parser.add_argument("args", nargs='*',
                              help="Arguments forwarded to qtf-eval")
 
     grid_parser = sub.add_parser("grid-search", help="Run parameter grid sweep")
-    grid_parser.add_argument("args", nargs=argparse.REMAINDER,
+    grid_parser.add_argument("args", nargs='*',
                              help="Arguments forwarded to qtf-grid-search")
 
     relax_parser = sub.add_parser("relax", help="Run GROMACS relaxation")
-    relax_parser.add_argument("args", nargs=argparse.REMAINDER,
+    relax_parser.add_argument("args", nargs='*',
                               help="Arguments forwarded to qtf-relax")
 
     parsed = parser.parse_args()
