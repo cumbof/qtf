@@ -4,9 +4,9 @@ runner.py — one SLURM array task = one replica.
 Each replica uses its SLURM array ID as the random seed so every job
 explores a different part of the energy landscape.
 
-Outputs:
-  results/rmsds.csv      — one row per replica
-  results/energies.csv   — one row per optimiser step
+Outputs (per energy backend, e.g. results/rosetta/):
+  <outdir>/<energy_backend>/rmsds.csv      — one row per replica
+  <outdir>/<energy_backend>/energies.csv   — one row per optimiser step
 """
 
 from __future__ import annotations
@@ -71,25 +71,31 @@ def safe_append(path: Path, row: dict, fieldnames: list[str]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--replica_id", type=int, required=True)
-    parser.add_argument("--max_iter",   type=int, default=2000)
-    parser.add_argument("--scout",      type=int, default=20)
-    parser.add_argument("--strategy",   type=str, default="random",
+    parser.add_argument("--replica_id",     type=int, required=True)
+    parser.add_argument("--max_iter",       type=int, default=2000)
+    parser.add_argument("--scout",          type=int, default=20)
+    parser.add_argument("--strategy",       type=str, default="random",
                         choices=["random", "helix", "sheet"])
-    parser.add_argument("--outdir",     type=str, default="results")
+    parser.add_argument("--outdir",         type=str, default="results")
+    parser.add_argument("--energy_backend", type=str, default="custom",
+                        choices=["custom", "rosetta", "openmm"])
     args = parser.parse_args()
 
-    outdir = Path(args.outdir)
+    # Results are stored in a per-backend subdirectory so runs for different
+    # energy functions never overwrite each other.
+    outdir = Path(args.outdir) / args.energy_backend
     outdir.mkdir(parents=True, exist_ok=True)
 
-    log.info("Replica %d | seed=%d | strategy=%s | max_iter=%d | scout=%d",
-             args.replica_id, args.replica_id, args.strategy, args.max_iter, args.scout)
+    log.info("Replica %d | seed=%d | strategy=%s | energy_backend=%s | max_iter=%d | scout=%d",
+             args.replica_id, args.replica_id, args.strategy, args.energy_backend,
+             args.max_iter, args.scout)
 
     t0 = time.perf_counter()
 
     # ── Build folder ──────────────────────────────────────────────────────────
     folder = QuantumBiophysicsFolder(
-        SEQUENCE, ansatz=ANSATZ, mode=MODE, shots=SHOTS, energy_backend="rosetta"
+        SEQUENCE, ansatz=ANSATZ, mode=MODE, shots=SHOTS,
+        energy_backend=args.energy_backend,
     )
 
     # ── Scout: use replica_id as seed so every job starts differently ─────────
@@ -114,7 +120,7 @@ def main() -> None:
 
     # ── Energy history ────────────────────────────────────────────────────────
     energy_path   = outdir / "energies.csv"
-    energy_fields = ["replica_id", "seed", "stage", "step", "energy"]
+    energy_fields = ["replica_id", "seed", "energy_backend", "stage", "step", "energy"]
 
     stage_map: dict[int, str] = {}
     if hasattr(tracker, "stage_labels") and tracker.stage_labels:
@@ -125,16 +131,17 @@ def main() -> None:
 
     for step, e in enumerate(tracker.history):
         safe_append(energy_path, {
-            "replica_id": args.replica_id,
-            "seed":       args.replica_id,
-            "stage":      stage_map.get(step, "unknown"),
-            "step":       step,
-            "energy":     f"{e:.6f}",
+            "replica_id":    args.replica_id,
+            "seed":          args.replica_id,
+            "energy_backend": args.energy_backend,
+            "stage":         stage_map.get(step, "unknown"),
+            "step":          step,
+            "energy":        f"{e:.6f}",
         }, energy_fields)
 
     # ── RMSD ──────────────────────────────────────────────────────────────────
     rmsd_path   = outdir / "rmsds.csv"
-    rmsd_fields = ["replica_id", "seed", "strategy", "final_energy",
+    rmsd_fields = ["replica_id", "seed", "energy_backend", "strategy", "final_energy",
                    "rmsd_ca_A", "n_pred_ca", "n_true_ca", "wall_s"]
 
     pred_ca = extract_ca(coords, labels)
@@ -147,14 +154,15 @@ def main() -> None:
         rmsd, true_ca = float("nan"), np.zeros((0, 3))
 
     safe_append(rmsd_path, {
-        "replica_id":   args.replica_id,
-        "seed":         args.replica_id,
-        "strategy":     args.strategy,
-        "final_energy": f"{final_energy:.6f}",
-        "rmsd_ca_A":    f"{rmsd:.4f}" if np.isfinite(rmsd) else "nan",
-        "n_pred_ca":    len(pred_ca),
-        "n_true_ca":    len(true_ca),
-        "wall_s":       f"{elapsed:.1f}",
+        "replica_id":    args.replica_id,
+        "seed":          args.replica_id,
+        "energy_backend": args.energy_backend,
+        "strategy":      args.strategy,
+        "final_energy":  f"{final_energy:.6f}",
+        "rmsd_ca_A":     f"{rmsd:.4f}" if np.isfinite(rmsd) else "nan",
+        "n_pred_ca":     len(pred_ca),
+        "n_true_ca":     len(true_ca),
+        "wall_s":        f"{elapsed:.1f}",
     }, rmsd_fields)
 
     log.info("Done. Results written to %s", outdir)
