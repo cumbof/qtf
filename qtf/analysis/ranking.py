@@ -230,7 +230,7 @@ class EnsembleRanking:
         # Mean RMSD of each structure vs all others
         n = len(ca_traces)
         mean_pairwise = (pwrmsd.sum(axis=1) / max(n - 1, 1))
-        df["mean_rmsd_vs_ensemble"] = mean_pairwise[df["replica_id"].values]
+        df["mean_rmsd_vs_ensemble"] = mean_pairwise
 
         # Which structure minimises total pairwise distance (ensemble centroid)
         df["is_ensemble_centroid"] = df["mean_rmsd_vs_ensemble"] == df["mean_rmsd_vs_ensemble"].min()

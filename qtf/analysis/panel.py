@@ -3,8 +3,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +80,7 @@ def safe_read_csv(path: Path) -> Optional[pd.DataFrame]:
     try:
         return pd.read_csv(path)
     except Exception as e:
-        print(f"[warn] failed to read CSV {path}: {e}")
+        logger.warning("failed to read CSV %s: %s", path, e)
         return None
 
 
@@ -322,30 +326,30 @@ def collect_panel_results(root: Path, outdir: Path) -> Dict[str, Path]:
     if not beam_df.empty:
         written["master_beam_rows"] = outdir / "master_beam_rows.csv"
         beam_df.to_csv(written["master_beam_rows"], index=False)
-        print(f"Wrote {written['master_beam_rows']} ({len(beam_df)} rows)")
+        logger.info("Wrote %s (%d rows)", written["master_beam_rows"], len(beam_df))
     else:
-        print("[warn] no beam rows found")
+        logger.warning("no beam rows found")
 
     if not native_df.empty:
         written["master_native_rows"] = outdir / "master_native_rows.csv"
         native_df.to_csv(written["master_native_rows"], index=False)
-        print(f"Wrote {written['master_native_rows']} ({len(native_df)} rows)")
+        logger.info("Wrote %s (%d rows)", written["master_native_rows"], len(native_df))
     else:
-        print("[warn] no native rows found")
+        logger.warning("no native rows found")
 
     if not manifest_df.empty:
         written["master_grid_manifest"] = outdir / "master_grid_manifest.csv"
         manifest_df.to_csv(written["master_grid_manifest"], index=False)
-        print(f"Wrote {written['master_grid_manifest']} ({len(manifest_df)} rows)")
+        logger.info("Wrote %s (%d rows)", written["master_grid_manifest"], len(manifest_df))
     else:
-        print("[warn] no manifest rows found")
+        logger.warning("no manifest rows found")
 
     if not summary_df.empty:
         written["master_experiment_summary"] = outdir / "master_experiment_summary.csv"
         summary_df.to_csv(written["master_experiment_summary"], index=False)
-        print(f"Wrote {written['master_experiment_summary']} ({len(summary_df)} rows)")
+        logger.info("Wrote %s (%d rows)", written["master_experiment_summary"], len(summary_df))
     else:
-        print("[warn] no summary rows built")
+        logger.warning("no summary rows built")
 
     return written
 

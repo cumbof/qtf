@@ -462,9 +462,9 @@ def plot_ranking(
         for v in vals:
             if col in ("energy", "radius_of_gyration", "end_to_end_dist",
                        "mean_rmsd_vs_ensemble", "rmsd_vs_gt"):
-                out.append(f"{v:.4f}" if not (isinstance(v, float) and np.isnan(v)) else "—")
+                out.append(f"{v:.4f}" if not (isinstance(v, (float, np.floating)) and np.isnan(v)) else "—")
             elif col in ("rank_energy", "rank_rmsd", "replica_id", "seed"):
-                out.append(str(int(v)) if not (isinstance(v, float) and np.isnan(v)) else "—")
+                out.append(str(int(v)) if not (isinstance(v, (float, np.floating)) and np.isnan(v)) else "—")
             elif col in ("is_best_energy", "is_best_rmsd", "is_ensemble_centroid"):
                 out.append("✓" if v else "")
             else:

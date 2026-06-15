@@ -466,10 +466,31 @@ class TestFoldScoutBudget:
                 f"max_iter={max_iter}: expected scout={expected}, got {recorded[0]}"
             )
 
-    def test_fold_returns_six_values(self):
+    def test_fold_returns_seven_values(self):
         f = QuantumBiophysicsFolder("GA")
         result = f.fold(max_iter=10, scout_attempts=1)
-        assert len(result) == 6
+        assert len(result) == 7
+
+    def test_top_k_snapshots_returns_correct_number(self):
+        f = QuantumBiophysicsFolder("GA")
+        result = f.fold(max_iter=10, scout_attempts=1, top_k_snapshots=3)
+        assert len(result) == 7
+        snapshots = result[6]
+        assert len(snapshots) <= 3
+        if snapshots:
+            assert "energy" in snapshots[0]
+            assert "coords" in snapshots[0]
+            assert "labels" in snapshots[0]
+            assert "bonds" in snapshots[0]
+            # Verify sorted by energy ascending
+            energies = [s["energy"] for s in snapshots]
+            assert energies == sorted(energies)
+
+    def test_top_k_snapshots_zero_returns_empty_list(self):
+        f = QuantumBiophysicsFolder("GA")
+        result = f.fold(max_iter=10, scout_attempts=1, top_k_snapshots=0)
+        assert len(result) == 7
+        assert result[6] == []
 
     def test_cobyla_maxfun_warning_not_emitted(self):
         """B10: a small-budget ``fold()`` (max_iter=10) must not leak

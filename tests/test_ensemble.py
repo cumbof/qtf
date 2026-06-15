@@ -88,7 +88,7 @@ def test_run_ensemble_populates_results(folder_ga, zero_structure):
     coords, labels, bonds = zero_structure
     tracker = LandscapeTracker()
     fake_params = np.zeros(folder_ga.n_params)
-    fake_result = (coords, labels, bonds, tracker, fake_params, -10.0)
+    fake_result = (coords, labels, bonds, tracker, fake_params, -10.0, [])
 
     with patch.object(folder_ga, "fold", return_value=fake_result) as mock_fold:
         with patch.object(folder_ga, "get_smart_initialization", return_value=fake_params):
@@ -103,7 +103,7 @@ def test_run_ensemble_result_keys(folder_ga, zero_structure):
     coords, labels, bonds = zero_structure
     tracker = LandscapeTracker()
     fake_params = np.zeros(folder_ga.n_params)
-    fake_result = (coords, labels, bonds, tracker, fake_params, -5.0)
+    fake_result = (coords, labels, bonds, tracker, fake_params, -5.0, [])
 
     with patch.object(folder_ga, "fold", return_value=fake_result):
         with patch.object(folder_ga, "get_smart_initialization", return_value=fake_params):
@@ -111,7 +111,7 @@ def test_run_ensemble_result_keys(folder_ga, zero_structure):
             manager.run_ensemble(n_runs=1, max_workers=1)
 
     result = manager.results[0]
-    for key in ("id", "seed", "energy", "coords", "labels", "bonds", "params", "tracker"):
+    for key in ("id", "seed", "energy", "coords", "labels", "bonds", "params", "tracker", "best_snapshots"):
         assert key in result, f"Key '{key}' missing from result dict"
 
 
@@ -119,7 +119,7 @@ def test_run_ensemble_stores_energy(folder_ga, zero_structure):
     coords, labels, bonds = zero_structure
     tracker = LandscapeTracker()
     fake_params = np.zeros(folder_ga.n_params)
-    fake_result = (coords, labels, bonds, tracker, fake_params, 99.5)
+    fake_result = (coords, labels, bonds, tracker, fake_params, 99.5, [])
 
     with patch.object(folder_ga, "fold", return_value=fake_result):
         with patch.object(folder_ga, "get_smart_initialization", return_value=fake_params):
@@ -134,7 +134,7 @@ def test_run_ensemble_resets_results_each_call(folder_ga, zero_structure):
     coords, labels, bonds = zero_structure
     tracker = LandscapeTracker()
     fake_params = np.zeros(folder_ga.n_params)
-    fake_result = (coords, labels, bonds, tracker, fake_params, 1.0)
+    fake_result = (coords, labels, bonds, tracker, fake_params, 1.0, [])
 
     with patch.object(folder_ga, "fold", return_value=fake_result):
         with patch.object(folder_ga, "get_smart_initialization", return_value=fake_params):
@@ -162,7 +162,7 @@ def test_run_ensemble_continues_after_failure(folder_ga, zero_structure, tmp_pat
     coords, labels, bonds = zero_structure
     tracker = LandscapeTracker()
     fake_params = np.zeros(folder_ga.n_params)
-    ok_result = (coords, labels, bonds, tracker, fake_params, -3.0)
+    ok_result = (coords, labels, bonds, tracker, fake_params, -3.0, [])
 
     # Replica 0 ok, replica 1 ok, replica 2 raises, replica 3 ok.
     # We use n_runs=4 so the loop has to demonstrably continue past the
@@ -200,7 +200,7 @@ def test_run_ensemble_keyboard_interrupt_propagates_after_preserving_results(
     coords, labels, bonds = zero_structure
     tracker = LandscapeTracker()
     fake_params = np.zeros(folder_ga.n_params)
-    ok_result = (coords, labels, bonds, tracker, fake_params, -1.0)
+    ok_result = (coords, labels, bonds, tracker, fake_params, -1.0, [])
 
     # Replica 0 ok, replica 1 raises KeyboardInterrupt.
     side_effects = [ok_result, KeyboardInterrupt()]
@@ -232,7 +232,7 @@ def test_run_ensemble_last_error_reset_at_start(folder_ga, zero_structure):
     coords, labels, bonds = zero_structure
     tracker = LandscapeTracker()
     fake_params = np.zeros(folder_ga.n_params)
-    ok_result = (coords, labels, bonds, tracker, fake_params, -2.0)
+    ok_result = (coords, labels, bonds, tracker, fake_params, -2.0, [])
     fail = [ok_result, RuntimeError("boom"), ok_result]
 
     manager = EnsembleFoldingManager(folder_ga)
@@ -261,7 +261,7 @@ def test_run_ensemble_checkpoint_is_metadata_only(folder_ga, zero_structure, tmp
     coords, labels, bonds = zero_structure
     tracker = LandscapeTracker()
     fake_params = np.zeros(folder_ga.n_params)
-    ok_result = (coords, labels, bonds, tracker, fake_params, -7.0)
+    ok_result = (coords, labels, bonds, tracker, fake_params, -7.0, [])
 
     with patch.object(folder_ga, "fold", return_value=ok_result):
         with patch.object(folder_ga, "get_smart_initialization", return_value=fake_params):
@@ -419,7 +419,7 @@ def test_run_ensemble_accepts_max_workers(folder_ga, zero_structure):
     coords, labels, bonds = zero_structure
     tracker = LandscapeTracker()
     fake_params = np.zeros(folder_ga.n_params)
-    fake_result = (coords, labels, bonds, tracker, fake_params, -10.0)
+    fake_result = (coords, labels, bonds, tracker, fake_params, -10.0, [])
 
     with patch.object(folder_ga, "fold", return_value=fake_result):
         with patch.object(folder_ga, "get_smart_initialization", return_value=fake_params):
@@ -429,11 +429,11 @@ def test_run_ensemble_accepts_max_workers(folder_ga, zero_structure):
     assert len(manager.results) == 2
 
 
-def test_max_workers_defaults_to_none():
-    """The signature must expose max_workers=None as default (auto)."""
+def test_max_workers_defaults_to_1():
+    """The signature must expose max_workers=1 as default (sequential)."""
     import inspect
     sig = inspect.signature(EnsembleFoldingManager.run_ensemble)
-    assert sig.parameters["max_workers"].default is None
+    assert sig.parameters["max_workers"].default == 1
 
 
 def test_worker_exists_and_accepts_expected_args():
@@ -441,5 +441,5 @@ def test_worker_exists_and_accepts_expected_args():
     import inspect
     from qtf.core.ensemble import _run_one_replica
     sig = inspect.signature(_run_one_replica)
-    for param in ("folder_kwargs", "replica_seed", "index", "strat", "max_iter", "scout_attempts"):
+    for param in ("folder_kwargs", "replica_seed", "index", "strat", "max_iter", "scout_attempts", "top_k_snapshots"):
         assert param in sig.parameters, f"Missing parameter: {param}"

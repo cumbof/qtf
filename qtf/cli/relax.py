@@ -7,6 +7,7 @@ Runs pdb2gmx + steepest-descent minimization and outputs the minimized structure
 
 import argparse
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -57,7 +58,7 @@ def main(argv=None):
         print(f"[relax] minimized PDB: {min_pdb}")
 
     result_path = outdir / "relax_result.json"
-    result_json = {k: (float(v) if isinstance(v, float) and v != v else v) for k, v in result.items()}
+    result_json = {k: (None if isinstance(v, float) and math.isnan(v) else v) for k, v in result.items()}
     with open(result_path, "w") as f:
         json.dump(result_json, f, indent=2)
     print(f"[relax] result JSON: {result_path}")

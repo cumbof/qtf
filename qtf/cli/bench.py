@@ -26,7 +26,6 @@ import numpy as np
 import pandas as pd
 
 from qtf.core.folder import QuantumBiophysicsFolder
-from qtf.analysis.stability import kabsch_rmsd  # noqa: F401
 from qtf.utils import workflow as utils
 from qtf.utils import gromacs as qtf_gromacs
 from qtf.utils.workflow import (
@@ -35,39 +34,14 @@ from qtf.utils.workflow import (
     nonlocal_heavy_clash_metrics,
     pdb_id_from_path,
 )
+from qtf.cli.fold import _jsonify
 
 
-def _jsonify(x):
-    if isinstance(x, (np.floating, np.integer)):
-        return x.item()
-    if isinstance(x, np.ndarray):
-        return x.tolist()
-    return x
+
 
 
 def deg(vals):
     return [np.deg2rad(v) for v in vals]
-
-
-def core_ca_slice(coords: np.ndarray) -> np.ndarray:
-    arr = np.asarray(coords)
-    if arr.shape[0] > 2:
-        return arr[1:-1]
-    return arr
-
-
-def core_ca_rmsd(P: np.ndarray, Q: np.ndarray) -> float:
-    return kabsch_rmsd(core_ca_slice(P), core_ca_slice(Q))
-
-
-def core_ca_range_metadata(n_residues: int) -> Dict[str, object]:
-    use_core = n_residues > 2
-    return {
-        "rmsd_ca_excludes_terminal_residues": bool(use_core),
-        "rmsd_ca_start_residue_1indexed": 2 if use_core else 1,
-        "rmsd_ca_end_residue_1indexed": (n_residues - 1) if use_core else n_residues,
-        "rmsd_ca_n_aligned": (n_residues - 2) if use_core else n_residues,
-    }
 
 
 def load_reference_ca_coords(pdb_path: str) -> np.ndarray:
@@ -80,12 +54,12 @@ def load_reference_ca_coords(pdb_path: str) -> np.ndarray:
 
 def get_tuning_settings():
     return {
-        "hbond_scale": float(os.getenv("QTF_HBOND_SCALE", "0.75")),
-        "sasa_scale": float(os.getenv("QTF_SASA_SCALE", "0.7")),
-        "vdw_rep_scale": float(os.getenv("QTF_VDW_REP_SCALE", "0.01")),
-        "vdw_attr_scale": float(os.getenv("QTF_VDW_ATTR_SCALE", "0.1")),
-        "rotamer_scale": float(os.getenv("QTF_ROTAMER_SCALE", "1.0")),
-        "pi_stack_scale": float(os.getenv("QTF_PI_STACK_SCALE", "1.0")),
+        "hbond_scale": 0.75,
+        "sasa_scale": 0.7,
+        "vdw_rep_scale": 0.01,
+        "vdw_attr_scale": 0.1,
+        "rotamer_scale": 1.0,
+        "pi_stack_scale": 1.0,
     }
 
 
@@ -190,43 +164,22 @@ def maybe_downsample_options(
 
 def eval_energy_terms(folder: QuantumBiophysicsFolder, angle_vec: np.ndarray) -> Tuple[float, Dict[str, float]]:
     dummy_params = np.zeros(folder.n_params, dtype=float)
-    orig_get_angles = folder._get_angles
-    try:
-        folder._get_angles = lambda _params: angle_vec
-        folder.current_stage = 3
-        E = float(folder.energy_function(dummy_params, return_terms=True))
-        terms = getattr(folder, "last_energy_terms", {}) or {}
-        terms = {str(k): float(v) for k, v in terms.items()}
-        return E, terms
-    finally:
-        folder._get_angles = orig_get_angles
+    folder.current_stage = 3
+    E = float(folder.energy_function(dummy_params, return_terms=True, angle_override=angle_vec))
+    terms = getattr(folder, "last_energy_terms", {}) or {}
+    terms = {str(k): float(v) for k, v in terms.items()}
+    return E, terms
 
 
 def build_ca_coords(folder: QuantumBiophysicsFolder, angle_vec: np.ndarray) -> np.ndarray:
-    orig_get_angles = folder._get_angles
-    try:
-        folder._get_angles = lambda _params: angle_vec
-        dummy_params = np.zeros(folder.n_params, dtype=float)
-        angle_vec2 = folder._get_angles(dummy_params)
-        builder = getattr(folder, "build_output_structure", folder.build_full_structure)
-        coords, _, _ = builder(angle_vec2)
-        ca = np.array([coords[i] for i, lbl in enumerate(folder.static_labels) if lbl[1] == "CA"])
-        return ca
-    finally:
-        folder._get_angles = orig_get_angles
+    builder = getattr(folder, "build_output_structure", folder.build_full_structure)
+    coords, _, _ = builder(angle_vec)
+    return np.array([coords[i] for i, lbl in enumerate(folder.static_labels) if lbl[1] == "CA"])
 
 
 def build_full_coords(folder: QuantumBiophysicsFolder, angle_vec: np.ndarray):
-    orig_get_angles = folder._get_angles
-    try:
-        folder._get_angles = lambda _params: angle_vec
-        dummy_params = np.zeros(folder.n_params, dtype=float)
-        angle_vec2 = folder._get_angles(dummy_params)
-        builder = getattr(folder, "build_output_structure", folder.build_full_structure)
-        coords, labels, bonds = builder(angle_vec2)
-        return coords, labels, bonds
-    finally:
-        folder._get_angles = orig_get_angles
+    builder = getattr(folder, "build_output_structure", folder.build_full_structure)
+    return builder(angle_vec)
 
 
 def backbone_signature(folder: QuantumBiophysicsFolder, angle_vec: np.ndarray, round_deg: float = 15.0):
@@ -307,13 +260,6 @@ def main(argv=None):
         args.gromacs_minimize = 1
     if args.gromacs_rerank is None:
         args.gromacs_rerank = 1
-
-    os.environ["QTF_STAGE3_BACKEND"] = str(args.energy_backend)
-    os.environ["QTF_USE_E2E_CONSTRAINT"] = "1" if int(args.use_e2e_constraint) else "0"
-    os.environ["QTF_E2E_SCALE"] = str(args.e2e_scale)
-    os.environ["QTF_ROSETTA_REPACK"] = "1" if int(args.rosetta_repack) else "0"
-    os.environ["QTF_ROSETTA_FA_MIN"] = "1" if int(args.rosetta_fa_min) else "0"
-    os.environ["QTF_ROSETTA_CEN_MIN"] = "1" if int(args.rosetta_cen_min) else "0"
 
     os.makedirs(args.outdir, exist_ok=True)
     rng = np.random.default_rng(args.random_seed)

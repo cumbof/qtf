@@ -322,25 +322,15 @@ def compute_qtf_angle_vector(
 
 def eval_energy_terms(folder: QuantumBiophysicsFolder, angle_vec: np.ndarray):
     dummy_params = np.zeros(folder.n_params, dtype=float)
-    orig_get_angles = folder._get_angles
-    try:
-        folder._get_angles = lambda _params: angle_vec
-        folder.current_stage = 3
-        total = float(folder.energy_function(dummy_params, return_terms=True))
-        terms = {str(k): float(v) for k, v in (getattr(folder, "last_energy_terms", {}) or {}).items()}
-        return total, terms
-    finally:
-        folder._get_angles = orig_get_angles
+    folder.current_stage = 3
+    total = float(folder.energy_function(dummy_params, return_terms=True, angle_override=angle_vec))
+    terms = {str(k): float(v) for k, v in (getattr(folder, "last_energy_terms", {}) or {}).items()}
+    return total, terms
 
 
 def build_full_coords(folder: QuantumBiophysicsFolder, angle_vec: np.ndarray):
-    orig_get_angles = folder._get_angles
-    try:
-        folder._get_angles = lambda _params: angle_vec
-        coords, labels, bonds = folder.build_full_structure(angle_vec)
-        return coords, labels, bonds
-    finally:
-        folder._get_angles = orig_get_angles
+    coords, labels, bonds = folder.build_full_structure(angle_vec)
+    return coords, labels, bonds
 
 
 def make_rebuilt_output_paths(output_dir: Path, spec_name: str, start: Optional[int], end: Optional[int]) -> Tuple[Path, Path, Path]:
@@ -413,9 +403,11 @@ def _reference_pdb_path(reference: str) -> Tuple[Path, bool]:
         return path, False
     if len(ref) == 4 and ref.isalnum():
         tmp = tempfile.NamedTemporaryFile("wb", suffix=".pdb", delete=False)
-        tmp.close()
         url = f"https://files.rcsb.org/download/{ref.upper()}.pdb"
-        urllib.request.urlretrieve(url, tmp.name)
+        req = urllib.request.Request(url, headers={"User-Agent": "QTF/0.4.2"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            tmp.write(resp.read())
+        tmp.close()
         return Path(tmp.name), True
     raise FileNotFoundError(f"reference structure not found: {reference}")
 
@@ -542,16 +534,6 @@ def rmsd_between_structures(
     return float(rmsd), meta
 
 
-def core_ca_range_metadata(n_residues: int) -> Dict[str, object]:
-    use_core = n_residues > 2
-    return {
-        "rmsd_ca_excludes_terminal_residues": bool(use_core),
-        "rmsd_ca_start_residue_1indexed": 2 if use_core else 1,
-        "rmsd_ca_end_residue_1indexed": (n_residues - 1) if use_core else n_residues,
-        "rmsd_ca_n_aligned": (n_residues - 2) if use_core else n_residues,
-    }
-
-
 def calculate_metrics(ca_coords: np.ndarray) -> Dict[str, float]:
     end_to_end = float(np.linalg.norm(ca_coords[0] - ca_coords[-1]))
     centroid = np.mean(ca_coords, axis=0)
@@ -566,6 +548,179 @@ def load_panel(panel_path: str) -> List[Dict]:
     if path.suffix.lower() == ".csv":
         return pd.read_csv(path).to_dict(orient="records")
     raise ValueError("panel must be .json or .csv")
+
+
+def _compute_native_metrics(
+    folder: QuantumBiophysicsFolder,
+    angle_vec: np.ndarray,
+    observed: Dict,
+    trimmed_pdb: str,
+    pdb_resseqs: List[int],
+    selected_chain_id: str,
+    pdb_path: str,
+    name: str,
+    chi_mode: str,
+    rmsd_mode: str,
+    rmsd_residue_scope: str,
+    energy_backend: str,
+    use_e2e_constraint: bool,
+    e2e_scale: float,
+    gromacs_minimize: bool,
+    gromacs_forcefield: str,
+    gromacs_water: str,
+    gromacs_nsteps: int,
+    gromacs_emtol: float,
+    gromacs_maxwarn: int,
+    rebuilt_ca_pdb_path: Optional[str],
+    rebuilt_ca_centroid_pdb_path: Optional[str],
+    rebuilt_full_pdb_path: Optional[str],
+    start: Optional[int],
+    end: Optional[int],
+) -> Dict[str, Any]:
+    total_energy, terms = eval_energy_terms(folder, angle_vec)
+    rebuilt_coords, rebuilt_labels, _ = build_full_coords(folder, angle_vec)
+    rebuilt_ca = np.array([rebuilt_coords[i] for i, lbl in enumerate(rebuilt_labels) if lbl[1] == "CA"])
+    rebuilt_metrics = calculate_metrics(rebuilt_ca)
+    sidechain_centroids = folder.compute_sidechain_centroids(rebuilt_coords, rebuilt_labels)
+
+    if rebuilt_ca_pdb_path is not None:
+        folder.save_reduced_pdb(
+            rebuilt_ca,
+            filename=str(rebuilt_ca_pdb_path),
+            sidechain_centroids=None,
+            energy=total_energy,
+            chain_id=selected_chain_id,
+            resseqs=pdb_resseqs,
+        )
+
+    if rebuilt_ca_centroid_pdb_path is not None:
+        folder.save_reduced_pdb(
+            rebuilt_ca,
+            filename=str(rebuilt_ca_centroid_pdb_path),
+            sidechain_centroids=sidechain_centroids,
+            energy=total_energy,
+            chain_id=selected_chain_id,
+            resseqs=pdb_resseqs,
+        )
+
+    if rebuilt_full_pdb_path is not None:
+        folder.save_pdb(
+            rebuilt_coords,
+            rebuilt_labels,
+            filename=str(rebuilt_full_pdb_path),
+            energy=total_energy,
+            chain_id=selected_chain_id,
+            resseqs=pdb_resseqs,
+            remarks=["QTF heavy-atom rebuilt structure from native torsions"],
+            include_hydrogens=False,
+        )
+
+    gromacs_info: Dict[str, Any] = {}
+    if gromacs_minimize and rebuilt_full_pdb_path is not None:
+        rebuilt_full_path = Path(str(rebuilt_full_pdb_path))
+        gromacs_result = gromacs_postprocess_structure(
+            enabled=True,
+            full_pdb_path=str(rebuilt_full_pdb_path),
+            gromacs_dir=str(rebuilt_full_path.parent.parent / "gromacs_pdbs" / rebuilt_full_path.stem),
+            forcefield=gromacs_forcefield,
+            water=gromacs_water,
+            nsteps=gromacs_nsteps,
+            emtol=gromacs_emtol,
+            maxwarn=gromacs_maxwarn,
+            coords=rebuilt_coords,
+            labels=rebuilt_labels,
+            ca_coords=rebuilt_ca,
+            sidechain_centroid_fn=folder.compute_sidechain_centroids,
+            nonlocal_clash_fn=nonlocal_heavy_clash_metrics,
+            local_clash_fn=adjacent_heavy_clash_metrics,
+        )
+        rebuilt_coords = gromacs_result["coords"]
+        rebuilt_labels = gromacs_result["labels"]
+        rebuilt_ca = gromacs_result["ca_coords"]
+        sidechain_centroids = gromacs_result["sidechain_centroids"]
+        gromacs_info = gromacs_result["gromacs_info"]
+
+    native_traj = md.load(trimmed_pdb)
+    native_ca_idx = native_traj.topology.select("name CA")
+    native_ca = native_traj.xyz[0, native_ca_idx, :] * 10.0
+    native_metrics = calculate_metrics(native_ca)
+
+    rebuilt_metrics = calculate_metrics(rebuilt_ca)
+    rebuilt_vs_native_ca_rmsd = core_ca_rmsd(rebuilt_ca, native_ca)
+    native_rmsd_coords, native_rmsd_labels, rmsd_meta = load_reference_rmsd_coords(trimmed_pdb, rmsd_mode, average_backbone=False)
+    rebuilt_vs_native_rmsd_A, rmsd_meta = rmsd_between_structures(
+        rebuilt_coords,
+        rebuilt_labels,
+        native_rmsd_coords,
+        native_rmsd_labels,
+        rmsd_mode,
+        rmsd_residue_scope,
+    )
+    rmsd_meta = {
+        **rmsd_meta,
+        "rebuilt_vs_native_rmsd_A": float(rebuilt_vs_native_rmsd_A),
+    }
+
+    tuning = {
+        "hbond_scale": 0.75,
+        "sasa_scale": 0.7,
+        "vdw_rep_scale": 0.01,
+        "vdw_attr_scale": 0.1,
+        "rotamer_scale": 1.0,
+        "pi_stack_scale": 1.0,
+    }
+    protein_name = name
+    reference_pdb_id = pdb_id_from_path(pdb_path)
+    reference_pdb_path = str(pdb_path)
+    experiment_id = (
+        f"{protein_name}_chi-{chi_mode}"
+        f"_backend-{energy_backend}_e2e-{int(bool(use_e2e_constraint))}"
+        f"_hb-{tuning['hbond_scale']}_sasa-{tuning['sasa_scale']}"
+        f"_vdwr-{tuning['vdw_rep_scale']}_vdwa-{tuning['vdw_attr_scale']}"
+    )
+
+    row = {
+        "protein_name": protein_name,
+        "reference_pdb_id": reference_pdb_id,
+        "reference_pdb_path": reference_pdb_path,
+        "experiment_id": experiment_id,
+        "name": name,
+        "pdb_path": str(pdb_path),
+        "chain": selected_chain_id or "",
+        "residue_start": start if start is not None else pdb_resseqs[0],
+        "residue_end": end if end is not None else pdb_resseqs[-1],
+        "sequence": folder.sequence,
+        "chi_mode": chi_mode,
+        "rmsd_mode": rmsd_mode,
+        "rmsd_residue_scope": rmsd_residue_scope,
+        "energy_backend": energy_backend,
+        "use_e2e_constraint": bool(use_e2e_constraint),
+        "e2e_scale": float(e2e_scale),
+        "gromacs_minimize": bool(gromacs_minimize),
+        **gromacs_info,
+        "hbond_scale": tuning["hbond_scale"],
+        "sasa_scale": tuning["sasa_scale"],
+        "vdw_rep_scale": tuning["vdw_rep_scale"],
+        "vdw_attr_scale": tuning["vdw_attr_scale"],
+        "rotamer_scale": tuning["rotamer_scale"],
+        "pi_stack_scale": tuning["pi_stack_scale"],
+        "n_residues": len(folder.sequence),
+        "total_energy": total_energy,
+        "native_end_to_end": native_metrics["end_to_end"],
+        "native_rg": native_metrics["radius_of_gyration"],
+        "rebuilt_end_to_end": rebuilt_metrics["end_to_end"],
+        "rebuilt_rg": rebuilt_metrics["radius_of_gyration"],
+        "rebuilt_vs_native_ca_rmsd": rebuilt_vs_native_ca_rmsd,
+        **rmsd_meta,
+        "n_observed_torsions": len(observed),
+        "n_qtf_angles": int(folder.total_angles),
+        "rebuilt_ca_pdb_path": rebuilt_ca_pdb_path or "",
+        "rebuilt_ca_centroid_pdb_path": rebuilt_ca_centroid_pdb_path or "",
+        "rebuilt_full_pdb_path": rebuilt_full_pdb_path or "",
+    }
+    for k, v in terms.items():
+        row[f"term_{k}"] = v
+    return row
 
 
 def score_native_structure(
@@ -590,6 +745,7 @@ def score_native_structure(
     gromacs_nsteps: int = 5000,
     gromacs_emtol: float = 100.0,
     gromacs_maxwarn: int = 2,
+    selective_chi_map: Optional[Dict[str, List[str]]] = None,
     rebuilt_ca_pdb_path: Optional[str] = None,
     rebuilt_ca_centroid_pdb_path: Optional[str] = None,
     rebuilt_full_pdb_path: Optional[str] = None,
@@ -597,7 +753,8 @@ def score_native_structure(
     trimmed_pdb, pdb_resseqs, sequence, selected_chain_id = extract_subset_pdb(pdb_path, chain, start, end)
 
     try:
-        selective_chi_map = {
+        if selective_chi_map is None:
+            selective_chi_map = {
             "Y": ["chi1", "chi2"], "W": ["chi1", "chi2"], "F": ["chi1", "chi2"], "H": ["chi1", "chi2"],
             "D": ["chi1"], "E": ["chi1"], "N": ["chi1"], "Q": ["chi1"],
             "T": ["chi1"], "S": ["chi1"],
@@ -620,151 +777,34 @@ def score_native_structure(
         folder.current_stage = 3
 
         angle_vec, observed = compute_qtf_angle_vector(trimmed_pdb, folder, chi_mode=chi_mode)
-        total_energy, terms = eval_energy_terms(folder, angle_vec)
-        rebuilt_coords, rebuilt_labels, _ = build_full_coords(folder, angle_vec)
-        rebuilt_ca = np.array([rebuilt_coords[i] for i, lbl in enumerate(rebuilt_labels) if lbl[1] == "CA"])
-        rebuilt_metrics = calculate_metrics(rebuilt_ca)
-        sidechain_centroids = folder.compute_sidechain_centroids(rebuilt_coords, rebuilt_labels)
 
-        if rebuilt_ca_pdb_path is not None:
-            folder.save_reduced_pdb(
-                rebuilt_ca,
-                filename=str(rebuilt_ca_pdb_path),
-                sidechain_centroids=None,
-                energy=total_energy,
-                chain_id=selected_chain_id,
-                resseqs=pdb_resseqs,
-            )
-
-        if rebuilt_ca_centroid_pdb_path is not None:
-            folder.save_reduced_pdb(
-                rebuilt_ca,
-                filename=str(rebuilt_ca_centroid_pdb_path),
-                sidechain_centroids=sidechain_centroids,
-                energy=total_energy,
-                chain_id=selected_chain_id,
-                resseqs=pdb_resseqs,
-            )
-
-        if rebuilt_full_pdb_path is not None:
-            folder.save_pdb(
-                rebuilt_coords,
-                rebuilt_labels,
-                filename=str(rebuilt_full_pdb_path),
-                energy=total_energy,
-                chain_id=selected_chain_id,
-                resseqs=pdb_resseqs,
-                remarks=["QTF heavy-atom rebuilt structure from native torsions"],
-                include_hydrogens=False,
-            )
-
-        gromacs_info: Dict[str, Any] = {}
-        if gromacs_minimize and rebuilt_full_pdb_path is not None:
-            rebuilt_full_path = Path(str(rebuilt_full_pdb_path))
-            gromacs_result = gromacs_postprocess_structure(
-                enabled=True,
-                full_pdb_path=str(rebuilt_full_pdb_path),
-                gromacs_dir=str(rebuilt_full_path.parent.parent / "gromacs_pdbs" / rebuilt_full_path.stem),
-                forcefield=gromacs_forcefield,
-                water=gromacs_water,
-                nsteps=gromacs_nsteps,
-                emtol=gromacs_emtol,
-                maxwarn=gromacs_maxwarn,
-                coords=rebuilt_coords,
-                labels=rebuilt_labels,
-                ca_coords=rebuilt_ca,
-                sidechain_centroid_fn=folder.compute_sidechain_centroids,
-                nonlocal_clash_fn=nonlocal_heavy_clash_metrics,
-                local_clash_fn=adjacent_heavy_clash_metrics,
-            )
-            rebuilt_coords = gromacs_result["coords"]
-            rebuilt_labels = gromacs_result["labels"]
-            rebuilt_ca = gromacs_result["ca_coords"]
-            sidechain_centroids = gromacs_result["sidechain_centroids"]
-            gromacs_info = gromacs_result["gromacs_info"]
-
-        native_traj = md.load(trimmed_pdb)
-        native_ca_idx = native_traj.topology.select("name CA")
-        native_ca = native_traj.xyz[0, native_ca_idx, :] * 10.0
-        native_metrics = calculate_metrics(native_ca)
-
-        rebuilt_metrics = calculate_metrics(rebuilt_ca)
-        rebuilt_vs_native_ca_rmsd = core_ca_rmsd(rebuilt_ca, native_ca)
-        native_rmsd_coords, native_rmsd_labels, rmsd_meta = load_reference_rmsd_coords(trimmed_pdb, rmsd_mode, average_backbone=False)
-        rebuilt_vs_native_rmsd_A, rmsd_meta = rmsd_between_structures(
-            rebuilt_coords,
-            rebuilt_labels,
-            native_rmsd_coords,
-            native_rmsd_labels,
-            rmsd_mode,
-            rmsd_residue_scope,
+        return _compute_native_metrics(
+            folder=folder,
+            angle_vec=angle_vec,
+            observed=observed,
+            trimmed_pdb=trimmed_pdb,
+            pdb_resseqs=pdb_resseqs,
+            selected_chain_id=selected_chain_id,
+            pdb_path=pdb_path,
+            name=name,
+            chi_mode=chi_mode,
+            rmsd_mode=rmsd_mode,
+            rmsd_residue_scope=rmsd_residue_scope,
+            energy_backend=energy_backend,
+            use_e2e_constraint=use_e2e_constraint,
+            e2e_scale=e2e_scale,
+            gromacs_minimize=gromacs_minimize,
+            gromacs_forcefield=gromacs_forcefield,
+            gromacs_water=gromacs_water,
+            gromacs_nsteps=gromacs_nsteps,
+            gromacs_emtol=gromacs_emtol,
+            gromacs_maxwarn=gromacs_maxwarn,
+            rebuilt_ca_pdb_path=rebuilt_ca_pdb_path,
+            rebuilt_ca_centroid_pdb_path=rebuilt_ca_centroid_pdb_path,
+            rebuilt_full_pdb_path=rebuilt_full_pdb_path,
+            start=start,
+            end=end,
         )
-        rmsd_meta = {
-            **rmsd_meta,
-            "rebuilt_vs_native_rmsd_A": float(rebuilt_vs_native_rmsd_A),
-        }
-
-        tuning = {
-            "hbond_scale": float(os.getenv("QTF_HBOND_SCALE", "0.75")),
-            "sasa_scale": float(os.getenv("QTF_SASA_SCALE", "0.7")),
-            "vdw_rep_scale": float(os.getenv("QTF_VDW_REP_SCALE", "0.01")),
-            "vdw_attr_scale": float(os.getenv("QTF_VDW_ATTR_SCALE", "0.1")),
-            "rotamer_scale": float(os.getenv("QTF_ROTAMER_SCALE", "1.0")),
-            "pi_stack_scale": float(os.getenv("QTF_PI_STACK_SCALE", "1.0")),
-        }
-        protein_name = name
-        reference_pdb_id = pdb_id_from_path(pdb_path)
-        reference_pdb_path = str(pdb_path)
-        experiment_id = (
-            f"{protein_name}_chi-{chi_mode}"
-            f"_backend-{energy_backend}_e2e-{int(bool(use_e2e_constraint))}"
-            f"_hb-{tuning['hbond_scale']}_sasa-{tuning['sasa_scale']}"
-            f"_vdwr-{tuning['vdw_rep_scale']}_vdwa-{tuning['vdw_attr_scale']}"
-        )
-
-        row = {
-            "protein_name": protein_name,
-            "reference_pdb_id": reference_pdb_id,
-            "reference_pdb_path": reference_pdb_path,
-            "experiment_id": experiment_id,
-            "name": name,
-            "pdb_path": str(pdb_path),
-            "chain": selected_chain_id or "",
-            "residue_start": start if start is not None else pdb_resseqs[0],
-            "residue_end": end if end is not None else pdb_resseqs[-1],
-            "sequence": sequence,
-            "chi_mode": chi_mode,
-            "rmsd_mode": rmsd_mode,
-            "rmsd_residue_scope": rmsd_residue_scope,
-            "energy_backend": energy_backend,
-            "use_e2e_constraint": bool(use_e2e_constraint),
-            "e2e_scale": float(e2e_scale),
-            "gromacs_minimize": bool(gromacs_minimize),
-            **gromacs_info,
-            "hbond_scale": tuning["hbond_scale"],
-            "sasa_scale": tuning["sasa_scale"],
-            "vdw_rep_scale": tuning["vdw_rep_scale"],
-            "vdw_attr_scale": tuning["vdw_attr_scale"],
-            "rotamer_scale": tuning["rotamer_scale"],
-            "pi_stack_scale": tuning["pi_stack_scale"],
-            "n_residues": len(sequence),
-            "total_energy": total_energy,
-            "native_end_to_end": native_metrics["end_to_end"],
-            "native_rg": native_metrics["radius_of_gyration"],
-            "rebuilt_end_to_end": rebuilt_metrics["end_to_end"],
-            "rebuilt_rg": rebuilt_metrics["radius_of_gyration"],
-            "rebuilt_vs_native_ca_rmsd": rebuilt_vs_native_ca_rmsd,
-            **rmsd_meta,
-            "n_observed_torsions": len(observed),
-            "n_qtf_angles": int(folder.total_angles),
-            "rebuilt_ca_pdb_path": rebuilt_ca_pdb_path or "",
-            "rebuilt_ca_centroid_pdb_path": rebuilt_ca_centroid_pdb_path or "",
-            "rebuilt_full_pdb_path": rebuilt_full_pdb_path or "",
-        }
-
-        for k, v in terms.items():
-            row[f"term_{k}"] = v
-        return row
     finally:
         try:
             os.unlink(trimmed_pdb)

@@ -7,13 +7,13 @@ Iterates over all Cartesian-product combinations of energy-scale parameters
 native-structure scoring for each combination, then runs panel analysis.
 """
 
+from __future__ import annotations
+
 import argparse
 import csv
 import json
 import itertools
-import os
 import sys
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterable, List
 
@@ -34,31 +34,12 @@ ROSETTA_REPACK = 0
 ROSETTA_FA_MIN = 0
 ROSETTA_CEN_MIN = 0
 
-HBOND_SCALE = [0.55]
-SASA_SCALE = [0.85]
+HBOND_SCALE = [0.75]
+SASA_SCALE = [0.7]
 VDW_REP_SCALE = [0.01]
-VDW_ATTR_SCALE = [0.10]
-ROTAMER_SCALE = [1.00]
-PI_STACK_SCALE = [0.10]
-
-
-@contextmanager
-def _patched_environ(updates: Dict[str, str]):
-    old_values = {}
-    missing = []
-    for key, value in updates.items():
-        if key in os.environ:
-            old_values[key] = os.environ[key]
-        else:
-            missing.append(key)
-        os.environ[key] = value
-    try:
-        yield
-    finally:
-        for key in missing:
-            os.environ.pop(key, None)
-        for key, value in old_values.items():
-            os.environ[key] = value
+VDW_ATTR_SCALE = [0.1]
+ROTAMER_SCALE = [1.0]
+PI_STACK_SCALE = [1.0]
 
 
 def safe_name(s: str) -> str:
@@ -194,15 +175,6 @@ def main(argv=None):
                 print(f"[skip] {exp_id}")
                 continue
 
-            env_updates = {
-                "QTF_HBOND_SCALE": str(params["hbond_scale"]),
-                "QTF_SASA_SCALE": str(params["sasa_scale"]),
-                "QTF_VDW_REP_SCALE": str(params["vdw_rep_scale"]),
-                "QTF_VDW_ATTR_SCALE": str(params["vdw_attr_scale"]),
-                "QTF_ROTAMER_SCALE": str(params["rotamer_scale"]),
-                "QTF_PI_STACK_SCALE": str(params["pi_stack_scale"]),
-            }
-
             settings = {
                 "name": name,
                 "sequence": seq,
@@ -234,51 +206,50 @@ def main(argv=None):
             print("=" * 80)
 
             try:
-                with _patched_environ(env_updates):
-                    beam_argv = [
-                        "--protein_name", name,
-                        "--sequence", seq,
-                        "--beam_width", str(args.beam_width),
-                        "--window_deg", str(args.window_deg),
-                        "--step_deg", str(args.step_deg),
-                        "--chi_mode", chi_mode,
-                        "--rmsd_mode", args.rmsd_mode,
-                        "--rmsd_residue_scope", args.rmsd_residue_scope,
-                        "--max_sidechain_opts_per_residue", str(args.max_sidechain_opts_per_residue),
-                        "--save_partial",
-                        "--random_seed", str(RANDOM_SEED),
-                        "--energy_backend", args.energy_backend,
-                        "--use_e2e_constraint", str(args.use_e2e_constraint),
-                        "--e2e_scale", str(args.e2e_scale),
-                        "--gromacs_minimize", str(resolved_gromacs_minimize),
-                        "--hard_clash_reject_A", str(args.hard_clash_reject_A),
-                        "--rosetta_repack", str(args.rosetta_repack),
-                        "--rosetta_fa_min", str(args.rosetta_fa_min),
-                        "--rosetta_cen_min", str(args.rosetta_cen_min),
-                        "--reference_pdb", pdb_path,
-                        "--outdir", str(beam_dir),
-                    ]
-                    bench_mod.main(argv=beam_argv)
+                beam_argv = [
+                    "--protein_name", name,
+                    "--sequence", seq,
+                    "--beam_width", str(args.beam_width),
+                    "--window_deg", str(args.window_deg),
+                    "--step_deg", str(args.step_deg),
+                    "--chi_mode", chi_mode,
+                    "--rmsd_mode", args.rmsd_mode,
+                    "--rmsd_residue_scope", args.rmsd_residue_scope,
+                    "--max_sidechain_opts_per_residue", str(args.max_sidechain_opts_per_residue),
+                    "--save_partial",
+                    "--random_seed", str(RANDOM_SEED),
+                    "--energy_backend", args.energy_backend,
+                    "--use_e2e_constraint", str(args.use_e2e_constraint),
+                    "--e2e_scale", str(args.e2e_scale),
+                    "--gromacs_minimize", str(resolved_gromacs_minimize),
+                    "--hard_clash_reject_A", str(args.hard_clash_reject_A),
+                    "--rosetta_repack", str(args.rosetta_repack),
+                    "--rosetta_fa_min", str(args.rosetta_fa_min),
+                    "--rosetta_cen_min", str(args.rosetta_cen_min),
+                    "--reference_pdb", pdb_path,
+                    "--outdir", str(beam_dir),
+                ]
+                bench_mod.main(argv=beam_argv)
 
-                    native_argv = [
-                        "--name", name,
-                        "--pdb_path", pdb_path,
-                        "--chi_mode", chi_mode,
-                        "--rmsd_mode", args.rmsd_mode,
-                        "--rmsd_residue_scope", args.rmsd_residue_scope,
-                        "--energy_backend", args.energy_backend,
-                        "--use_e2e_constraint", str(args.use_e2e_constraint),
-                        "--e2e_scale", str(args.e2e_scale),
-                        "--gromacs_minimize", str(resolved_gromacs_minimize),
-                        "--rosetta_repack", str(args.rosetta_repack),
-                        "--rosetta_fa_min", str(args.rosetta_fa_min),
-                        "--rosetta_cen_min", str(args.rosetta_cen_min),
-                        "--out_csv", str(native_csv),
-                        "--out_json", str(native_dir / f"{name}_native_score.json"),
-                    ]
-                    if chain:
-                        native_argv.extend(["--chain", chain])
-                    eval_mod.main(argv=native_argv)
+                native_argv = [
+                    "--name", name,
+                    "--pdb_path", pdb_path,
+                    "--chi_mode", chi_mode,
+                    "--rmsd_mode", args.rmsd_mode,
+                    "--rmsd_residue_scope", args.rmsd_residue_scope,
+                    "--energy_backend", args.energy_backend,
+                    "--use_e2e_constraint", str(args.use_e2e_constraint),
+                    "--e2e_scale", str(args.e2e_scale),
+                    "--gromacs_minimize", str(resolved_gromacs_minimize),
+                    "--rosetta_repack", str(args.rosetta_repack),
+                    "--rosetta_fa_min", str(args.rosetta_fa_min),
+                    "--rosetta_cen_min", str(args.rosetta_cen_min),
+                    "--out_csv", str(native_csv),
+                    "--out_json", str(native_dir / f"{name}_native_score.json"),
+                ]
+                if chain:
+                    native_argv.extend(["--chain", chain])
+                eval_mod.main(argv=native_argv)
 
                 status = "ok"
                 error = ""
@@ -316,11 +287,13 @@ def main(argv=None):
                 "run_dir": str(run_dir),
             })
 
-            manifest = outroot / "grid_manifest.csv"
-            with open(manifest, "w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=list(manifest_rows[0].keys()))
-                writer.writeheader()
-                writer.writerows(manifest_rows)
+    # Write manifest once after all iterations
+    manifest = outroot / "grid_manifest.csv"
+    if manifest_rows:
+        with open(manifest, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(manifest_rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(manifest_rows)
 
     try:
         from qtf.analysis import panel as panel_analysis

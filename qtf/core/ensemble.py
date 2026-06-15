@@ -1,6 +1,8 @@
 """EnsembleFoldingManager — orchestrates multiple independent folding replicas.
 
-Replicas are executed in parallel via :class:`concurrent.futures.ProcessPoolExecutor`.
+By default replicas run sequentially (``max_workers=1``). Pass
+``max_workers>1`` or ``max_workers<1`` to ``run_ensemble`` for parallel
+execution via :class:`concurrent.futures.ProcessPoolExecutor`.
 Each worker process creates its own :class:`~qtf.core.folder.QuantumBiophysicsFolder`
 instance from the sequence and configuration, so there is no shared mutable state
 and no need for shared-memory synchronisation of the topology cache.
@@ -82,6 +84,7 @@ def _run_one_replica(
     strat: str,
     max_iter: int,
     scout_attempts: int,
+    top_k_snapshots: int = 0,
 ) -> dict:
     """Execute a single folding replica in a subprocess.
 
@@ -97,8 +100,8 @@ def _run_one_replica(
             n_attempts=scout_attempts, seed=replica_seed
         )
 
-    coords, labels, bonds, tracker, final_params, final_energy = folder.fold(
-        max_iter=max_iter, initial_params=start_params
+    coords, labels, bonds, tracker, final_params, final_energy, best_snapshots = folder.fold(
+        max_iter=max_iter, initial_params=start_params, top_k_snapshots=top_k_snapshots,
     )
 
     energy_terms = dict(getattr(folder, "last_energy_terms", {}) or {})
@@ -114,6 +117,7 @@ def _run_one_replica(
         "bonds": bonds,
         "params": final_params,
         "tracker": tracker,
+        "best_snapshots": best_snapshots,
     }
 
 
@@ -125,10 +129,12 @@ def _run_one_replica(
 class EnsembleFoldingManager:
     """Manages multiple independent folding runs with random initialisation.
 
-    Replicas are executed in parallel across ``max_workers`` subprocesses.
-    Each worker builds its own :class:`~qtf.core.folder.QuantumBiophysicsFolder`
-    from the configuration provided by the manager, eliminating shared-memory
-    contention on the topology cache.
+    Replicas are executed sequentially by default (``max_workers=1``).
+    Pass ``max_workers>1`` to ``run_ensemble`` for parallel execution across
+    subprocesses.  Each worker builds its own
+    :class:`~qtf.core.folder.QuantumBiophysicsFolder` from the configuration
+    provided by the manager, eliminating shared-memory contention on the
+    topology cache.
     """
 
     def __init__(self, folder: QuantumBiophysicsFolder) -> None:
@@ -215,7 +221,8 @@ class EnsembleFoldingManager:
         scout_attempts: int = 50,
         prime_strategy: str = "random",
         checkpoint_path: str | None = None,
-        max_workers: int | None = None,
+        max_workers: int = 1,
+        top_k_snapshots: int = 0,
     ) -> None:
         """Run *n_runs* independent folding trajectories in parallel.
 
@@ -253,8 +260,11 @@ class EnsembleFoldingManager:
             energy, energy_terms) so it stays small; the heavy arrays
             (coords, params) are deliberately not serialised.
         max_workers:
-            Maximum number of subprocesses.  When ``None`` (the default) the
-            pool size is ``min(os.cpu_count(), n_runs)``.
+            Number of subprocesses for parallel replica execution.  ``1``
+            (the default) runs replicas sequentially in-process.  Set to a
+            value greater than ``1`` to enable parallel execution with that
+            many workers.  Set to ``0`` or negative to use all available
+            CPUs (``os.cpu_count()``).
         """
         logger.info("Starting ensemble run: %d trajectories", n_runs)
         self.results = []
@@ -287,7 +297,7 @@ class EnsembleFoldingManager:
             "sequence": self.folder.sequence,
             "chi_mode": self.folder.chi_mode,
             "selective_chi_map": self.folder.selective_chi_map,
-            "energy_backend": self.folder.stage3_backend,
+            "energy_backend": self.folder.stage_backend,
             "use_e2e_constraint": self.folder.use_e2e_constraint,
             "e2e_scale": self.folder.e2e_scale,
             "rosetta_repack": self.folder.rosetta_do_repack,
@@ -295,18 +305,20 @@ class EnsembleFoldingManager:
             "rosetta_cen_min": self.folder.rosetta_do_centroid_min,
         }
 
-        n_workers = (
-            max_workers if max_workers is not None
-            else min(os.cpu_count() or 1, n_runs)
-        )
+        if max_workers < 1:
+            n_workers = min(os.cpu_count() or 1, n_runs)
+        else:
+            n_workers = max_workers
 
         if n_workers <= 1:
             self._run_sequential(
                 tasks, folder_kwargs, max_iter, scout_attempts, n_runs,
+                top_k_snapshots=top_k_snapshots,
             )
         else:
             self._run_parallel(
                 tasks, folder_kwargs, max_iter, scout_attempts, n_runs, n_workers,
+                top_k_snapshots=top_k_snapshots,
             )
 
         # Restore deterministic insertion order (by replica id)
@@ -323,6 +335,7 @@ class EnsembleFoldingManager:
         max_iter: int,
         scout_attempts: int,
         n_runs: int,
+        top_k_snapshots: int = 0,
     ) -> None:
         """Run replicas in-process using ``self.folder`` (no subprocess).
 
@@ -343,9 +356,10 @@ class EnsembleFoldingManager:
                         n_attempts=scout_attempts, seed=replica_seed,
                     )
 
-                coords, labels, bonds, tracker, final_params, final_energy = (
+                coords, labels, bonds, tracker, final_params, final_energy, best_snapshots = (
                     self.folder.fold(
                         max_iter=max_iter, initial_params=start_params,
+                        top_k_snapshots=top_k_snapshots,
                     )
                 )
             except (KeyboardInterrupt, SystemExit):
@@ -380,6 +394,7 @@ class EnsembleFoldingManager:
                     "bonds": bonds,
                     "params": final_params,
                     "tracker": tracker,
+                    "best_snapshots": best_snapshots,
                 }
             )
             self._write_checkpoint()
@@ -396,6 +411,7 @@ class EnsembleFoldingManager:
         scout_attempts: int,
         n_runs: int,
         n_workers: int,
+        top_k_snapshots: int = 0,
     ) -> None:
         """Distribute replicas across *n_workers* subprocesses."""
         from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -412,6 +428,7 @@ class EnsembleFoldingManager:
                     strat,
                     max_iter,
                     scout_attempts,
+                    top_k_snapshots,
                 )
                 fut_to_idx[fut] = i
 
