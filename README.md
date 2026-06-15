@@ -15,10 +15,10 @@
 3. [Package Structure](#package-structure)
 4. [Dependencies](#dependencies)
 5. [Installation](#installation)
-6. [CLI (`qtf-run`)](#cli-qtf-run)
+6. [CLI](#cli)
 7. [Quick Start](#quick-start)
 8. [Core Concepts](#core-concepts)
-   - [Holographic Encoding](#holographic-encoding)
+   - [Encoding](#encoding)
    - [Degrees of Freedom](#degrees-of-freedom)
    - [NERF Geometry Builder](#nerf-geometry-builder)
    - [Three-Stage Optimisation](#three-stage-optimisation)
@@ -40,7 +40,7 @@
 14. [API Reference](#api-reference)
 15. [Reproducibility](#reproducibility)
 16. [Logging](#logging)
-17. [References](#references)
+17. [Credits](#credits)
 18. [License](#license)
 
 ---
@@ -49,7 +49,7 @@
 
 **QTF** (Quantum Torsion Folder) is a hybrid quantum-classical protein structure prediction package. Unlike traditional lattice-based quantum folding approaches that snap atoms onto a discrete grid, QTF works entirely in **continuous torsion space**: backbone dihedral angles (φ, ) and side-chain rotamer angles (χ₁–χ₅) are the fundamental degrees of freedom.
 
-The central idea is **Holographic Encoding**: instead of assigning one qubit per degree of freedom — which would require hundreds of qubits for realistic proteins — QTF uses only ⌈log₂ N⌉ qubits to represent N continuous angles. The phases of the complex amplitudes in the quantum statevector are extracted and mapped directly to torsion angles in [−π, π]. This allows near-term quantum hardware (or exact simulation) to parameterise rich conformational spaces with a logarithmically small quantum register.
+Rather than assigning one qubit per degree of freedom — which would require hundreds of qubits for realistic proteins — QTF uses only ⌈log₂ N⌉ qubits to represent N continuous angles. The phases of the complex amplitudes in the quantum statevector are extracted and mapped directly to torsion angles in [−π, π]. This allows near-term quantum hardware (or exact simulation) to parameterise rich conformational spaces with a logarithmically small quantum register.
 
 The quantum circuit acts as a **generative model** (the "Actor"), while a physics-based energy function acts as the **critic**. Classical optimisers (COBYLA and SLSQP) close the loop, tuning the circuit parameters until the energy is minimised. Multiple independent runs are managed by an ensemble manager and ranked by a comprehensive statistics module.
 
@@ -102,33 +102,36 @@ The quantum circuit acts as a **generative model** (the "Actor"), while a physic
 ```
 qtf/
 
- __init__.py                  Top-level public API + version string
+ __init__.py                  Public API exports (3 core classes) + __version__
 
  core/
-   ├── __init__.py
    ├── folder.py                QuantumBiophysicsFolder — main predictor class
    ├── ensemble.py              EnsembleFoldingManager — multi-replica orchestrator
    └── tracker.py              LandscapeTracker — per-evaluation energy logger
 
  analysis/
-   ├── __init__.py
+   ├── ranking.py              EnsembleRanking — comprehensive statistics & selection
    ├── stability.py             kabsch_rmsd(), StabilityAnalyzer
-   └── ranking.py              EnsembleRanking — comprehensive statistics & selection
+   └── panel.py                Panel/grid-analysis pipeline
 
  visualization/
-   ├── __init__.py
    └── plots.py                plot_structure(), plot_energy_landscape(), plot_ranking()
 
  utils/
-   ├── __init__.py
    ├── pdb.py                  save_pdb(), get_ground_truth_backbone(),
    │                           calculate_physics_metrics()
-   ├── workflow.py             make_folder() helper — wires optional backends
+   ├── workflow.py             make_folder(), score_native_structure(),
+   │                           gromacs_postprocess_structure(), RMSD utils
+   ├── aer_sim.py              GPU/CPU statevector simulation via qiskit-aer
+   ├── accelerate.py           Numba-jitted distance matrix & energy kernels
    └── gromacs.py              GROMACS minimisation bridge (optional)
 
  cli/
-   ├── __init__.py
-   └── run.py                  qtf-run CLI entry point
+   ├── fold.py                 qtf-fold: quantum folding prediction
+   ├── bench.py                qtf-bench: beam-search benchmark
+   ├── eval.py                 qtf-eval: score experimental structures
+   ├── grid_search.py          qtf-grid-search: parameter grid sweep
+   └── relax.py                qtf-relax: GROMACS relaxation
 ```
 
 ---
@@ -139,23 +142,31 @@ qtf/
 |---------|----------------|---------|
 | `numpy` | 1.24 | Array mathematics, distance matrices, linear algebra |
 | `scipy` | 1.10 | COBYLA and SLSQP optimisers (`scipy.optimize.minimize`) |
-| `qiskit` | 1.0 | `EfficientSU2` ansatz construction; exact statevector simulation |
+| `qiskit` | 1.0 | Ansatz construction; exact statevector simulation |
+| `qiskit-aer` | 0.14 | GPU/CPU statevector simulation backend |
 | `plotly` | 5.18 | Interactive 3-D and 2-D Plotly figures |
 | `pandas` | 2.0 | Per-replica statistics `DataFrame`; CSV export |
 
 Optional extras:
 
-```bash
-pip install "qtf[dev]"       # pytest>=7, pytest-cov, ruff, mypy
-pip install "qtf[notebook]"  # jupyter, nbformat  (for running QTF.ipynb)
-pip install "qtf[workflows]" # mdtraj, biopython, openmm, matplotlib workflow tools
-```
+| Extra | Dependencies | Use case |
+|-------|-------------|----------|
+| `[dev]` | `pytest`, `pytest-cov`, `ruff`, `mypy` | Development, linting, testing |
+| `[notebook]` | `jupyter`, `nbformat` | Running `QTF.ipynb` |
+| `[workflows]` | `matplotlib`, `mdtraj`, `biopython`, `openmm` | Energy backends, PDB I/O, minimisation |
+| `[gpu]` | `numba`, `qiskit-aer-gpu` | GPU-accelerated classical & quantum simulation (Linux x86_64) |
+| `[docs]` | `mkdocs`, `mkdocs-material`, `mkdocstrings[python]` | Building this documentation site
 
-The upstream experiment workflow code is kept inside the package as lowercase
-modules, matching this repository's structure. The main batch runner is the
-`qtf-run` CLI command (installed automatically with `pip install qtf`); its
-supporting workflow utilities live under `qtf/utils/workflow.py` and the
-optional GROMACS bridge under `qtf/utils/gromacs.py`.
+> [!NOTE]
+>
+> QTF's default `custom` energy backend works out of the box — no additional dependencies required.
+>
+> **PyRosetta** (`energy_backend="rosetta"`) is not available directly on PyPI. Install it manually with:
+> ```bash
+> pip install pyrosetta --find-links https://west.rosettacommons.org/pyrosetta/quarterly/release
+> ```
+>
+> **GROMACS** (used by `qtf-relax` and `gromacs_postprocess_structure()`) must be installed at the system level. See the [GROMACS download page](https://www.gromacs.org/downloads) for platform-specific instructions.
 
 ---
 
@@ -170,7 +181,7 @@ pip install qtf
 **Editable install from source (for development or contribution):**
 
 ```bash
-git clone https://github.com/cumbof/QTF.git
+git clone https://github.com/cumbof/qtf.git
 cd QTF
 pip install -e ".[dev]"
 ```
@@ -179,15 +190,35 @@ pip install -e ".[dev]"
 
 ---
 
-## CLI (`qtf-run`)
+## CLI
 
-A command-line interface is installed automatically with `pip install qtf`:
+Six command-line tools are installed automatically with `pip install qtf`:
+
+### `qtf-run` — Unified dispatcher
+
+All subcommands are also accessible via a single unified entry point:
 
 ```bash
-qtf-run --predict YYDPETGTWY --ensemble_size 5
+qtf-run fold --predict YYDPETGTWY --ensemble_size 5
+qtf-run bench --sequence YYDPETGTWY --beam_width 1000
+qtf-run eval --name 5AWL --pdb_path 5AWL.pdb --out_csv scores.csv
+qtf-run grid-search --panel_csv protein_panel.csv --outsubdir run1 --window_deg 30
+qtf-run relax --input_pdb structure.pdb --forcefield amber99sb-ildn
 ```
 
-**Common flags:**
+| Subcommand | Delegates to |
+|------------|-------------|
+| `fold` | `qtf-fold` |
+| `bench` | `qtf-bench` |
+| `eval` | `qtf-eval` |
+| `grid-search` | `qtf-grid-search` |
+| `relax` | `qtf-relax` |
+
+### `qtf-fold` — Quantum folding prediction
+
+```bash
+qtf-fold --predict YYDPETGTWY --ensemble_size 5
+```
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -198,16 +229,54 @@ qtf-run --predict YYDPETGTWY --ensemble_size 5
 | `--reference_structure PDB_ID` | None | RCSB PDB ID for RMSD comparison |
 | `--reference_pdb PATH` | None | Local PDB file for RMSD comparison |
 | `--rmsd_mode` | `ca` | `ca` (Cα only) \| `heavy` (all heavy atoms) |
-| `--rmsd_residue_scope` | `core` | `core` (drop first/last residue) \| `all` |
+| `--rmsd_residue_scope` | `core` | `core` \| `all` |
 | `--top_k N` | `1` | Save and compare the N lowest-energy models |
-| `--top_frac F` | None | Save the top fraction F (0–1) of models (overrides `--top_k`) |
-| `--energy_backend` | `custom` | Energy backend for all stages: `custom` \| `rosetta` \| `openmm` |
+| `--top_frac F` | None | Save top fraction F of models (overrides `--top_k`) |
+| `--top_k_snapshots N` | `0` | Save the N lowest-energy intermediate structures encountered during optimisation (0 = disabled) |
+| `--energy_backend` | `custom` | `custom` \| `rosetta` \| `openmm` |
 | `--mode` | `predict_and_compare` | `predict_and_compare` \| `predict_only` |
 
-Outputs are written to `outputs/<SEQUENCE>_<FF>_<TIMESTAMP>/`:
-- Per-model PDB files with energy stored in `REMARK 1`
-- `results.json` — full per-replica statistics
-- RMSD comparison table (when `--reference_structure` or `--reference_pdb` is provided)
+Outputs written to `<output_root>/<SEQUENCE>_<FF>_<TIMESTAMP>/`:
+per-model PDBs, `ensemble_ranked.csv`/`.json`, `summary_results.csv`/`.json`.
+
+### `qtf-bench` — Beam-search benchmark
+
+Exhaustive discrete search over Ramachandran-basin grids + chi rotamers.
+
+```bash
+qtf-bench --sequence YYDPETGTWY --beam_width 1000 --outdir ./bench
+```
+
+Key flags: `--sequence`, `--beam_width`, `--window_deg`, `--step_deg`,
+`--chi_mode`, `--max_sidechain_opts_per_residue`, `--reference_pdb`, `--outdir`.
+
+### `qtf-eval` — Score experimental structures
+
+Score native PDB structures with the QTF energy function.
+
+```bash
+qtf-eval --name 5AWL --pdb_path 5AWL.pdb --out_csv scores.csv
+```
+
+Supports `--panel` (batch via JSON/CSV) and single-structure mode (`--name`
++ `--pdb_path`).
+
+### `qtf-grid-search` — Parameter grid sweep
+
+Cartesian-product scan over energy-scale parameters for peptide panels.
+
+```bash
+qtf-grid-search --panel_csv protein_panel.csv --grid_json params.json \
+  --outsubdir run1 --window_deg 30 --step_deg 15
+```
+
+### `qtf-relax` — GROMACS relaxation
+
+Energy-minimise a PDB structure with GROMACS.
+
+```bash
+qtf-relax --input_pdb structure.pdb --forcefield amber99sb-ildn
+```
 
 ---
 
@@ -280,7 +349,7 @@ print(ranking.best_by_energy["energy"])
 
 ## Core Concepts
 
-### Holographic Encoding
+### Encoding
 
 Standard quantum approaches to protein folding assign one or more qubits per torsion angle, requiring O(N) qubits for a protein with N degrees of freedom. QTF instead exploits the **exponential dimensionality** of the quantum state space:
 
@@ -914,245 +983,28 @@ print(f"Radius of gyration  : {rg:.2f} Å")
 
 ## API Reference
 
-### `QuantumBiophysicsFolder`
+The full auto-generated API reference is available at
+**[https://cumbof.github.io/qtf/api](https://cumbof.github.io/qtf/api)**
+or locally by building the docs:
 
-```python
-class QuantumBiophysicsFolder(
-    sequence: str,
-    use_e2e_constraint: bool = True,
-    e2e_scale: float = 1.0,
-    energy_backend: str = "custom",
-)
+```bash
+pip install -e ".[docs]"
+mkdocs serve
+# Open http://127.0.0.1:8000/api
 ```
 
-**Constructor parameters:**
+Every public class, method, and function is documented with NumPy-style docstrings
+and rendered by `mkdocstrings`. The reference covers:
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `sequence` | str | — | Single-letter amino acid sequence (case-insensitive) |
-| `use_e2e_constraint` | bool | `True` | Enable/disable the length-aware end-to-end constraint |
-| `e2e_scale` | float | `1.0` | Multiplier for the E2E constraint strength |
-| `energy_backend` | str | `"custom"` | Scoring backend for all optimizer stages: `"custom"` (built-in), `"rosetta"` (PyRosetta, optional), `"openmm"` (OpenMM, optional) |
+- **`qtf`** — Package-level exports (`QuantumBiophysicsFolder`,
+  `EnsembleFoldingManager`, `LandscapeTracker`)
+- **`qtf.core`** — `folder.py`, `ensemble.py`, `tracker.py`
+- **`qtf.analysis`** — `ranking.py`, `stability.py`, `panel.py`
+- **`qtf.visualization`** — `plots.py`
+- **`qtf.utils`** — `pdb.py`, `workflow.py`, `aer_sim.py`, `accelerate.py`, `gromacs.py`
 
-**Key attributes (post-construction):**
-
-| Attribute | Type | Description |
-|-----------|------|-------------|
-| `sequence` | str | Upper-cased amino acid sequence |
-| `n_residues` | int | Number of residues |
-| `dof_map` | list[dict] | Ordered degrees of freedom (`res`, `type`) |
-| `total_angles` | int | Total number of torsion angles N |
-| `n_qubits` | int | ⌈log₂ N⌉ — number of qubits in the circuit |
-| `reps` | int | Circuit depth (number of EfficientSU2 repetitions) |
-| `n_params` | int | Total number of trainable circuit parameters |
-| `ansatz` | QuantumCircuit | The Qiskit EfficientSU2 circuit object |
-| `static_labels` | list | Atom labels from topology cache `[(res_id, name, elem), …]` |
-| `atom_names` | ndarray | String array of atom names, shape `(N_atoms,)` |
-| `atom_elems` | ndarray | String array of element symbols, shape `(N_atoms,)` |
-| `atom_to_res` | ndarray | Residue index per atom, shape `(N_atoms,)` |
-| `q_vector` | ndarray | Partial charges per atom, shape `(N_atoms,)` |
-| `vdw_radii_vector` | ndarray | VdW radii per atom, shape `(N_atoms,)` |
-| `mask_heavy` | ndarray (bool) | True for non-hydrogen atoms |
-| `mask_hydrophobic` | ndarray (bool) | True for hydrophobic carbon atoms |
-| `mask_non_bonded_vdw` | ndarray (bool) | True for pairs with bond-graph distance > 3 (strict non-bonded), shape `(N_atoms, N_atoms)` |
-| `mask_non_bonded_vdw_14` | ndarray (bool) | True for 1-4 pairs (bond-graph distance = 3; scaled by 0.35 in VdW) |
-
-**Methods:**
-
-| Method | Signature | Returns | Description |
-|--------|-----------|---------|-------------|
-| `_get_angles` | `(params: ndarray)` | `ndarray` | Map circuit parameters → N torsion angles via statevector phases (phases[0] pinned to 0 to remove global phase) |
-| `build_full_structure` | `(angle_vector: ndarray)` | `(coords, labels, bonds)` | NERF geometry builder; all-atom 3-D coordinates |
-| `energy_function` | `(params: ndarray, return_terms: bool = False)` | `float` | Evaluate total force-field energy; stores per-term breakdown in `last_energy_terms` when `return_terms=True` |
-| `get_smart_initialization` | `(n_attempts=20, seed=None)` | `ndarray` | Basin-hopping: return the best of `n_attempts` random parameter vectors |
-| `fold` | `(max_iter=2000, initial_params=None, scout_attempts=None)` | `(coords, labels, bonds, tracker, params, energy)` | Run the full three-stage optimisation curriculum; `scout_attempts` caps basin-hopping budget (defaults to `min(64, max_iter // 10)`) |
-
----
-
-### `EnsembleFoldingManager`
-
-```python
-class EnsembleFoldingManager(folder: QuantumBiophysicsFolder)
-```
-
-**Methods:**
-
-| Method | Signature | Returns | Description |
-|--------|-----------|---------|-------------|
-| `run_ensemble` | `(n_runs=5, max_iter=2000, scout_attempts=50, prime_strategy="random")` | `None` | Run `n_runs` independent replicas; `prime_strategy` controls initialisation |
-| `get_results` | `()` | `list[dict]` | All replica dicts, sorted by ascending energy |
-| `get_ranked_results` | `()` | `list[dict]` | Alias of `get_results()` |
-| `select_top` | `(top_k=None, top_frac=None)` | `list[dict]` | Return the `top_k` (or `top_frac` fraction) lowest-energy replicas |
-| `prime_circuit` | `(target_type="helix", seed=42)` | `ndarray` | Pre-optimise circuit parameters to target backbone geometry; returns initial params |
-
----
-
-### `LandscapeTracker`
-
-```python
-class LandscapeTracker()
-```
-
-| Attribute | Type | Description |
-|-----------|------|-------------|
-| `history` | list[float] | Energy value at each function evaluation |
-| `stage_markers` | list[tuple[int, str]] | `(iteration_index, stage_name)` for each stage boundary |
-| `current_iter` | int | Current total number of evaluations |
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `log` | `(energy: float)` | Append energy and increment counter |
-| `mark_stage` | `(name: str)` | Record current iteration as a stage boundary |
-
----
-
-### `EnsembleRanking`
-
-```python
-@dataclass
-class EnsembleRanking
-```
-
-**Class method:**
-
-```python
-EnsembleRanking.from_ensemble(
-    results: list[dict],
-    ground_truth_ca: ndarray | None = None,
-    ca_label: str = "CA",
-) -> EnsembleRanking
-```
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `results` | list[dict] | — | List of replica dicts from `EnsembleFoldingManager.get_results()` |
-| `ground_truth_ca` | ndarray or None | `None` | `(N_residues, 3)` Cα reference coordinates |
-| `ca_label` | str | `"CA"` | Atom name identifying Cα in the labels |
-
-**Attributes:**
-
-| Attribute | Type | Description |
-|-----------|------|-------------|
-| `stats_df` | DataFrame | Per-replica statistics (see column table above) |
-| `best_by_energy` | dict | Replica dict with the lowest final energy |
-| `best_by_rmsd` | dict or None | Replica dict with the lowest RMSD vs GT; `None` if no GT provided |
-| `pairwise_rmsd_matrix` | ndarray (M, M) | All-vs-all Kabsch RMSD matrix of Cα traces |
-| `convergence` | dict | Keys: `avg_pairwise_rmsd`, `max_pairwise_rmsd`, `min_nonzero_rmsd`, `verdict` |
-
-**Methods:**
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `summary()` | str | Human-readable multi-line summary of the ranking |
-
----
-
-### `kabsch_rmsd`
-
-```python
-from qtf.analysis import kabsch_rmsd
-
-rmsd, P_aligned = kabsch_rmsd(P: ndarray, Q: ndarray)
-```
-
-Both `P` and `Q` must have shape `(N, 3)`. Returns `(rmsd: float, P_aligned: ndarray)` where `P_aligned` is `P` optimally rotated and translated to minimise RMSD with `Q`.
-
----
-
-### `StabilityAnalyzer`
-
-```python
-from qtf.analysis import StabilityAnalyzer
-
-matrix = StabilityAnalyzer.pairwise_rmsd_matrix(structures: list[ndarray]) -> ndarray
-summary = StabilityAnalyzer.convergence_summary(rmsd_matrix: ndarray) -> dict
-```
-
-- `pairwise_rmsd_matrix`: all-vs-all Kabsch RMSD matrix, shape `(M, M)`, diagonal = 0.
-- `convergence_summary`: returns `{"avg_pairwise_rmsd", "max_pairwise_rmsd", "min_nonzero_rmsd", "verdict"}`.
-
----
-
-### `plot_structure`
-
-```python
-from qtf.visualization import plot_structure
-
-fig = plot_structure(
-    ranking: EnsembleRanking,
-    ground_truth_ca: ndarray | None = None,
-    ca_label: str = "CA",
-    show_all: bool = True,
-    title: str = "Predicted Protein Structures",
-) -> go.Figure
-```
-
----
-
-### `plot_energy_landscape`
-
-```python
-from qtf.visualization import plot_energy_landscape
-
-fig = plot_energy_landscape(
-    ranking: EnsembleRanking,
-    replica_ids: list[int] | None = None,
-    clip_range: tuple[float, float] = (-1000.0, 2000.0),
-    title: str = "Optimisation Energy Landscape",
-) -> go.Figure
-```
-
----
-
-### `plot_ranking`
-
-```python
-from qtf.visualization import plot_ranking
-
-fig = plot_ranking(
-    ranking: EnsembleRanking,
-    title: str = "Ensemble Ranking",
-) -> go.Figure
-```
-
----
-
-### `save_pdb`
-
-```python
-from qtf.utils import save_pdb
-
-save_pdb(
-    coords: ndarray,
-    labels: list,
-    sequence: str,
-    filename: str = "structure.pdb",
-    energy: float = 0.0,
-) -> None
-```
-
----
-
-### `get_ground_truth_backbone`
-
-```python
-from qtf.utils import get_ground_truth_backbone
-
-true_ca = get_ground_truth_backbone(
-    pdb_id: str,
-    cache_dir: str = ".",
-) -> ndarray  # shape (N_residues, 3)
-```
-
----
-
-### `calculate_physics_metrics`
-
-```python
-from qtf.utils import calculate_physics_metrics
-
-end_to_end, rg = calculate_physics_metrics(coords: ndarray) -> tuple[float, float]
-```
+The hand-written API tables formerly in this section have been retired in favour
+of the auto-generated docs, which always stay in sync with the source code.
 
 ---
 
@@ -1212,8 +1064,13 @@ logging.basicConfig(
 |--------|--------------|----------------|
 | `qtf.core.folder` | Stage transitions, energy at each stage end | Basin-hopping seed and best-start energy |
 | `qtf.core.ensemble` | Replica start/finish, final energy per replica | — |
+| `qtf.utils.aer_sim` | Aer backend initialisation (GPU/CPU) | Backend creation failures |
 | `qtf.analysis.ranking` | — | — |
 | `qtf.visualization` | — | — |
+
+Parallel replicas (via `ProcessPoolExecutor`) inherit the root logger
+configuration and write to the same terminal; set `max_workers=1` for
+sequential in-process execution.
 
 ```python
 # Show only errors from QTF (suppress progress):
@@ -1229,36 +1086,18 @@ logging.getLogger("qtf.core.ensemble").setLevel(logging.INFO)
 
 ---
 
-## References
+## Credits
 
-1. **Hydrophobicity Scale**:
-   Kyte, J., & Doolittle, R. F. (1982). A simple method for displaying the hydropathic character of a protein. *Journal of Molecular Biology*, 157(1), 105–132. https://doi.org/10.1016/0022-2836(82)90515-0
+If you use QTF in your research, please cite the following study:
 
-2. **AMBER Force Field**:
-
-5. **van der Waals Radii**:
-   Bondi, A. (1964). van der Waals volumes and radii. *Journal of Physical Chemistry*, 68(3), 441–451. https://doi.org/10.1021/j100785a001
-
-6. **Bond and Angle Parameters**:
-   Engh, R. A., & Huber, R. (1991). Accurate bond and angle parameters for X-ray protein structure refinement. *Acta Crystallographica Section A*, 47(4), 392–400. https://doi.org/10.1107/S0108767391001071
-
-7. **NERF Algorithm**:
-   Parsons, J., Holmes, J. B., Rojas, J. M., Tsai, J., & Strauss, C. E. M. (2005). Practical conversion from torsion space to Cartesian space for in silico protein synthesis. *Journal of Computational Chemistry*, 26(10), 1063–1068. https://doi.org/10.1002/jcc.20237
-
-8. **Kabsch Algorithm**:
-   Kabsch, W. (1978). A discussion of the solution for the best rotation to relate two sets of vectors. *Acta Crystallographica Section A*, 34(5), 827–828. https://doi.org/10.1107/S0567739478001680
-
-9. **EfficientSU2 Ansatz / VQE**:
-   Kandala, A., et al. (2017). Hardware-efficient variational quantum eigensolver for small molecules and quantum magnets. *Nature*, 549, 242–246. https://doi.org/10.1038/nature23879
-
-10. **Ramachandran Plot**:
-    Ramachandran, G. N., Ramakrishnan, C., & Sasisekharan, V. (1963). Stereochemistry of polypeptide chain configurations. *Journal of Molecular Biology*, 7(1), 95–99. https://doi.org/10.1016/S0022-2836(63)80023-6
-
-11. **COBYLA Optimiser**:
-    Powell, M. J. D. (1994). A direct search optimization method that models the objective and constraint functions by linear interpolation. In *Advances in Optimization and Numerical Analysis* (pp. 51–67). Kluwer Academic Publishers.
-
-12. **SLSQP Optimiser**:
-    Kraft, D. (1988). *A software package for sequential quadratic programming*. DFVLR-FB 88-28, Deutsche Forschungs- und Versuchsanstalt für Luft- und Raumfahrt.
+```bibtex
+@article{Cumbo2026quantum,
+    author  = {Cumbo, Fabio and Raubenolt, Bryan and Puram, Varun and Joshi, Jayadev and Blankenberg, Daniel},
+    title   = {Logarithmic-scale variational quantum eigensolver for torsion-space off-lattice protein structure prediction},
+    journal = {arXiv preprint},
+    year    = {2026}
+}
+```
 
 ---
 

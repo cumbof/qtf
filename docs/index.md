@@ -15,7 +15,7 @@ package. Unlike lattice-based quantum folding approaches, QTF works entirely in 
 torsion space**: backbone dihedral angles (φ, ψ) and side-chain rotamer angles (χ₁–χ₅) are
 the fundamental degrees of freedom.
 
-The central idea is **Holographic Encoding**: instead of assigning one qubit per degree of
+Rather than assigning one qubit per degree of
 freedom — which would require hundreds of qubits — QTF uses only ⌈log₂ N⌉ qubits to
 represent N continuous angles. The phases of complex amplitudes in the quantum statevector
 are extracted and mapped directly to torsion angles in [−π, π].

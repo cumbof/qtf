@@ -43,7 +43,12 @@ CANONICAL = {
 
 def _walk_python_files() -> list[Path]:
     """Yield every .py file under the repo root, excluding tests/,
-    build artefacts, and caches."""
+    build artefacts, and caches.
+
+    B5 targets duplicated helper implementations in the importable
+    package surface. Repository-root utility scripts (for example,
+    cluster launchers) are intentionally out of scope.
+    """
     skip_dirs = {
         "tests",
         ".git",
@@ -57,7 +62,7 @@ def _walk_python_files() -> list[Path]:
         ".ruff_cache",
     }
     out: list[Path] = []
-    for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
+    for dirpath, dirnames, filenames in os.walk(REPO_ROOT / "qtf"):
         # Prune the skip dirs in-place so os.walk doesn't descend.
         dirnames[:] = [d for d in dirnames if d not in skip_dirs]
         for fn in filenames:
@@ -211,3 +216,10 @@ def test_no_duplicate_helpers_summary():
         "B5: duplicate helper definitions detected:\n\n"
         + "\n\n".join(violations)
     )
+
+
+def test_helper_scan_scope_is_package_only():
+    """The duplicate-helper guard should only scan importable package code."""
+    for path in _walk_python_files():
+        rel = path.relative_to(REPO_ROOT)
+        assert rel.parts[0] == "qtf"
