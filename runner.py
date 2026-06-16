@@ -57,14 +57,49 @@ def extract_ca(coords, labels):
 
 def safe_append(path: Path, row: dict, fieldnames: list[str]) -> None:
     """File-locked CSV append so 400 concurrent jobs don't corrupt the file."""
-    write_header = not path.exists() or path.stat().st_size == 0
+    # Acquire the lock BEFORE checking whether a header is needed so two
+    # jobs that start simultaneously cannot both see an empty file and
+    # both write a duplicate header row.
     with open(path, "a", newline="") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
+        write_header = path.stat().st_size == 0
         w = csv.DictWriter(fh, fieldnames=fieldnames)
         if write_header:
             w.writeheader()
         w.writerow(row)
         fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def sort_csv(path: Path, sort_key: str) -> None:
+    """Re-sort a shared CSV in-place by *sort_key* (ascending, NaN last).
+
+    File-locked so concurrent jobs cannot read a half-written file.
+    The last job to finish leaves the file fully sorted.
+    """
+    if not path.exists() or path.stat().st_size == 0:
+        return
+    with open(path, "r+", newline="") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            reader = csv.DictReader(fh)
+            rows = list(reader)
+            fieldnames = reader.fieldnames or []
+            if not rows or sort_key not in fieldnames:
+                return
+            rows.sort(
+                key=lambda r: (
+                    float("inf")
+                    if r.get(sort_key, "nan") in ("nan", "", "NaN")
+                    else float(r[sort_key])
+                )
+            )
+            fh.seek(0)
+            fh.truncate()
+            writer = csv.DictWriter(fh, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -110,7 +145,7 @@ def main() -> None:
     log.info("Scout done | best_start_energy=%.4f", best_e)
 
     # ── Fold ──────────────────────────────────────────────────────────────────
-    coords, labels, bonds, tracker, final_params, final_energy = folder.fold(
+    coords, labels, bonds, tracker, final_params, final_energy, _best_snapshots = folder.fold(
         max_iter=args.max_iter,
         initial_params=init_params,
     )
@@ -164,6 +199,12 @@ def main() -> None:
         "n_true_ca":     len(true_ca),
         "wall_s":        f"{elapsed:.1f}",
     }, rmsd_fields)
+
+    # ── Sort CSVs so the final files are ordered regardless of job finish order ─
+    # Each job re-sorts after appending; the last job to finish leaves the files
+    # fully sorted across all 400 replicas.
+    sort_csv(rmsd_path, "rmsd_ca_A")
+    sort_csv(energy_path, "energy")
 
     log.info("Done. Results written to %s", outdir)
 
