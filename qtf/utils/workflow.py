@@ -257,6 +257,11 @@ def compute_qtf_angle_vector(
     folder: QuantumBiophysicsFolder,
     chi_mode: str = "all",
 ) -> Tuple[np.ndarray, Dict[str, float]]:
+    if md is None:
+        raise ImportError(
+            "mdtraj is required for compute_qtf_angle_vector. "
+            "Install it with: pip install 'qtf[workflows]'"
+        )
     traj = md.load(trimmed_pdb)
     topo = traj.topology
 

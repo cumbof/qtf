@@ -222,6 +222,11 @@ class EnsembleFoldingManager:
         for i, replica_seed in tasks:
             logger.info("Replica %d/%d (seed=%d)", i + 1, n_runs, replica_seed)
 
+            # Reset per-run mutable state so bleed-through between replicas
+            # cannot affect energy terms or tracker logs for subsequent runs.
+            self.folder.tracker = None
+            self.folder.last_energy_terms = {}
+
             try:
                 start_params = self.folder.get_smart_initialization(
                     n_attempts=scout_attempts, seed=replica_seed,

@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 import os, time, json, argparse
 from datetime import datetime
 

@@ -551,6 +551,13 @@ class QuantumBiophysicsFolder:
         unphysical peptide twists.
         """
         mapped = np.asarray(angle_vector, dtype=float).copy()
+        if len(mapped) != len(self.dof_map):
+            logger.warning(
+                "_map_angle_vector_to_physical_ranges: angle_vector length %d "
+                "does not match dof_map length %d; only the first %d entries "
+                "will be remapped",
+                len(mapped), len(self.dof_map), min(len(mapped), len(self.dof_map)),
+            )
         for j, dof in enumerate(self.dof_map[:len(mapped)]):
             if str(dof.get("type")) == "omega":
                 raw = mapped[j]
@@ -919,83 +926,85 @@ class QuantumBiophysicsFolder:
             self._ensure_openmm()
             coords, labels, _ = self.build_full_structure(angle_vec)
             input_pdb = self._build_openmm_input_pdb(coords, labels)
-            with tempfile.TemporaryDirectory(prefix="qtf_openmm_") as workdir:
-                prepared_pdb = os.path.join(workdir, "prepared_input.pdb")
-                minimized_pdb = os.path.join(workdir, "minimized.pdb")
-                result = {
-                    "openmm_status": "not_run",
-                    "openmm_message": "",
-                    "openmm_workdir": workdir,
-                    "openmm_prepared_pdb_path": prepared_pdb,
-                    "openmm_minimized_full_pdb_path": "",
-                    "openmm_potential_kj_mol": np.nan,
-                    "openmm_potential_kcal_mol": np.nan,
-                    "openmm_converged": False,
-                    "openmm_final_max_force": np.nan,
-                }
+            try:
+                with tempfile.TemporaryDirectory(prefix="qtf_openmm_") as workdir:
+                    prepared_pdb = os.path.join(workdir, "prepared_input.pdb")
+                    minimized_pdb = os.path.join(workdir, "minimized.pdb")
+                    result = {
+                        "openmm_status": "not_run",
+                        "openmm_message": "",
+                        "openmm_workdir": workdir,
+                        "openmm_prepared_pdb_path": prepared_pdb,
+                        "openmm_minimized_full_pdb_path": "",
+                        "openmm_potential_kj_mol": np.nan,
+                        "openmm_potential_kcal_mol": np.nan,
+                        "openmm_converged": False,
+                        "openmm_final_max_force": np.nan,
+                    }
 
-                qtf_gromacs.prepare_pdb_for_gromacs(input_pdb, Path(prepared_pdb))
-                pdb = _PDBFile(str(prepared_pdb))
-                modeller = _Modeller(pdb.topology, pdb.positions)
-                forcefield = _ForceField(self.openmm_forcefield)
-                modeller.addHydrogens(forcefield, pH=float(self.openmm_ph))
-                system = forcefield.createSystem(
-                    modeller.topology,
-                    nonbondedMethod=_NoCutoff,
-                    constraints=_HBonds,
-                    rigidWater=False,
-                    removeCMMotion=False,
-                )
-                integrator = _mm.VerletIntegrator(1.0 * _unit.femtoseconds)
-                platform_name = (self.openmm_platform or "CPU").strip() or "CPU"
-                try:
-                    platform = _mm.Platform.getPlatformByName(platform_name)
-                except Exception:
-                    platform = _mm.Platform.getPlatform(0)
-                context = _mm.Context(system, integrator, platform)
-                context.setPositions(modeller.positions)
-
-                if self.openmm_do_minimize:
-                    _mm.LocalEnergyMinimizer.minimize(
-                        context,
-                        tolerance=float(self.openmm_tolerance) * _unit.kilojoule_per_mole / _unit.nanometer,
-                        maxIterations=int(self.openmm_max_iterations),
+                    qtf_gromacs.prepare_pdb_for_gromacs(input_pdb, Path(prepared_pdb))
+                    pdb = _PDBFile(str(prepared_pdb))
+                    modeller = _Modeller(pdb.topology, pdb.positions)
+                    forcefield = _ForceField(self.openmm_forcefield)
+                    modeller.addHydrogens(forcefield, pH=float(self.openmm_ph))
+                    system = forcefield.createSystem(
+                        modeller.topology,
+                        nonbondedMethod=_NoCutoff,
+                        constraints=_HBonds,
+                        rigidWater=False,
+                        removeCMMotion=False,
                     )
+                    integrator = _mm.VerletIntegrator(1.0 * _unit.femtoseconds)
+                    platform_name = (self.openmm_platform or "CPU").strip() or "CPU"
+                    try:
+                        platform = _mm.Platform.getPlatformByName(platform_name)
+                    except Exception:
+                        platform = _mm.Platform.getPlatform(0)
+                    context = _mm.Context(system, integrator, platform)
+                    context.setPositions(modeller.positions)
 
-                state = context.getState(getEnergy=True, getPositions=True)
-                potential_kj = float(state.getPotentialEnergy().value_in_unit(_unit.kilojoule_per_mole))
-                result["openmm_status"] = "ok"
-                result["openmm_potential_kj_mol"] = potential_kj
-                result["openmm_potential_kcal_mol"] = float(potential_kj / 4.184)
-                result["openmm_converged"] = bool(self.openmm_do_minimize)
-                if self.openmm_do_minimize:
-                    with open(minimized_pdb, "w") as handle:
-                        _PDBFile.writeFile(modeller.topology, state.getPositions(), handle)
-                    result["openmm_minimized_full_pdb_path"] = minimized_pdb
-                else:
-                    result["openmm_minimized_full_pdb_path"] = ""
+                    if self.openmm_do_minimize:
+                        _mm.LocalEnergyMinimizer.minimize(
+                            context,
+                            tolerance=float(self.openmm_tolerance) * _unit.kilojoule_per_mole / _unit.nanometer,
+                            maxIterations=int(self.openmm_max_iterations),
+                        )
 
-                terms["openmm_potential_kj_mol"] = potential_kj
-                terms["openmm_potential_kcal_mol"] = float(potential_kj / 4.184)
-                terms["total"] = float(potential_kj)
-                terms["openmm_status_ok"] = 1.0
-                terms["openmm_minimize"] = 1.0 if self.openmm_do_minimize else 0.0
-                terms["openmm_error"] = 0.0
-                terms["openmm_forcefield_hash"] = float(abs(hash(self.openmm_forcefield)) % 1000000)
-                terms["openmm_platform_hash"] = float(abs(hash(platform_name)) % 1000000)
-                terms["openmm_max_iterations"] = float(self.openmm_max_iterations)
-                terms["openmm_tolerance"] = float(self.openmm_tolerance)
-                terms["openmm_ph"] = float(self.openmm_ph)
-                terms["openmm_status_hash"] = float(abs(hash(str(result.get("openmm_status", "")))) % 1000000)
-                terms["openmm_message_hash"] = float(abs(hash(str(result.get("openmm_message", "")))) % 1000000)
+                    state = context.getState(getEnergy=True, getPositions=True)
+                    potential_kj = float(state.getPotentialEnergy().value_in_unit(_unit.kilojoule_per_mole))
+                    result["openmm_status"] = "ok"
+                    result["openmm_potential_kj_mol"] = potential_kj
+                    result["openmm_potential_kcal_mol"] = float(potential_kj / 4.184)
+                    result["openmm_converged"] = bool(self.openmm_do_minimize)
+                    if self.openmm_do_minimize:
+                        with open(minimized_pdb, "w") as handle:
+                            _PDBFile.writeFile(modeller.topology, state.getPositions(), handle)
+                        result["openmm_minimized_full_pdb_path"] = minimized_pdb
+                    else:
+                        result["openmm_minimized_full_pdb_path"] = ""
 
-                if result.get("openmm_minimized_full_pdb_path"):
-                    self._update_openmm_output_from_pdb(str(result["openmm_minimized_full_pdb_path"]))
-                else:
-                    self._last_openmm_coords = coords
-                    self._last_openmm_labels = labels
+                    terms["openmm_potential_kj_mol"] = potential_kj
+                    terms["openmm_potential_kcal_mol"] = float(potential_kj / 4.184)
+                    terms["total"] = float(potential_kj)
+                    terms["openmm_status_ok"] = 1.0
+                    terms["openmm_minimize"] = 1.0 if self.openmm_do_minimize else 0.0
+                    terms["openmm_error"] = 0.0
+                    terms["openmm_forcefield_hash"] = float(abs(hash(self.openmm_forcefield)) % 1000000)
+                    terms["openmm_platform_hash"] = float(abs(hash(platform_name)) % 1000000)
+                    terms["openmm_max_iterations"] = float(self.openmm_max_iterations)
+                    terms["openmm_tolerance"] = float(self.openmm_tolerance)
+                    terms["openmm_ph"] = float(self.openmm_ph)
+                    terms["openmm_status_hash"] = float(abs(hash(str(result.get("openmm_status", "")))) % 1000000)
+                    terms["openmm_message_hash"] = float(abs(hash(str(result.get("openmm_message", "")))) % 1000000)
 
-                total = potential_kj
+                    if result.get("openmm_minimized_full_pdb_path"):
+                        self._update_openmm_output_from_pdb(str(result["openmm_minimized_full_pdb_path"]))
+                    else:
+                        self._last_openmm_coords = coords
+                        self._last_openmm_labels = labels
+
+                    total = potential_kj
+            finally:
                 try:
                     os.unlink(input_pdb)
                 except OSError:
@@ -1100,6 +1109,11 @@ class QuantumBiophysicsFolder:
             idx = int(bs, 2)
             pvec[idx] += c / total
 
+        # CDF over the linear basis-state index (0 … 2^n-1) maps each
+        # cumulative probability to a torsion angle in (-π, π].  The
+        # assignment of basis states to torsion-angle slots is arbitrary
+        # and has no physical significance — it is just a deterministic
+        # way to extract n_angles numbers from the shot distribution.
         cdf = np.cumsum(pvec)
         angles = 2.0 * np.pi * cdf - np.pi
         return self._map_angle_vector_to_physical_ranges(angles[: self.total_angles])
@@ -1291,6 +1305,11 @@ class QuantumBiophysicsFolder:
 
                     idx_c = sc_map.get(p_name, -1)
                     if idx_c == -1:
+                        logger.warning(
+                            "Sidechain parent '%s' not found in sc_map for atom '%s' "
+                            "at residue %d (%s); falling back to last coord",
+                            p_name, name, i, self.sequence[i],
+                        )
                         idx_c = len(coords) - 1
                     c = coords[idx_c]
 
@@ -1748,7 +1767,7 @@ class QuantumBiophysicsFolder:
         """
         ax = abs(x)
         if ax <= delta:
-            return float(x * x)
+            return float(ax * ax)
         return float(2.0 * delta * ax - delta * delta)
 
     def _calculate_geometry_integrity(
@@ -1922,6 +1941,12 @@ class QuantumBiophysicsFolder:
         if k <= 0:
             return None
 
+        # Store (-energy, counter, params) so Python's min-heap gives us
+        # (-energy) at the root = most negative = highest actual energy = WORST
+        # of the K kept.  The condition `-value > _heap[0][0]` fires when the
+        # new energy is lower (better) than the current worst, evicting the
+        # worst and inserting the better item — correctly maintaining the K
+        # lowest-energy parameter vectors.
         _heap: list[tuple[float, int, np.ndarray]] = []
         _counter: int = 0
 
@@ -1933,13 +1958,13 @@ class QuantumBiophysicsFolder:
                     heapq.heappush(_heap, (-value, _counter, params.copy()))
                     _counter += 1
                 elif -value > _heap[0][0]:
+                    # New energy is better (lower) than the worst currently kept.
                     heapq.heappop(_heap)
                     heapq.heappush(_heap, (-value, _counter, params.copy()))
                     _counter += 1
             return value
 
         _tracker._heap = _heap
-        return _tracker
         return _tracker
 
     def fold(
