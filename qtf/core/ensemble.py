@@ -19,7 +19,6 @@ import tempfile
 from typing import TYPE_CHECKING
 
 import numpy as np
-from scipy.optimize import minimize
 
 from qtf.core.folder import QuantumBiophysicsFolder
 
@@ -34,54 +33,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _prime_circuit(
-    folder: QuantumBiophysicsFolder,
-    target_type: str = "helix",
-    seed: int = 42,
-) -> np.ndarray:
-    """Pre-optimise *folder*'s circuit to produce secondary-structure angles.
-
-    This is the same logic as :meth:`EnsembleFoldingManager.prime_circuit`
-    but operates on an arbitrary folder instance (needed because the method
-    form is tied to the manager's ``self.folder``).
-
-    Returns the optimised parameter vector.
-    """
-    rng = np.random.default_rng(seed)
-
-    if target_type == "helix":
-        t_phi, t_psi = np.deg2rad(-60.0), np.deg2rad(-45.0)
-    elif target_type == "sheet":
-        t_phi, t_psi = np.deg2rad(-135.0), np.deg2rad(135.0)
-    else:
-        return rng.uniform(-0.8, 0.8, folder.n_params)
-
-    targets = np.zeros(folder.total_angles)
-    masks = np.zeros(folder.total_angles)
-
-    for i, dof in enumerate(folder.dof_map):
-        if dof["type"] == "phi":
-            targets[i] = t_phi
-            masks[i] = 1.0
-        elif dof["type"] == "psi":
-            targets[i] = t_psi
-            masks[i] = 1.0
-
-    def priming_cost(params: np.ndarray) -> float:
-        curr = folder._get_angles(params)
-        diff = (curr - targets + np.pi) % (2 * np.pi) - np.pi
-        return float(np.sum((diff * masks) ** 2))
-
-    init_guess = rng.uniform(-0.1, 0.1, folder.n_params)
-    res = minimize(priming_cost, init_guess, method="COBYLA", options={"maxiter": 200})
-    return res.x
-
-
 def _run_one_replica(
     folder_kwargs: dict,
     replica_seed: int,
     index: int,
-    strat: str,
     max_iter: int,
     scout_attempts: int,
     top_k_snapshots: int = 0,
@@ -93,12 +48,9 @@ def _run_one_replica(
     """
     folder = QuantumBiophysicsFolder(**folder_kwargs)
 
-    if strat != "random":
-        start_params = _prime_circuit(folder, target_type=strat, seed=replica_seed)
-    else:
-        start_params = folder.get_smart_initialization(
-            n_attempts=scout_attempts, seed=replica_seed
-        )
+    start_params = folder.get_smart_initialization(
+        n_attempts=scout_attempts, seed=replica_seed
+    )
 
     coords, labels, bonds, tracker, final_params, final_energy, best_snapshots = folder.fold(
         max_iter=max_iter, initial_params=start_params, top_k_snapshots=top_k_snapshots,
@@ -109,7 +61,7 @@ def _run_one_replica(
     return {
         "id": index,
         "seed": replica_seed,
-        "type": strat,
+        "type": "random",
         "energy": final_energy,
         "energy_terms": energy_terms,
         "coords": coords,
@@ -153,73 +105,11 @@ class EnsembleFoldingManager:
     # Ensemble run
     # ------------------------------------------------------------------
 
-    def prime_circuit(self, target_type="helix", seed=42, overwrite: bool = False):
-        """Smart initialization: pre-optimize the circuit to output secondary
-        structure angles.
-
-        Parameters
-        ----------
-        target_type:
-            ``'helix'`` (default, ``phi=-60``, ``psi=-45``),
-            ``'sheet'`` (``phi=-135``, ``psi=135``), or anything else in
-            which case a uniform random parameter vector is returned
-            directly (no COBYLA priming cost is incurred).
-        seed:
-            Seed for the priming optimiser's random initial guess.
-        overwrite:
-            If ``False`` (the default), the call is a no-op when the
-            folder already has a non-``None`` ``circuit_parameters``
-            attribute — the existing value is returned untouched. Pass
-            ``overwrite=True`` to force re-priming.
-
-        Returns
-        -------
-        numpy.ndarray
-            The primed (or pre-existing) circuit-parameter vector of shape
-            ``(self.folder.n_params,)``.
-        """
-        existing = getattr(self.folder, "circuit_parameters", None)
-        if existing is not None and not overwrite:
-            logger.info(
-                "Skipping prime_circuit: folder.circuit_parameters is already set; "
-                "pass overwrite=True to force re-priming"
-            )
-            return existing
-
-        logger.info("--- PRIMING CIRCUIT FOR %s ---", target_type.upper())
-
-        rng = np.random.default_rng(seed)
-
-        if target_type == 'helix':
-            t_phi, t_psi = np.deg2rad(-60.0), np.deg2rad(-45.0)
-        elif target_type == 'sheet':
-            t_phi, t_psi = np.deg2rad(-135.0), np.deg2rad(135.0)
-        else:
-            return rng.uniform(-0.8, 0.8, self.folder.n_params)
-
-        targets = np.zeros(self.folder.total_angles)
-        masks = np.zeros(self.folder.total_angles)
-
-        for i, dof in enumerate(self.folder.dof_map):
-            if dof['type'] == 'phi': targets[i] = t_phi; masks[i] = 1.0
-            elif dof['type'] == 'psi': targets[i] = t_psi; masks[i] = 1.0
-
-        def priming_cost(params):
-            curr = self.folder._get_angles(params)
-            diff = (curr - targets + np.pi) % (2 * np.pi) - np.pi
-            return float(np.sum((diff * masks)**2))
-
-        init_guess = rng.uniform(-0.1, 0.1, self.folder.n_params)
-        res = minimize(priming_cost, init_guess, method='COBYLA', options={'maxiter': 200})
-        logger.info("  > Priming Error: %.4f", res.fun)
-        return res.x
-
     def run_ensemble(
         self,
         n_runs: int = 5,
         max_iter: int = 2000,
         scout_attempts: int = 50,
-        prime_strategy: str = "random",
         checkpoint_path: str | None = None,
         max_workers: int = 1,
         top_k_snapshots: int = 0,
@@ -247,10 +137,6 @@ class EnsembleFoldingManager:
         scout_attempts:
             Number of random parameter sets evaluated during basin-hopping
             to find a good starting point for each replica.
-        prime_strategy:
-            ``"random"`` (default), ``"mixed"``, ``"helix"``, or ``"sheet"``.
-            ``"mixed"`` cycles through ``helix`` / ``sheet`` / ``random``
-            every 3 replicas.
         checkpoint_path:
             Optional path to a JSON file. When provided, a JSON-safe snapshot
             of the successfully completed replicas is written to disk after
@@ -276,21 +162,11 @@ class EnsembleFoldingManager:
             hashlib.sha256(self.folder.sequence.encode()).hexdigest(), 16
         ) % (2 ** 32)
 
-        # Build task list
-        tasks: list[tuple[int, int, str]] = []
+        # Build task list — each replica uses a unique deterministic seed
+        tasks: list[tuple[int, int]] = []
         for i in range(n_runs):
             replica_seed = base_seed + i
-
-            strat = prime_strategy
-            if prime_strategy == "mixed":
-                if i % 3 == 0:
-                    strat = "helix"
-                elif i % 3 == 1:
-                    strat = "sheet"
-                else:
-                    strat = "random"
-
-            tasks.append((i, replica_seed, strat))
+            tasks.append((i, replica_seed))
 
         # Extract folder kwargs so each worker can build its own folder
         folder_kwargs = {
@@ -330,7 +206,7 @@ class EnsembleFoldingManager:
 
     def _run_sequential(
         self,
-        tasks: list[tuple[int, int, str]],
+        tasks: list[tuple[int, int]],
         folder_kwargs: dict,
         max_iter: int,
         scout_attempts: int,
@@ -343,18 +219,13 @@ class EnsembleFoldingManager:
         so patches and mocks applied in tests are visible.  It is also
         marginally faster for single-replica runs.
         """
-        for i, replica_seed, strat in tasks:
+        for i, replica_seed in tasks:
             logger.info("Replica %d/%d (seed=%d)", i + 1, n_runs, replica_seed)
 
             try:
-                if strat != "random":
-                    start_params = self.prime_circuit(
-                        target_type=strat, seed=replica_seed,
-                    )
-                else:
-                    start_params = self.folder.get_smart_initialization(
-                        n_attempts=scout_attempts, seed=replica_seed,
-                    )
+                start_params = self.folder.get_smart_initialization(
+                    n_attempts=scout_attempts, seed=replica_seed,
+                )
 
                 coords, labels, bonds, tracker, final_params, final_energy, best_snapshots = (
                     self.folder.fold(
@@ -386,7 +257,7 @@ class EnsembleFoldingManager:
                 {
                     "id": i,
                     "seed": replica_seed,
-                    "type": strat,
+                    "type": "random",
                     "energy": final_energy,
                     "energy_terms": energy_terms,
                     "coords": coords,
@@ -405,7 +276,7 @@ class EnsembleFoldingManager:
 
     def _run_parallel(
         self,
-        tasks: list[tuple[int, int, str]],
+        tasks: list[tuple[int, int]],
         folder_kwargs: dict,
         max_iter: int,
         scout_attempts: int,
@@ -419,13 +290,12 @@ class EnsembleFoldingManager:
         fut_to_idx: dict[concurrent.futures.Future, int] = {}
         executor = ProcessPoolExecutor(max_workers=n_workers)
         try:
-            for i, replica_seed, strat in tasks:
+            for i, replica_seed in tasks:
                 fut = executor.submit(
                     _run_one_replica,
                     folder_kwargs,
                     replica_seed,
                     i,
-                    strat,
                     max_iter,
                     scout_attempts,
                     top_k_snapshots,

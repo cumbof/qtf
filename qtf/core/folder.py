@@ -654,11 +654,12 @@ class QuantumBiophysicsFolder:
         if not _OPENMM_AVAILABLE:
             raise ImportError(
                 "OpenMM is required for the 'openmm' stage-3 backend but it is "
-                "not importable. Install it with `pip install \"qtf[workflows]\"` "
-                "(or `conda install -c conda-forge openmm`); if OpenMM is already "
-                "installed, the import failure means the install is broken (CUDA "
-                "mismatch, missing shared library, failed C++ extension load, etc.) "
-                "and the original error was logged at module-import time."
+                "not importable. Install it with `conda install -c conda-forge openmm` "
+                "(pip installation is not supported — the C++ backend must be compiled "
+                "for your platform by conda); if OpenMM is already installed, the import "
+                "failure means the install is broken (CUDA mismatch, missing shared "
+                "library, failed C++ extension load, etc.) and the original error was "
+                "logged at module-import time."
             )
         self._openmm_ready = True
 

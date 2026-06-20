@@ -61,9 +61,6 @@ def main(argv=None):
                         help='how many lowest-energy ensemble models to compare/save (default 1)')
     parser.add_argument('--top_frac', default=None, type=float,
                         help='fraction (0-1] of lowest-energy models to compare/save; overrides --top_k if set')
-    parser.add_argument('--prime_strategy', default="Random",
-                        choices=["Random", "mixed", "Helix", "Sheet"],
-                        help='prime strategy for initialization')
     parser.add_argument('--maxiter', default=2000, type=int, help='max iterations for each trajectory')
     parser.add_argument('--energy_backend', default='custom', choices=['custom', 'rosetta', 'openmm'],
                         help='energy backend used for all optimization stages')
@@ -104,7 +101,6 @@ def main(argv=None):
     reference_pdb_path = args.reference_pdb
     average_reference_backbone_mode = args.average_reference_backbone
     ensemble_size = args.ensemble_size
-    prime_strategy = args.prime_strategy.lower()
     top_k = args.top_k
     top_frac = args.top_frac
 
@@ -126,7 +122,7 @@ def main(argv=None):
     )
 
     manager = EnsembleFoldingManager(folder)
-    manager.run_ensemble(n_runs=ensemble_size, max_iter=args.maxiter, prime_strategy=prime_strategy,
+    manager.run_ensemble(n_runs=ensemble_size, max_iter=args.maxiter,
                          top_k_snapshots=args.top_k_snapshots)
 
     ranked_results = manager.get_results(ranked=True)
@@ -360,7 +356,6 @@ def main(argv=None):
         "Sequence": sequence,
         "mode": args.mode,
         "Reference Structure": ((reference_pdb_path or reference_structure_pdb_id) if (reference_pdb_path or reference_structure_pdb_id) is not None and args.mode != "predict_only" else None),
-        "Prime Strategy": prime_strategy,
         "rmsd_mode": args.rmsd_mode,
         "rmsd_residue_scope": args.rmsd_residue_scope,
         "energy_backend": args.energy_backend,

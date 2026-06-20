@@ -153,7 +153,7 @@ Optional extras:
 |-------|-------------|----------|
 | `[dev]` | `pytest`, `pytest-cov`, `ruff`, `mypy` | Development, linting, testing |
 | `[notebook]` | `jupyter`, `nbformat` | Running `QTF.ipynb` |
-| `[workflows]` | `matplotlib`, `mdtraj`, `biopython`, `openmm` | Energy backends, PDB I/O, minimisation |
+| `[workflows]` | `matplotlib`, `mdtraj`, `biopython` | Energy backends, PDB I/O, minimisation |
 | `[gpu]` | `numba`, `qiskit-aer-gpu` | GPU-accelerated classical & quantum simulation (Linux x86_64) |
 | `[docs]` | `mkdocs`, `mkdocs-material`, `mkdocstrings[python]` | Building this documentation site
 
@@ -165,6 +165,12 @@ Optional extras:
 > ```bash
 > pip install pyrosetta --find-links https://west.rosettacommons.org/pyrosetta/quarterly/release
 > ```
+>
+> **OpenMM** (`energy_backend="openmm"`) must be installed via `conda`, not `pip`, to ensure that its C++ backend is compiled correctly for your platform:
+> ```bash
+> conda install -c conda-forge openmm
+> ```
+> Installing OpenMM with `pip` may result in a broken package that fails to import (mismatched CUDA runtime, missing shared libraries, or failed C++ extension load).
 >
 > **GROMACS** (used by `qtf-relax` and `gromacs_postprocess_structure()`) must be installed at the system level. See the [GROMACS download page](https://www.gromacs.org/downloads) for platform-specific instructions.
 
@@ -225,7 +231,6 @@ qtf-fold --predict YYDPETGTWY --ensemble_size 5
 | `--predict SEQ` | required | Target amino acid sequence |
 | `--ensemble_size N` | `3` | Number of independent replicas |
 | `--maxiter N` | `2000` | Max optimiser iterations per stage |
-| `--prime_strategy` | `Random` | `Random` \| `Helix` \| `Sheet` \| `mixed` |
 | `--reference_structure PDB_ID` | None | RCSB PDB ID for RMSD comparison |
 | `--reference_pdb PATH` | None | Local PDB file for RMSD comparison |
 | `--rmsd_mode` | `ca` | `ca` (Cα only) \| `heavy` (all heavy atoms) |
@@ -636,16 +641,7 @@ The three terms are:
 
 ### Initialisation Strategy
 
-Each replica's starting point is determined by a `prime_strategy`:
-
-| Strategy | Description |
-|----------|-------------|
-| `"random"` (default) | `scout_attempts` random parameter vectors sampled from [−0.8, 0.8]^P; the lowest-energy one is used |
-| `"helix"` | Circuit is pre-optimised to output canonical α-helix torsions (φ ≈ −60°, ψ ≈ −45°) before the main optimisation |
-| `"sheet"` | Circuit is pre-optimised to output β-sheet torsions (φ ≈ −135°, ψ ≈ 135°) |
-| `"mixed"` | Replicas are split evenly between helix and sheet priming |
-
-Seeds are derived deterministically from the protein sequence using SHA-256:
+Each replica's starting point is determined by random basin-hopping: `scout_attempts` random parameter vectors are sampled from [−0.8, 0.8]^P and the one with the lowest energy is used as the initial point for the three-stage optimiser. Seeds are derived deterministically from the protein sequence using SHA-256:
 
 ```python
 base_seed     = int(sha256(sequence.encode("utf-8")).hexdigest(), 16) % 2**32
@@ -669,7 +665,6 @@ manager.run_ensemble(
     n_runs=10,                # run 10 independent replicas
     max_iter=3000,            # maximum optimiser iterations per stage, per replica
     scout_attempts=100,       # basin-hopping breadth (higher = better start but slower)
-    prime_strategy="random",  # "random" | "helix" | "sheet" | "mixed"
 )
 
 # Retrieve results sorted by ascending final energy

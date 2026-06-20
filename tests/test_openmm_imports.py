@@ -75,9 +75,9 @@ def test_load_openmm_reraises_os_error(monkeypatch):
         folder._load_openmm()
 
 
-def test_ensure_openmm_raises_import_error_with_pip_hint(monkeypatch):
+def test_ensure_openmm_raises_import_error_with_conda_hint(monkeypatch):
     """When openmm is unavailable, ``_ensure_openmm`` raises ``ImportError``
-    pointing the user at ``pip install qtf[workflows]``."""
+    pointing the user at ``conda install -c conda-forge openmm``."""
     from qtf.core import folder
 
     # Simulate "openmm is missing" without re-running the module-level
@@ -89,5 +89,5 @@ def test_ensure_openmm_raises_import_error_with_pip_hint(monkeypatch):
     folder_instance = folder.QuantumBiophysicsFolder("GA")
     assert folder_instance._openmm_ready is False
 
-    with pytest.raises(ImportError, match=r"pip install .qtf\[workflows\]"):
+    with pytest.raises(ImportError, match=r"conda install -c conda-forge openmm"):
         folder_instance._ensure_openmm()
