@@ -5,8 +5,11 @@ Each replica uses its SLURM array ID as the random seed so every job
 explores a different part of the energy landscape.
 
 Outputs (per energy backend, e.g. results/rosetta/):
-  <outdir>/<energy_backend>/rmsds.csv      — one row per replica
-  <outdir>/<energy_backend>/energies.csv   — one row per optimiser step
+  <outdir>/<energy_backend>/rmsds.csv               — one row per replica
+  <outdir>/<energy_backend>/energies.csv            — one row per optimiser step
+  <outdir>/<energy_backend>/best_k/                 — best-K snapshot PDBs (when --top_k > 0)
+    replica_<N>_rank<rank>_e<energy>.pdb
+  <outdir>/<energy_backend>/best_k_index.csv        — index of all kept snapshots across replicas
 """
 
 from __future__ import annotations
@@ -114,6 +117,9 @@ def main() -> None:
     parser.add_argument("--outdir",         type=str, default="results")
     parser.add_argument("--energy_backend", type=str, default="custom",
                         choices=["custom", "rosetta", "openmm"])
+    parser.add_argument("--top_k",          type=int, default=5,
+                        help="keep the best-K lowest-energy snapshots per replica "
+                             "(0 = disabled, written to <outdir>/<backend>/best_k/)")
     args = parser.parse_args()
 
     # Results are stored in a per-backend subdirectory so runs for different
@@ -145,9 +151,10 @@ def main() -> None:
     log.info("Scout done | best_start_energy=%.4f", best_e)
 
     # ── Fold ──────────────────────────────────────────────────────────────────
-    coords, labels, bonds, tracker, final_params, final_energy, _best_snapshots = folder.fold(
+    coords, labels, bonds, tracker, final_params, final_energy, best_snapshots = folder.fold(
         max_iter=args.max_iter,
         initial_params=init_params,
+        top_k_snapshots=args.top_k,
     )
 
     elapsed = time.perf_counter() - t0
@@ -199,6 +206,38 @@ def main() -> None:
         "n_true_ca":     len(true_ca),
         "wall_s":        f"{elapsed:.1f}",
     }, rmsd_fields)
+
+    # ── Best-K snapshots ──────────────────────────────────────────────────────
+    if best_snapshots:
+        snap_dir = outdir / "best_k"
+        snap_dir.mkdir(parents=True, exist_ok=True)
+
+        index_path   = outdir / "best_k_index.csv"
+        index_fields = ["replica_id", "rank", "energy", "pdb_path"]
+
+        for rank, snap in enumerate(best_snapshots, start=1):
+            e_str  = f"{snap['energy']:.4f}".replace("-", "m")
+            pdb_name = f"replica_{args.replica_id:04d}_rank{rank}_e{e_str}.pdb"
+            pdb_path = snap_dir / pdb_name
+            folder.save_pdb(
+                snap["coords"],
+                snap["labels"],
+                filename=str(pdb_path),
+                energy=snap["energy"],
+                remarks=[
+                    f"Best snapshot rank {rank} for replica {args.replica_id} "
+                    f"(E={snap['energy']:.4f}, backend={args.energy_backend})"
+                ],
+                include_hydrogens=False,
+            )
+            safe_append(index_path, {
+                "replica_id": args.replica_id,
+                "rank":       rank,
+                "energy":     f"{snap['energy']:.6f}",
+                "pdb_path":   str(pdb_path),
+            }, index_fields)
+
+        log.info("Best-K snapshots (K=%d) written to %s", len(best_snapshots), snap_dir)
 
     # ── Sort CSVs so the final files are ordered regardless of job finish order ─
     # Each job re-sorts after appending; the last job to finish leaves the files
