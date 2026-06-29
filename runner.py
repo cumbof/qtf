@@ -238,12 +238,17 @@ def main() -> None:
             }, index_fields)
 
         log.info("Best-K snapshots (K=%d) written to %s", len(best_snapshots), snap_dir)
+        # Mirror to stdout so the message is also visible in the SLURM .out
+        # file (logging.basicConfig sends INFO records to stderr).
+        print(f"Best-K snapshots (K={len(best_snapshots)}) written to {snap_dir}", flush=True)
 
     # ── Sort CSVs so the final files are ordered regardless of job finish order ─
     # Each job re-sorts after appending; the last job to finish leaves the files
-    # fully sorted across all 400 replicas.
+    # fully sorted across all replicas.
     sort_csv(rmsd_path, "rmsd_ca_A")
     sort_csv(energy_path, "energy")
+    if best_snapshots:
+        sort_csv(outdir / "best_k_index.csv", "energy")
 
     log.info("Done. Results written to %s", outdir)
 
