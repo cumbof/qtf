@@ -17,21 +17,7 @@
 
 set -euo pipefail
 
-# Make `conda activate` work inside a non-interactive SLURM shell.
-for candidate in \
-    "$HOME/miniconda3/etc/profile.d/conda.sh" \
-    "$HOME/anaconda3/etc/profile.d/conda.sh" \
-    "/opt/conda/etc/profile.d/conda.sh"; do
-    if [ -f "$candidate" ]; then
-        # shellcheck source=/dev/null
-        source "$candidate"
-        break
-    fi
-done
-if ! command -v conda >/dev/null 2>&1; then
-    echo "ERROR: conda not found on PATH; cannot activate QTF env." >&2
-    exit 1
-fi
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
 conda activate QTF
 
 mkdir -p logs results/rosetta
@@ -39,7 +25,7 @@ mkdir -p logs results/rosetta
 python runner.py \
     --replica_id      $SLURM_ARRAY_TASK_ID \
     --energy_backend  rosetta \
-    --max_iter        500 \
+    --max_iter        10 \
     --scout           50 \
     --strategy        random \
     --top_k           5 \
