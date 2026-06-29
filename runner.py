@@ -213,7 +213,7 @@ def main() -> None:
         snap_dir.mkdir(parents=True, exist_ok=True)
 
         index_path   = outdir / "best_k_index.csv"
-        index_fields = ["replica_id", "rank", "energy", "pdb_path"]
+        index_fields = ["replica_id", "rank", "energy", "rmsd_ca_A", "pdb_path"]
 
         for rank, snap in enumerate(best_snapshots, start=1):
             e_str  = f"{snap['energy']:.4f}".replace("-", "m")
@@ -230,10 +230,25 @@ def main() -> None:
                 ],
                 include_hydrogens=False,
             )
+
+            # Per-snapshot Cα RMSD vs ground truth (same reference as the
+            # per-replica rmsds.csv above). NaN if ground truth was not
+            # available or the alignment failed.
+            try:
+                if len(true_ca) > 0:
+                    snap_ca = extract_ca(snap["coords"], snap["labels"])
+                    snap_rmsd = kabsch_rmsd(snap_ca, true_ca)
+                else:
+                    snap_rmsd = float("nan")
+            except Exception as exc:
+                log.warning("Snapshot RMSD failed (rank %d): %s", rank, exc)
+                snap_rmsd = float("nan")
+
             safe_append(index_path, {
                 "replica_id": args.replica_id,
                 "rank":       rank,
                 "energy":     f"{snap['energy']:.6f}",
+                "rmsd_ca_A":  f"{snap_rmsd:.4f}" if np.isfinite(snap_rmsd) else "nan",
                 "pdb_path":   str(pdb_path),
             }, index_fields)
 
