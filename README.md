@@ -91,7 +91,7 @@ The quantum circuit acts as a **generative model** (the "Actor"), while a physic
 
   Stage 1 – Collapse   (COBYLA,  high constraint)
   Stage 2 – Refine     (SLSQP,  high constraint)
-  Stage 3 – Relax      (SLSQP,  low constraint)
+  Stage 3 – Relax      (SLSQP,  custom backend only)
 
 ```
 
@@ -381,7 +381,7 @@ For a protein of length L, the degrees of freedom are:
 |------|------------------|-------------|
 | φ (phi) | 1 | N–Cα–C–N backbone dihedral angle |
 | ψ (psi) | 1 | Cα–C–N–Cα backbone dihedral angle |
-| ω (omega) | 0–1 | Peptide plane twist; exposed as an optimisable DOF only for the residue **preceding** a Pro (cis/trans isomerism) |
+| ω (omega) | 0–1 | Peptide plane twist; exposed as one optimisable DOF per peptide bond. Raw values outside the trans window are penalised during optimisation; rebuilt coordinates are clamped to trans geometry. |
 | χ₁–χ₅ | 0–5 (residue-dependent) | Side-chain rotamer angles |
 
 **Side-chain torsion counts by residue:**
@@ -438,13 +438,13 @@ Bond lengths and angles are taken from **Engh & Huber (1991)**, the standard ref
 
 ### Three-Stage Optimisation
 
-Each folding replica runs through a fixed **curriculum** of three optimisation stages that progressively relax the constraints, mimicking a coarse-to-fine annealing strategy:
+Each custom-energy folding replica runs through a **curriculum** of three optimisation stages that progressively relax the constraints, mimicking a coarse-to-fine annealing strategy. Rosetta and OpenMM backends use only Stages 1–2, with the chosen backend applied from the first objective evaluation onward.
 
 | Stage | Optimiser | γ (surface tension) | End-to-end λ | Purpose |
 |-------|-----------|--------------------|-----------|----|
-| 1 — Collapse | COBYLA | 15.0 | 50.0 | Rapid hydrophobic collapse to a globular state |
-| 2 — Refine | SLSQP | 15.0 | 50.0 | Fix local steric clashes while preserving global shape |
-| 3 — Relax | SLSQP | 5.0 | 5.0 | Release constraints; H-bonds and electrostatics define the fold |
+| 1 — Collapse | COBYLA | 15.0 | 8.0 | Rapid hydrophobic collapse to a globular state |
+| 2 — Refine | SLSQP | 15.0 | 8.0 | Fix local steric clashes while preserving global shape |
+| 3 — Relax | SLSQP | 2.5 | 1.5 | Custom backend only; release constraints so H-bonds and electrostatics define the fold |
 
 **COBYLA** (Constrained Optimisation BY Linear Approximations) is derivative-free and well-suited to the noisy, non-convex landscape of Stage 1, where the protein undergoes large conformational changes. **SLSQP** (Sequential Least-SQuares Programming) uses numerically estimated gradients for finer convergence in Stages 2 and 3.
 
@@ -456,14 +456,17 @@ The `LandscapeTracker` object records the energy value at every function evaluat
 
 ### Force Fields
 
-The custom QTF backend uses a single Amber-style partial-charge parameterization:
+The custom QTF backend uses a coarse effective-charge parameterization. Backbone
+and polar heavy-atom values are Amber ff14SB-inspired, but this is not a direct
+all-atom Amber charge table:
 
 | Custom parameterization | Backbone N charge | C=O charges | Notes |
 |-------------|------------------|------------|-------|
-| AMBER ff14SB approx. | −0.42 | +0.60 / −0.57 | Very polar carbonyl; Cα neutral (0.00) |
+| QTF coarse effective charges | −0.42 | +0.60 / −0.57 | Amber ff14SB-inspired heavy-atom values; explicit polar-H charges are folded into parent heavy atoms |
 
 The custom parameterization uses:
 - A common set of ionic/charged-group charges: carboxylate oxygens, guanidinium nitrogens, lysine NZ, etc.
+- Explicit donor hydrogens, when present in the topology, are used geometrically but are electrostatically neutral in the custom scorer; their former charge contribution is represented on the parent heavy atom.
 - The Kyte–Doolittle hydrophobicity scale (independent of partial charges).
 - Bondi van der Waals radii for heavy atoms.
 
@@ -488,7 +491,7 @@ deviation = max(0, |d(Cα_first, Cα_last) − target| − slack)
 E_constraint = λ · deviation²
 ```
 
-`λ` = 50.0 in Stages 1–2, 5.0 in Stage 3 (released to let the protein explore freely).
+`λ` = 8.0 in Stages 1–2, 1.5 in Stage 3 for the custom backend.
 The constraint can be disabled at construction time with `use_e2e_constraint=False`.
 
 #### 2. Implicit Solvent / Hydrophobic Effect (SASA Approximation)
@@ -497,11 +500,11 @@ Hydrophobic carbon atoms (on residues Ala, Val, Leu, Ile, Met, Phe, Trp, Pro, Cy
 
 ```
 w(d)   = σ(−(d − 6.0))           # soft count of neighbours within ~6 Å
-b      = clip(Σ_j w(dᵢⱼ) / 15.0 ,  0, 1)
-E_sasa += γ · 30.0 · (1 − b)     # energy penalty for exposure
+b      = clip(Σ_j w(dᵢⱼ) / 35.0 ,  0, 1)
+E_sasa += γ · 0.7 · 30.0 · (1 − b)     # energy penalty for exposure
 ```
 
-`γ` (the "surface tension") = 15.0 in Stages 1–2 (drives collapse), 5.0 in Stage 3 (allows breathing).
+`γ` (the "surface tension") = 15.0 in Stages 1–2 (drives collapse), 2.5 in Stage 3 (allows breathing).
 
 #### 3. Explicit Hydrogen Bonding (N–H···O=C)
 
@@ -520,10 +523,10 @@ For each eligible carbonyl oxygen O (from a residue at least 2 away), the potent
 The energy contribution is:
 
 ```
-E_hbond = −25.0 · exp(−(d_HO − 2.0)² / 0.5) · (|cos θ| − 0.4) · 2.0
+E_hbond = −50.0 · 0.75 · exp(−(d_HO − 2.0)² / 0.5) · (|cos θ| − 0.4) · 2.0
 ```
 
-The strength −25.0 is deliberately large to strongly drive secondary-structure formation during the collapse stage. All eligible N–O pairs are evaluated in one vectorised pass.
+The −50.0 base strength, scaled by `QTF_HBOND_SCALE` (default 0.75), is deliberately large to strongly drive secondary-structure formation during the collapse stage. All eligible N–O pairs are evaluated in one vectorised pass.
 
 #### 4. Electrostatics (Coulomb's Law)
 
@@ -683,7 +686,7 @@ Each element of `results` is a `dict` with the following keys:
 |-----|------|-------------|
 | `"id"` | int | Replica index (0-based) |
 | `"seed"` | int | Random seed used for this replica |
-| `"energy"` | float | Final force-field energy after Stage 3 |
+| `"energy"` | float | Final force-field energy after Stage 3 for the custom backend, or after Stage 2 for Rosetta/OpenMM |
 | `"coords"` | ndarray (N_atoms, 3) | All-atom Cartesian coordinates |
 | `"labels"` | list | `[(res_id, atom_name, element), …]` |
 | `"bonds"` | list | `[(idx_a, idx_b), …]` covalent connectivity |
@@ -883,7 +886,7 @@ fig.show()
 
 - **Energy trace** for each selected replica: energy value (y-axis) vs function evaluation step (x-axis).
 - The **best-energy replica** is drawn at full opacity in green; all other replicas are drawn faintly (opacity 0.5) in dark navy.
-- **Stage boundary markers**: vertical dashed lines at the exact iteration where Stage 1 ends, Stage 2 ends, and Stage 3 begins. Stage 1 = red, Stage 2 = orange, Stage 3 = blue.
+- **Stage boundary markers**: vertical dashed lines at the exact iteration where each active stage boundary is reached. Custom runs show Stage 1, Stage 2, and Stage 3 markers; Rosetta/OpenMM runs show only Stages 1–2.
 - Stage names are not duplicated if multiple replicas share the same stage boundary (since stage boundaries shift based on when the optimiser terminates each stage).
 - Hover tooltips show the step index, energy value, final energy, and — if a ground truth was provided — the RMSD vs GT of that replica.
 

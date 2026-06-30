@@ -8,11 +8,17 @@ QTF evaluates ten energy terms at every objective call. The total energy is the
 
 ## Force fields
 
-The custom QTF backend uses a single Amber-style parameterization for partial charges and related coarse force-field constants.
+The custom QTF backend uses a single coarse effective-charge parameterization
+and related force-field constants. Backbone and polar heavy-atom values are
+Amber ff14SB-inspired, but QTF does not use a direct all-atom Amber charge
+table in the custom scorer. Explicit polar-H charge contributions are folded
+into their parent heavy atoms. The hydrogen atoms themselves are
+electrostatically neutral; donor hydrogens are used geometrically by H-bond
+terms.
 
 | Identifier | Full name | Use case |
 |:-----------|:----------|:---------|
-| `"amber"` | AMBER ff14SB approx. | Custom QTF backend parameterization |
+| `"qtf_effective"` | QTF coarse effective charges | Custom QTF backend parameterization |
 
 ```python
 folder = QuantumBiophysicsFolder("YYDPETGTWY")

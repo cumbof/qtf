@@ -59,7 +59,7 @@ class TestInit:
 
 
 class TestBuildCharges:
-    def test_amber_backbone_N(self):
+    def test_amber_inspired_backbone_N(self):
         charges = QuantumBiophysicsFolder._build_charges()
         assert charges["N"] == pytest.approx(-0.42)
 
@@ -71,10 +71,22 @@ class TestBuildCharges:
         charges = QuantumBiophysicsFolder._build_charges()
         assert charges["NZ"] == pytest.approx(1.0)
 
-    def test_amber_contains_backbone_atoms(self):
+    def test_effective_charges_contain_backbone_atoms(self):
         charges = QuantumBiophysicsFolder._build_charges()
         for atom in ("N", "CA", "C", "O"):
-            assert atom in charges, f"{atom} missing in amber"
+            assert atom in charges, f"{atom} missing in effective charge table"
+
+    def test_explicit_hydrogens_are_electrostatically_neutral(self):
+        charges = QuantumBiophysicsFolder._build_charges()
+        for atom in ("H", "HG", "HG1", "HH", "HE1", "HE2"):
+            assert charges[atom] == pytest.approx(0.0)
+
+    def test_polar_hydrogen_charges_folded_into_parent_heavy_atoms(self):
+        charges = QuantumBiophysicsFolder._build_charges()
+        assert charges["OG"] == pytest.approx(-0.2)    # old OG + HG
+        assert charges["OG1"] == pytest.approx(-0.2)   # old OG1 + HG1
+        assert charges["OH"] == pytest.approx(-0.1)    # old OH + HH
+        assert charges["NE1"] == pytest.approx(-0.1)   # old NE1 + HE1
 
 
 # ---------------------------------------------------------------------------
@@ -660,53 +672,59 @@ class TestTopologySeedAngle:
 
 
 # ---------------------------------------------------------------------------
-# M-3 – pre-proline ω optimisation
+# M-3 – peptide ω optimisation
 # ---------------------------------------------------------------------------
 
 
-class TestOmegaPreProline:
-    """Verify that ω for residues preceding Pro enters the DOF map and
-    that build_full_structure honours its value."""
+class TestOmegaPeptideBonds:
+    """Verify Bryan-style omega DOFs and raw omega-window penalties."""
 
-    def test_no_omega_dof_without_proline(self):
-        """A sequence with no Pro must have no omega DOF entries."""
+    def test_omega_dof_for_each_peptide_bond(self):
+        """A sequence gets one omega DOF for every peptide bond."""
         f = QuantumBiophysicsFolder("GAVC")
         omega_dofs = [d for d in f.dof_map if d["type"] == "omega"]
-        assert omega_dofs == []
+        assert [d["res"] for d in omega_dofs] == [0, 1, 2]
 
-    def test_omega_dof_added_before_proline(self):
-        """Residue preceding P must gain an omega DOF."""
+    def test_omega_dof_not_limited_to_pre_proline(self):
+        """Non-proline peptide bonds also expose omega DOFs."""
         f = QuantumBiophysicsFolder("GAP")
         omega_dofs = [d for d in f.dof_map if d["type"] == "omega"]
-        assert len(omega_dofs) == 1
-        assert omega_dofs[0]["res"] == 1  # residue 1 (A) precedes P at position 2
+        assert [d["res"] for d in omega_dofs] == [0, 1]
 
-    def test_omega_dof_count_matches_pre_pro_count(self):
-        """A sequence with two pre-Pro positions gets two omega DOFs."""
+    def test_omega_dof_count_matches_peptide_bond_count(self):
+        """A sequence with N residues gets N-1 omega DOFs."""
         f = QuantumBiophysicsFolder("GAPGPV")
         omega_dofs = [d for d in f.dof_map if d["type"] == "omega"]
-        assert len(omega_dofs) == 2
+        assert len(omega_dofs) == f.n_residues - 1
 
-    def test_omega_default_is_pi_without_dof(self):
-        """Without an omega DOF the built structure uses ω = π (trans)."""
+    def test_zero_raw_omega_rebuilds_as_trans(self):
+        """A raw zero omega is clamped to trans during coordinate rebuild."""
         f = QuantumBiophysicsFolder("GA")
         coords_trans, _, _ = f.build_full_structure(np.zeros(f.total_angles))
-        # Re-build with an explicit pi to confirm they match
         assert np.all(np.isfinite(coords_trans))
+        assert f._bounded_omega(0.0) == pytest.approx(np.pi)
+
+    def test_raw_omega_outside_window_has_penalty(self):
+        """Out-of-window raw omega should affect optimization ranking."""
+        f = QuantumBiophysicsFolder("GA")
+        assert f._omega_window_violation(0.0) > 0.0
+        assert f._omega_window_violation(np.deg2rad(175.0)) == pytest.approx(0.0)
+        assert f._omega_window_violation(np.deg2rad(-175.0)) == pytest.approx(0.0)
 
     def test_omega_affects_coordinates(self):
-        """Setting ω to 0 (cis) for a pre-Pro residue must shift CA of Pro."""
+        """Changing in-window omega for a peptide bond must shift downstream CA."""
         f = QuantumBiophysicsFolder("GAP")
         omega_idx = next(
             k for k, d in enumerate(f.dof_map)
             if d["type"] == "omega" and d["res"] == 1
         )
         angles_trans = np.full(f.total_angles, _TOPOLOGY_SEED_ANGLE)
-        angles_cis = angles_trans.copy()
-        angles_cis[omega_idx] = 0.0  # cis-Pro
+        angles_shifted = angles_trans.copy()
+        angles_trans[omega_idx] = np.pi
+        angles_shifted[omega_idx] = f.OMEGA_MIN
 
         coords_trans, _, _ = f.build_full_structure(angles_trans)
-        coords_cis, _, _ = f.build_full_structure(angles_cis)
+        coords_shifted, _, _ = f.build_full_structure(angles_shifted)
 
         # The Pro Cα (residue 2, "CA") coordinates must differ
         def ca_pos(coords, labels, res):
@@ -717,27 +735,26 @@ class TestOmegaPreProline:
 
         _, labels_t, _ = f.build_full_structure(angles_trans)
         ca_t = ca_pos(coords_trans, labels_t, 2)
-        ca_c = ca_pos(coords_cis,
-                      f.build_full_structure(angles_cis)[1], 2)
-        assert ca_t is not None and ca_c is not None
-        assert not np.allclose(ca_t, ca_c, atol=1e-3), \
-            "cis and trans Pro Cα must differ"
+        ca_s = ca_pos(coords_shifted,
+                      f.build_full_structure(angles_shifted)[1], 2)
+        assert ca_t is not None and ca_s is not None
+        assert not np.allclose(ca_t, ca_s, atol=1e-3), \
+            "different in-window omega values must shift downstream Cα"
 
     def test_total_angles_includes_omega_dof(self):
         """total_angles must equal len(dof_map) and include every omega entry.
 
-        For "GAP":
-          G  → phi, psi                        = 2
-          A  → phi, psi  (CB at fixed angle)   = 2
-          P  → phi, psi, chi1, chi2, chi3       = 5
-          ω  → omega DOF for A (pre-Pro)        = 1
+        For "GAP" with Bryan layout:
+          G  → phi, psi, omega                 = 3
+          A  → phi, psi, omega                 = 3
+          P  → phi, psi, chi1, chi2             = 4
           Total = 10
         """
         f = QuantumBiophysicsFolder("GAP")
         assert f.total_angles == len(f.dof_map), \
             "total_angles must equal the number of dof_map entries"
         omega_count = sum(1 for d in f.dof_map if d["type"] == "omega")
-        assert omega_count == 1
+        assert omega_count == 2
         assert f.total_angles == 10
 
 
