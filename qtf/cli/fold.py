@@ -2,6 +2,7 @@
 import numpy as np
 import pandas as pd
 import os, time, json, argparse
+import logging
 from datetime import datetime
 
 from qtf.core.ensemble import EnsembleFoldingManager
@@ -31,6 +32,12 @@ def _jsonify(x):
 
 
 def main(argv=None):
+    root_logger = logging.getLogger()
+    if not root_logger.handlers:
+        logging.basicConfig(level=logging.INFO, format="%(message)s")
+    else:
+        root_logger.setLevel(logging.INFO)
+
     time_start = time.time()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -84,6 +91,18 @@ def main(argv=None):
                         help='root directory for predictor outputs')
     parser.add_argument('--top_k_snapshots', default=0, type=int,
                         help='save the K lowest-energy intermediate structures encountered during optimisation (0 = disabled)')
+    parser.add_argument(
+        '--snapshot_sort_by',
+        default='energy',
+        choices=['energy', 'rmsd'],
+        help='sort exported snapshot pool by energy or by RMSD to the reference structure',
+    )
+    parser.add_argument(
+        '--snapshot_gromacs_mode',
+        default='none',
+        choices=['none', 'native_like', 'all'],
+        help='apply GROMACS to snapshots never, only when raw RMSD < 2.0 A, or on all snapshots',
+    )
 
     args = parser.parse_args(argv)
     if args.gromacs_minimize is None:
@@ -101,6 +120,8 @@ def main(argv=None):
     ensemble_size = args.ensemble_size
     top_k = args.top_k
     top_frac = args.top_frac
+    snapshot_sort_by = args.snapshot_sort_by
+    snapshot_gromacs_mode = args.snapshot_gromacs_mode
 
     outputs_root = args.output_root
     os.makedirs(outputs_root, exist_ok=True)
@@ -150,6 +171,7 @@ def main(argv=None):
         )
 
     model_rows = []
+    snapshot_rows = []
     os.makedirs(os.path.join(job_output_dir, "raw_pdbs"), exist_ok=True)
     if bool(args.gromacs_minimize):
         os.makedirs(os.path.join(job_output_dir, "gromacs_pdbs"), exist_ok=True)
@@ -175,21 +197,124 @@ def main(argv=None):
             include_hydrogens=False,
         )
 
+        if true_rmsd_coords is not None:
+            raw_rmsd, raw_rmsd_meta = utils.rmsd_between_structures(
+                coords,
+                labels,
+                true_rmsd_coords,
+                true_rmsd_labels,
+                args.rmsd_mode,
+                args.rmsd_residue_scope,
+            )
+        else:
+            raw_rmsd = np.nan
+            raw_rmsd_meta = utils.rmsd_selection_metadata(
+                args.rmsd_mode,
+                args.rmsd_residue_scope,
+                n_atoms=0,
+                n_residues=0,
+            )
+
         # Save best-K intermediate snapshots if available
         snapshots = res.get("best_snapshots", [])
         if snapshots:
             snap_dir = os.path.join(job_output_dir, "raw_pdbs", "snapshots", f"model_{rank}")
             os.makedirs(snap_dir, exist_ok=True)
             for si, snap in enumerate(snapshots, start=1):
+                snap_coords = snap["coords"]
+                snap_labels = snap["labels"]
                 snap_pdb = os.path.join(snap_dir, f"snapshot_{si}.pdb")
                 folder.save_pdb(
-                    snap["coords"],
-                    snap["labels"],
+                    snap_coords,
+                    snap_labels,
                     filename=snap_pdb,
                     energy=snap["energy"],
                     remarks=[f"Best snapshot #{si} during optimisation (E={snap['energy']:.4f})"],
                     include_hydrogens=False,
                 )
+                if true_rmsd_coords is not None:
+                    snap_rmsd, snap_rmsd_meta = utils.rmsd_between_structures(
+                        snap_coords,
+                        snap_labels,
+                        true_rmsd_coords,
+                        true_rmsd_labels,
+                        args.rmsd_mode,
+                        args.rmsd_residue_scope,
+                    )
+                else:
+                    snap_rmsd = np.nan
+                    snap_rmsd_meta = utils.rmsd_selection_metadata(
+                        args.rmsd_mode,
+                        args.rmsd_residue_scope,
+                        n_atoms=0,
+                        n_residues=0,
+                    )
+                snap_gromacs_status = "not_run"
+                snap_gromacs_potential_kj_mol = np.nan
+                snap_gromacs_potential_kcal_mol = np.nan
+                snap_gromacs_rmsd = np.nan
+                snap_gromacs_final_max_force = np.nan
+                snap_gromacs_converged_fmax_lt_100 = False
+                snap_gromacs_minimized_full_pdb_path = ""
+                run_snapshot_gromacs = snapshot_gromacs_mode == "all" or (
+                    snapshot_gromacs_mode == "native_like"
+                    and true_rmsd_coords is not None
+                    and not np.isnan(snap_rmsd)
+                    and float(snap_rmsd) < 2.0
+                )
+                if run_snapshot_gromacs:
+                    snap_gromacs_dir = os.path.join(snap_dir, f"snapshot_{si}_gromacs")
+                    snap_gromacs_result = qtf_gromacs.minimize_pdb_with_gromacs(
+                        snap_pdb,
+                        snap_gromacs_dir,
+                        forcefield=args.gromacs_forcefield,
+                        water=args.gromacs_water,
+                        nsteps=args.gromacs_nsteps,
+                        emtol=args.gromacs_emtol,
+                        maxwarn=args.gromacs_maxwarn,
+                    )
+                    snap_gromacs_status = str(snap_gromacs_result.get("gromacs_status", "unknown"))
+                    snap_gromacs_potential_kj_mol = float(snap_gromacs_result.get("gromacs_potential_kj_mol", np.nan))
+                    snap_gromacs_potential_kcal_mol = float(snap_gromacs_result.get("gromacs_potential_kcal_mol", np.nan))
+                    snap_gromacs_final_max_force = float(snap_gromacs_result.get("gromacs_final_max_force", np.nan))
+                    snap_gromacs_converged_fmax_lt_100 = bool(
+                        snap_gromacs_result.get("gromacs_converged_fmax_lt_100", False)
+                    )
+                    snap_gromacs_minimized_full_pdb_path = str(
+                        snap_gromacs_result.get("gromacs_minimized_full_pdb_path") or ""
+                    )
+                    if snap_gromacs_minimized_full_pdb_path and os.path.isfile(snap_gromacs_minimized_full_pdb_path):
+                        gromacs_coords, gromacs_labels = qtf_gromacs.parse_pdb_atoms(snap_gromacs_minimized_full_pdb_path)
+                        if true_rmsd_coords is not None:
+                            snap_gromacs_rmsd, _ = utils.rmsd_between_structures(
+                                gromacs_coords,
+                                gromacs_labels,
+                                true_rmsd_coords,
+                                true_rmsd_labels,
+                                args.rmsd_mode,
+                                args.rmsd_residue_scope,
+                            )
+                snapshot_rows.append({
+                    "ensemble_id": int(res["id"]),
+                    "ensemble_rank": int(rank),
+                    "snapshot_rank_within_replica": int(si),
+                    "snapshot_energy": float(snap["energy"]),
+                    "snapshot_rmsd_to_reference_A": float(snap_rmsd) if not np.isnan(snap_rmsd) else np.nan,
+                    "snapshot_gromacs_mode": snapshot_gromacs_mode,
+                    "snapshot_gromacs_status": snap_gromacs_status,
+                    "snapshot_gromacs_potential_kj_mol": snap_gromacs_potential_kj_mol,
+                    "snapshot_gromacs_potential_kcal_mol": snap_gromacs_potential_kcal_mol,
+                    "snapshot_gromacs_rmsd_to_reference_A": float(snap_gromacs_rmsd) if not np.isnan(snap_gromacs_rmsd) else np.nan,
+                    "snapshot_gromacs_final_max_force": snap_gromacs_final_max_force,
+                    "snapshot_gromacs_converged_fmax_lt_100": snap_gromacs_converged_fmax_lt_100,
+                    "snapshot_gromacs_minimized_full_pdb_path": snap_gromacs_minimized_full_pdb_path,
+                    "rmsd_mode": args.rmsd_mode,
+                    "rmsd_residue_scope": args.rmsd_residue_scope,
+                    **snap_rmsd_meta,
+                    "snapshot_pdb_path": snap_pdb,
+                    "replica_final_energy": float(res["energy"]),
+                    "replica_final_rmsd_to_reference_A": float(raw_rmsd) if not np.isnan(raw_rmsd) else np.nan,
+                })
 
         if true_rmsd_coords is not None:
             raw_rmsd, raw_rmsd_meta = utils.rmsd_between_structures(
@@ -327,6 +452,27 @@ def main(argv=None):
 
     df_models.to_json(ensemble_json_path, orient="records", indent=4)
 
+    if snapshot_rows:
+        df_snapshots = pd.DataFrame(snapshot_rows)
+        if snapshot_sort_by == "rmsd" and true_rmsd_coords is not None:
+            if "snapshot_gromacs_rmsd_to_reference_A" in df_snapshots.columns:
+                df_snapshots = df_snapshots.sort_values(
+                    ["snapshot_rmsd_to_reference_A", "snapshot_gromacs_rmsd_to_reference_A", "snapshot_energy"],
+                    na_position="last",
+                ).reset_index(drop=True)
+            else:
+                df_snapshots = df_snapshots.sort_values(
+                    ["snapshot_rmsd_to_reference_A", "snapshot_energy"],
+                    na_position="last",
+                ).reset_index(drop=True)
+        else:
+            df_snapshots = df_snapshots.sort_values(["snapshot_energy"], na_position="last").reset_index(drop=True)
+        df_snapshots["snapshot_global_rank"] = np.arange(1, len(df_snapshots) + 1)
+        snapshot_csv_path = os.path.join(job_output_dir, "snapshot_ranked.csv")
+        snapshot_json_path = os.path.join(job_output_dir, "snapshot_ranked.json")
+        df_snapshots.to_csv(snapshot_csv_path, index=False)
+        df_snapshots.to_json(snapshot_json_path, orient="records", indent=4)
+
     best_row = df_models.sort_values("energy").iloc[0]
     p_e2e = float(best_row["pred_e2e_A"])
     p_rg = float(best_row["pred_rg_A"])
@@ -364,6 +510,8 @@ def main(argv=None):
         "rosetta_cen_min": bool(args.rosetta_cen_min),
         "Top K": int(top_k) if top_k is not None else None,
         "Top Frac": float(top_frac) if top_frac is not None else None,
+        "Snapshot Sort By": snapshot_sort_by,
+        "Snapshot GROMACS Mode": snapshot_gromacs_mode,
         "Output Dir": job_output_dir,
     }
 

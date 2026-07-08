@@ -244,6 +244,23 @@ class QuantumBiophysicsFolder:
         "DEFAULT": [("CB", "CA", 1.53, 1.91, "chi1")],
     }
 
+    # Hard caps for exposed chi DOFs. These trim redundant terminal torsions
+    # while preserving the physically meaningful rotatable bonds for each side
+    # chain.
+    _CHI_CAP_BY_RESIDUE: dict[str, int] = {
+        "C": 1,
+        "D": 1,
+        "E": 2,
+        "S": 1,
+        "T": 1,
+        "V": 1,
+        "I": 2,
+        "L": 1,
+        "M": 3,
+        "K": 4,
+        "R": 4,
+    }
+
     def __init__(
         self,
         sequence: str,
@@ -604,6 +621,18 @@ class QuantumBiophysicsFolder:
         """
 
         available = sorted(set(available_chis), key=lambda x: (len(x), x))
+        max_chi = self._CHI_CAP_BY_RESIDUE.get(aa)
+
+        def within_cap(chi_name: str) -> bool:
+            if max_chi is None:
+                return True
+            try:
+                chi_num = int(str(chi_name).replace("chi", ""))
+            except ValueError:
+                return False
+            return chi_num <= max_chi
+
+        available = [c for c in available if within_cap(c)]
 
         if self.chi_mode == "all":
             return available
@@ -614,7 +643,7 @@ class QuantumBiophysicsFolder:
         if self.chi_mode == "selective":
             allowed = self.selective_chi_map.get(aa, ["chi1"])
             allowed = set(allowed)
-            return [c for c in available if c in allowed]
+            return [c for c in available if c in allowed and within_cap(c)]
 
         raise ValueError(f"Unknown chi_mode: {self.chi_mode}")
 
@@ -655,6 +684,9 @@ class QuantumBiophysicsFolder:
             if key.endswith("_omega"):
                 angle_dict[key] = self._bounded_omega(val)
         return angle_dict
+
+    def _raw_angle_dict_from_vector(self, angle_vector):
+        return {f"{x['res']}_{x['type']}": val for x, val in zip(self.dof_map, angle_vector)}
 
     def _omega_window_violation(self, omega):
         """Return normalized deviation outside the signed trans omega window."""
@@ -1923,10 +1955,7 @@ class QuantumBiophysicsFolder:
         Q_mat = np.outer(self.q_vector, self.q_vector)
         elec_mask = np.triu(self.mask_non_bonded, k=1) & (np.abs(Q_mat) > 0.0001)
         if np.any(elec_mask):
-            r_elec = D[elec_mask]
-            r_elec = np.maximum(r_elec, 1.0)
-            q_prod = Q_mat[elec_mask]
-            add_term("electrostatics", np.sum(83.0 * q_prod / (r_elec**2)))
+            add_term("electrostatics", self._electrostatic_energy(D))
 
         # 3b. DISULFIDE
         e_disulf = 0.0
@@ -2041,7 +2070,7 @@ class QuantumBiophysicsFolder:
         hard_clash_count = float(n_full + n_14)
 
         # LOCALS
-        raw_angle_dict = {f"{x['res']}_{x['type']}": val for x, val in zip(self.dof_map, angle_vec)}
+        raw_angle_dict = self._raw_angle_dict_from_vector(angle_vec)
         angle_dict = self._angle_dict_from_vector(angle_vec)
 
         ROTAMER_SCALE = float(os.getenv("QTF_ROTAMER_SCALE", "1.0"))
@@ -2579,6 +2608,38 @@ class QuantumBiophysicsFolder:
         best_tracker = self._build_best_k_tracker(top_k_snapshots)
         obj_fn = best_tracker if best_tracker is not None else self.energy_function
 
+        def _with_heartbeat(stage_name: str, objective):
+            state = {
+                "count": 0,
+                "best": float("inf"),
+                "last_logged_count": 0,
+            }
+            heartbeat_interval = max(50, min(200, int(max_iter) // 2 if int(max_iter) > 0 else 50))
+
+            def _wrapped(params, **kwargs):
+                value = float(objective(params, **kwargs))
+                state["count"] += 1
+                improved = value < state["best"]
+                if improved:
+                    state["best"] = value
+                should_log = state["count"] == 1 or improved or (state["count"] - state["last_logged_count"]) >= heartbeat_interval
+                if should_log:
+                    if improved:
+                        message = "  %s progress: eval=%d current=%.2f best=%.2f"
+                    else:
+                        message = "  %s progress: eval=%d current=%.2f best=%.2f (steady)"
+                    logger.info(
+                        message,
+                        stage_name,
+                        state["count"],
+                        value,
+                        state["best"],
+                    )
+                    state["last_logged_count"] = state["count"]
+                return value
+
+            return _wrapped
+
         logger.info("Stage 1: Mechanical Collapse (high force)…")
         self.tracker.mark_stage("Stage1")
         self.current_stage = 1
@@ -2591,14 +2652,14 @@ class QuantumBiophysicsFolder:
         # wondering whether the run is broken. Enforce the floor
         # explicitly so the warning is structurally impossible.
         safe_maxiter = max(int(max_iter), int(self.n_params) + 2)
-        res_1 = minimize(obj_fn, init_params, method="COBYLA",
+        res_1 = minimize(_with_heartbeat("Stage 1", obj_fn), init_params, method="COBYLA",
                          options={"maxiter": safe_maxiter, "rhobeg": 1.0})
         logger.info("  Collapse energy: %.2f", res_1.fun)
 
         logger.info("Stage 2: Physics Refinement (high force)…")
         self.tracker.mark_stage("Stage2")
         self.current_stage = 2
-        res_2 = minimize(obj_fn, res_1.x, method="SLSQP",
+        res_2 = minimize(_with_heartbeat("Stage 2", obj_fn), res_1.x, method="SLSQP",
                          tol=1e-6, options={"maxiter": max_iter, "disp": False})
         logger.info("  Refinement energy: %.2f", res_2.fun)
 
@@ -2607,7 +2668,7 @@ class QuantumBiophysicsFolder:
             logger.info("Stage 3: Natural Relaxation (releasing constraints)…")
             self.tracker.mark_stage("Stage3")
             self.current_stage = 3
-            final_res = minimize(obj_fn, res_2.x, method="SLSQP",
+            final_res = minimize(_with_heartbeat("Stage 3", obj_fn), res_2.x, method="SLSQP",
                                  tol=1e-6, options={"maxiter": max_iter, "disp": False})
             logger.info("  Final energy: %.2f", final_res.fun)
         else:

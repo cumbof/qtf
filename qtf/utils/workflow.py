@@ -761,10 +761,10 @@ def score_native_structure(
         if selective_chi_map is None:
             selective_chi_map = {
             "Y": ["chi1", "chi2"], "W": ["chi1", "chi2"], "F": ["chi1", "chi2"], "H": ["chi1", "chi2"],
-            "D": ["chi1"], "E": ["chi1"], "N": ["chi1"], "Q": ["chi1"],
+            "D": ["chi1"], "E": ["chi1", "chi2"], "N": ["chi1"], "Q": ["chi1"],
             "T": ["chi1"], "S": ["chi1"],
-            "V": ["chi1"], "I": ["chi1"], "L": ["chi1"], "M": ["chi1"],
-            "K": ["chi1"], "R": ["chi1"], "C": ["chi1"], "P": ["chi1"],
+            "V": ["chi1"], "I": ["chi1", "chi2"], "L": ["chi1"], "M": ["chi1", "chi2", "chi3"],
+            "K": ["chi1", "chi2", "chi3", "chi4"], "R": ["chi1", "chi2", "chi3", "chi4"], "C": ["chi1"], "P": ["chi1"],
             "A": [], "G": [],
         }
 
