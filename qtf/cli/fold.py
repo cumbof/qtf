@@ -97,12 +97,6 @@ def main(argv=None):
         choices=['energy', 'rmsd'],
         help='sort exported snapshot pool by energy or by RMSD to the reference structure',
     )
-    parser.add_argument(
-        '--snapshot_gromacs_mode',
-        default='none',
-        choices=['none', 'native_like', 'all'],
-        help='apply GROMACS to snapshots never, only when raw RMSD < 2.0 A, or on all snapshots',
-    )
 
     args = parser.parse_args(argv)
     if args.gromacs_minimize is None:
@@ -121,7 +115,6 @@ def main(argv=None):
     top_k = args.top_k
     top_frac = args.top_frac
     snapshot_sort_by = args.snapshot_sort_by
-    snapshot_gromacs_mode = args.snapshot_gromacs_mode
 
     outputs_root = args.output_root
     os.makedirs(outputs_root, exist_ok=True)
@@ -256,12 +249,7 @@ def main(argv=None):
                 snap_gromacs_final_max_force = np.nan
                 snap_gromacs_converged_fmax_lt_100 = False
                 snap_gromacs_minimized_full_pdb_path = ""
-                run_snapshot_gromacs = snapshot_gromacs_mode == "all" or (
-                    snapshot_gromacs_mode == "native_like"
-                    and true_rmsd_coords is not None
-                    and not np.isnan(snap_rmsd)
-                    and float(snap_rmsd) < 2.0
-                )
+                run_snapshot_gromacs = bool(args.gromacs_minimize)
                 if run_snapshot_gromacs:
                     snap_gromacs_dir = os.path.join(snap_dir, f"snapshot_{si}_gromacs")
                     snap_gromacs_result = qtf_gromacs.minimize_pdb_with_gromacs(
@@ -300,7 +288,7 @@ def main(argv=None):
                     "snapshot_rank_within_replica": int(si),
                     "snapshot_energy": float(snap["energy"]),
                     "snapshot_rmsd_to_reference_A": float(snap_rmsd) if not np.isnan(snap_rmsd) else np.nan,
-                    "snapshot_gromacs_mode": snapshot_gromacs_mode,
+                    "snapshot_gromacs_enabled": bool(args.gromacs_minimize),
                     "snapshot_gromacs_status": snap_gromacs_status,
                     "snapshot_gromacs_potential_kj_mol": snap_gromacs_potential_kj_mol,
                     "snapshot_gromacs_potential_kcal_mol": snap_gromacs_potential_kcal_mol,
@@ -511,7 +499,7 @@ def main(argv=None):
         "Top K": int(top_k) if top_k is not None else None,
         "Top Frac": float(top_frac) if top_frac is not None else None,
         "Snapshot Sort By": snapshot_sort_by,
-        "Snapshot GROMACS Mode": snapshot_gromacs_mode,
+        "Snapshot GROMACS Enabled": bool(args.gromacs_minimize),
         "Output Dir": job_output_dir,
     }
 
