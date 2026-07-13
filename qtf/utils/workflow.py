@@ -626,7 +626,7 @@ def _compute_native_metrics(
         gromacs_result = gromacs_postprocess_structure(
             enabled=True,
             full_pdb_path=str(rebuilt_full_pdb_path),
-            gromacs_dir=str(rebuilt_full_path.parent.parent / "gromacs_pdbs" / rebuilt_full_path.stem),
+            gromacs_dir=str(rebuilt_full_path.parent.parent / "gromacs_minimized_models" / rebuilt_full_path.stem),
             forcefield=gromacs_forcefield,
             water=gromacs_water,
             nsteps=gromacs_nsteps,
@@ -826,6 +826,7 @@ def make_folder(
     rosetta_repack: bool,
     rosetta_fa_min: bool,
     rosetta_cen_min: bool,
+    omega_mode: str = "window",
     chi_mode: Optional[str] = None,
     selective_chi_map: Optional[Dict[str, List[str]]] = None,
 ) -> QuantumBiophysicsFolder:
@@ -838,6 +839,7 @@ def make_folder(
         "rosetta_repack": bool(rosetta_repack),
         "rosetta_fa_min": bool(rosetta_fa_min),
         "rosetta_cen_min": bool(rosetta_cen_min),
+        "omega_mode": omega_mode,
     }
     if chi_mode is not None:
         folder_kwargs["chi_mode"] = chi_mode

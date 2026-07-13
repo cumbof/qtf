@@ -99,6 +99,21 @@ def test_run_ensemble_populates_results(folder_ga, zero_structure):
     assert mock_fold.call_count == 2
 
 
+def test_run_ensemble_passes_replica_progress_labels(folder_ga, zero_structure):
+    coords, labels, bonds = zero_structure
+    tracker = LandscapeTracker()
+    fake_params = np.zeros(folder_ga.n_params)
+    fake_result = (coords, labels, bonds, tracker, fake_params, -10.0, [])
+
+    with patch.object(folder_ga, "fold", return_value=fake_result) as mock_fold:
+        with patch.object(folder_ga, "get_smart_initialization", return_value=fake_params):
+            manager = EnsembleFoldingManager(folder_ga)
+            manager.run_ensemble(n_runs=2, max_workers=1)
+
+    labels = [call.kwargs["progress_label"] for call in mock_fold.call_args_list]
+    assert labels == ["Replica 1/2", "Replica 2/2"]
+
+
 def test_run_ensemble_result_keys(folder_ga, zero_structure):
     coords, labels, bonds = zero_structure
     tracker = LandscapeTracker()
@@ -312,5 +327,5 @@ def test_worker_exists_and_accepts_expected_args():
     import inspect
     from qtf.core.ensemble import _run_one_replica
     sig = inspect.signature(_run_one_replica)
-    for param in ("folder_kwargs", "replica_seed", "index", "max_iter", "scout_attempts", "top_k_snapshots"):
+    for param in ("folder_kwargs", "replica_seed", "index", "max_iter", "scout_attempts", "n_runs", "top_k_snapshots"):
         assert param in sig.parameters, f"Missing parameter: {param}"

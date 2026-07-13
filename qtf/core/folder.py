@@ -266,6 +266,7 @@ class QuantumBiophysicsFolder:
         sequence: str,
         chi_mode: str = "all",
         selective_chi_map: dict | None = None,
+        omega_mode: str = "window",
         energy_backend: str | None = None,
         use_e2e_constraint: bool | None = None,
         e2e_scale: float | None = None,
@@ -322,6 +323,9 @@ class QuantumBiophysicsFolder:
 
         self.sequence = sequence.upper()
         self.n_residues = len(self.sequence)
+        if omega_mode not in ("free", "fixed", "window"):
+            raise ValueError("omega_mode must be 'free', 'fixed', or 'window'")
+        self.omega_mode = omega_mode
 
         logger.info("Initialising QuantumBiophysicsFolder | seq=%s | mode=%s", self.sequence, self.mode)
 
@@ -414,7 +418,7 @@ class QuantumBiophysicsFolder:
         for i, aa in enumerate(self.sequence):
             self.dof_map.append({'res': i, 'type': 'phi'})
             self.dof_map.append({'res': i, 'type': 'psi'})
-            if i < self.n_residues - 1:
+            if i < self.n_residues - 1 and self.omega_mode != "fixed":
                 self.dof_map.append({'res': i, 'type': 'omega'})
 
             topo = self.SIDE_CHAIN_TOPO.get(aa, self.SIDE_CHAIN_TOPO['DEFAULT'])
@@ -663,10 +667,10 @@ class QuantumBiophysicsFolder:
         """
         Map unconstrained circuit phases into physical torsion ranges.
 
-        Phi/psi/chi/omega remain regular signed torsions. Omega is clamped only
-        during coordinate rebuild; the energy function scores a separate raw
-        omega-window penalty so out-of-window torsions remain visible to the
-        optimizer instead of being silently remapped away.
+        Phi/psi/chi remain regular signed torsions. Omega handling depends on
+        ``omega_mode``: ``free`` leaves raw omega phases unchanged and lets the
+        energy function penalize out-of-window values; ``window`` maps omega
+        directly into the allowed trans band.
         """
         mapped = np.asarray(angle_vector, dtype=float).copy()
         if len(mapped) != len(self.dof_map):
@@ -676,6 +680,12 @@ class QuantumBiophysicsFolder:
                 "will be remapped",
                 len(mapped), len(self.dof_map), min(len(mapped), len(self.dof_map)),
             )
+        if self.omega_mode == "window":
+            for idx, dof in enumerate(self.dof_map[: len(mapped)]):
+                if dof["type"] == "omega":
+                    frac = (float(mapped[idx]) + np.pi) / (2.0 * np.pi)
+                    frac = float(np.clip(frac, 0.0, 1.0))
+                    mapped[idx] = self.OMEGA_MIN + frac * (self.OMEGA_MAX - self.OMEGA_MIN)
         return mapped
 
     def _angle_dict_from_vector(self, angle_vector):
@@ -695,7 +705,7 @@ class QuantumBiophysicsFolder:
             return 0.0
         # Accept both signed representations of trans peptide omega:
         # +170..+180 and -180..-170 in the optimizer angle domain.
-        if self.OMEGA_MIN <= val <= np.pi:
+        if self.OMEGA_MIN <= val <= self.OMEGA_MAX:
             return 0.0
         if -np.pi <= val <= -self.OMEGA_MIN:
             return 0.0
@@ -2548,6 +2558,7 @@ class QuantumBiophysicsFolder:
         initial_params: np.ndarray | None = None,
         scout_attempts: int | None = None,
         top_k_snapshots: int = 0,
+        progress_label: str | None = None,
     ) -> tuple[np.ndarray, list, list, LandscapeTracker, np.ndarray, float, list]:
         """Run the optimisation curriculum for the configured energy backend.
 
@@ -2604,9 +2615,9 @@ class QuantumBiophysicsFolder:
         else:
             init_params = initial_params
 
-        # Wrap the objective function when tracking best snapshots
-        best_tracker = self._build_best_k_tracker(top_k_snapshots)
-        obj_fn = best_tracker if best_tracker is not None else self.energy_function
+        # Snapshots are collected only during the backend's final optimization
+        # stage so every candidate is ranked with one consistent score.
+        best_tracker = None
 
         def _with_heartbeat(stage_name: str, objective):
             state = {
@@ -2615,6 +2626,7 @@ class QuantumBiophysicsFolder:
                 "last_logged_count": 0,
             }
             heartbeat_interval = max(50, min(200, int(max_iter) // 2 if int(max_iter) > 0 else 50))
+            stage_label = f"{progress_label} {stage_name}" if progress_label else stage_name
 
             def _wrapped(params, **kwargs):
                 value = float(objective(params, **kwargs))
@@ -2630,7 +2642,7 @@ class QuantumBiophysicsFolder:
                         message = "  %s progress: eval=%d current=%.2f best=%.2f (steady)"
                     logger.info(
                         message,
-                        stage_name,
+                        stage_label,
                         state["count"],
                         value,
                         state["best"],
@@ -2652,14 +2664,19 @@ class QuantumBiophysicsFolder:
         # wondering whether the run is broken. Enforce the floor
         # explicitly so the warning is structurally impossible.
         safe_maxiter = max(int(max_iter), int(self.n_params) + 2)
-        res_1 = minimize(_with_heartbeat("Stage 1", obj_fn), init_params, method="COBYLA",
+        stage_1_wrapped = _with_heartbeat("Stage 1", self.energy_function)
+        res_1 = minimize(stage_1_wrapped, init_params, method="COBYLA",
                          options={"maxiter": safe_maxiter, "rhobeg": 1.0})
         logger.info("  Collapse energy: %.2f", res_1.fun)
 
         logger.info("Stage 2: Physics Refinement (high force)…")
         self.tracker.mark_stage("Stage2")
         self.current_stage = 2
-        res_2 = minimize(_with_heartbeat("Stage 2", obj_fn), res_1.x, method="SLSQP",
+        if self.stage_backend != "custom":
+            best_tracker = self._build_best_k_tracker(top_k_snapshots)
+        stage_2_obj = best_tracker if best_tracker is not None else self.energy_function
+        stage_2_wrapped = _with_heartbeat("Stage 2", stage_2_obj)
+        res_2 = minimize(stage_2_wrapped, res_1.x, method="SLSQP",
                          tol=1e-6, options={"maxiter": max_iter, "disp": False})
         logger.info("  Refinement energy: %.2f", res_2.fun)
 
@@ -2668,7 +2685,10 @@ class QuantumBiophysicsFolder:
             logger.info("Stage 3: Natural Relaxation (releasing constraints)…")
             self.tracker.mark_stage("Stage3")
             self.current_stage = 3
-            final_res = minimize(_with_heartbeat("Stage 3", obj_fn), res_2.x, method="SLSQP",
+            best_tracker = self._build_best_k_tracker(top_k_snapshots)
+            stage_3_obj = best_tracker if best_tracker is not None else self.energy_function
+            stage_3_wrapped = _with_heartbeat("Stage 3", stage_3_obj)
+            final_res = minimize(stage_3_wrapped, res_2.x, method="SLSQP",
                                  tol=1e-6, options={"maxiter": max_iter, "disp": False})
             logger.info("  Final energy: %.2f", final_res.fun)
         else:

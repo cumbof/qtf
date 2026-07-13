@@ -39,6 +39,7 @@ def _run_one_replica(
     index: int,
     max_iter: int,
     scout_attempts: int,
+    n_runs: int,
     top_k_snapshots: int = 0,
 ) -> dict:
     """Execute a single folding replica in a subprocess.
@@ -53,7 +54,10 @@ def _run_one_replica(
     )
 
     coords, labels, bonds, tracker, final_params, final_energy, best_snapshots = folder.fold(
-        max_iter=max_iter, initial_params=start_params, top_k_snapshots=top_k_snapshots,
+        max_iter=max_iter,
+        initial_params=start_params,
+        top_k_snapshots=top_k_snapshots,
+        progress_label=f"Replica {index + 1}/{n_runs}",
     )
 
     energy_terms = dict(getattr(folder, "last_energy_terms", {}) or {})
@@ -179,6 +183,7 @@ class EnsembleFoldingManager:
             "rosetta_repack": self.folder.rosetta_do_repack,
             "rosetta_fa_min": self.folder.rosetta_do_fullatom_min,
             "rosetta_cen_min": self.folder.rosetta_do_centroid_min,
+            "omega_mode": self.folder.omega_mode,
         }
 
         if max_workers < 1:
@@ -236,6 +241,7 @@ class EnsembleFoldingManager:
                     self.folder.fold(
                         max_iter=max_iter, initial_params=start_params,
                         top_k_snapshots=top_k_snapshots,
+                        progress_label=f"Replica {i + 1}/{n_runs}",
                     )
                 )
             except (KeyboardInterrupt, SystemExit):
@@ -303,6 +309,7 @@ class EnsembleFoldingManager:
                     i,
                     max_iter,
                     scout_attempts,
+                    n_runs,
                     top_k_snapshots,
                 )
                 fut_to_idx[fut] = i

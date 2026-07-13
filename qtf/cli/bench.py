@@ -439,8 +439,8 @@ def main(argv=None):
             ref_coords = None
             ref_meta = {}
 
-    pdb_dir = os.path.join(args.outdir, "raw_pdbs")
-    gromacs_pdb_dir = os.path.join(args.outdir, "gromacs_pdbs")
+    pdb_dir = os.path.join(args.outdir, "raw_models")
+    gromacs_pdb_dir = os.path.join(args.outdir, "gromacs_minimized_models")
     os.makedirs(pdb_dir, exist_ok=True)
     os.makedirs(gromacs_pdb_dir, exist_ok=True)
 

@@ -504,6 +504,29 @@ class TestFoldScoutBudget:
         assert len(result) == 7
         assert result[6] == []
 
+    def test_top_k_snapshots_are_collected_only_in_final_stage(self, monkeypatch):
+        f = QuantumBiophysicsFolder("GA")
+        tracked_stages = []
+        original_builder = f._build_best_k_tracker
+
+        def spy_builder(k):
+            tracker = original_builder(k)
+            if tracker is None:
+                return None
+
+            def spy_tracker(params, **kwargs):
+                tracked_stages.append(f.current_stage)
+                return tracker(params, **kwargs)
+
+            spy_tracker._heap = tracker._heap
+            return spy_tracker
+
+        monkeypatch.setattr(f, "_build_best_k_tracker", spy_builder)
+        f.fold(max_iter=10, scout_attempts=1, top_k_snapshots=3)
+
+        assert tracked_stages
+        assert set(tracked_stages) == {3}
+
     def test_cobyla_maxfun_warning_not_emitted(self):
         """B10: a small-budget ``fold()`` (max_iter=10) must not leak
         SciPy's ``COBYLA: Invalid MAXFUN`` warning.
@@ -679,6 +702,10 @@ class TestTopologySeedAngle:
 class TestOmegaPeptideBonds:
     """Verify Bryan-style omega DOFs and raw omega-window penalties."""
 
+    def test_default_omega_mode_is_window(self):
+        f = QuantumBiophysicsFolder("GA")
+        assert f.omega_mode == "window"
+
     def test_omega_dof_for_each_peptide_bond(self):
         """A sequence gets one omega DOF for every peptide bond."""
         f = QuantumBiophysicsFolder("GAVC")
@@ -699,14 +726,14 @@ class TestOmegaPeptideBonds:
 
     def test_zero_raw_omega_rebuilds_as_trans(self):
         """A raw zero omega is clamped to trans during coordinate rebuild."""
-        f = QuantumBiophysicsFolder("GA")
+        f = QuantumBiophysicsFolder("GA", omega_mode="free")
         coords_trans, _, _ = f.build_full_structure(np.zeros(f.total_angles))
         assert np.all(np.isfinite(coords_trans))
         assert f._bounded_omega(0.0) == pytest.approx(np.pi)
 
     def test_raw_omega_outside_window_has_penalty(self):
         """Out-of-window raw omega should affect optimization ranking."""
-        f = QuantumBiophysicsFolder("GA")
+        f = QuantumBiophysicsFolder("GA", omega_mode="free")
         assert f._omega_window_violation(0.0) > 0.0
         assert f._omega_window_violation(np.deg2rad(175.0)) == pytest.approx(0.0)
         assert f._omega_window_violation(np.deg2rad(-175.0)) == pytest.approx(0.0)
@@ -756,6 +783,40 @@ class TestOmegaPeptideBonds:
         omega_count = sum(1 for d in f.dof_map if d["type"] == "omega")
         assert omega_count == 2
         assert f.total_angles == 10
+
+    def test_fixed_omega_mode_removes_omega_dofs_and_penalty(self):
+        f = QuantumBiophysicsFolder("GAP", omega_mode="fixed")
+        assert all(d["type"] != "omega" for d in f.dof_map)
+
+        f.energy_function(np.zeros(f.n_params), return_terms=True)
+        terms = f.last_energy_terms
+        assert terms["omega_window_penalty"] == pytest.approx(0.0)
+        assert terms["omega_clamped_count"] == pytest.approx(0.0)
+
+    def test_window_omega_mode_maps_omega_dofs_into_trans_band(self):
+        f = QuantumBiophysicsFolder("GAP", omega_mode="window")
+        omega_indices = [i for i, d in enumerate(f.dof_map) if d["type"] == "omega"]
+        assert len(omega_indices) == f.n_residues - 1
+
+        angles = np.zeros(f.total_angles)
+        angles[omega_indices[0]] = -np.pi
+        angles[omega_indices[1]] = np.pi
+        mapped = f._map_angle_vector_to_physical_ranges(angles)
+
+        assert mapped[omega_indices[0]] == pytest.approx(f.OMEGA_MIN)
+        assert mapped[omega_indices[1]] == pytest.approx(f.OMEGA_MAX)
+        assert f._omega_window_violation(mapped[omega_indices[0]]) == pytest.approx(0.0)
+        assert f._omega_window_violation(mapped[omega_indices[1]]) == pytest.approx(0.0)
+
+    def test_window_omega_mode_has_no_raw_window_penalty(self):
+        f = QuantumBiophysicsFolder("GAP", omega_mode="window")
+        f.energy_function(np.zeros(f.n_params), return_terms=True)
+        assert f.last_energy_terms["omega_window_penalty"] == pytest.approx(0.0)
+        assert f.last_energy_terms["omega_clamped_count"] == pytest.approx(0.0)
+
+    def test_invalid_omega_mode_raises(self):
+        with pytest.raises(ValueError, match="omega_mode"):
+            QuantumBiophysicsFolder("GA", omega_mode="bad")
 
 
 # ---------------------------------------------------------------------------

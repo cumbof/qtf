@@ -381,7 +381,7 @@ For a protein of length L, the degrees of freedom are:
 |------|------------------|-------------|
 | φ (phi) | 1 | N–Cα–C–N backbone dihedral angle |
 | ψ (psi) | 1 | Cα–C–N–Cα backbone dihedral angle |
-| ω (omega) | 0–1 | Peptide plane twist; exposed as one optimisable DOF per peptide bond. Raw values outside the trans window are penalised during optimisation; rebuilt coordinates are clamped to trans geometry. |
+| ω (omega) | 0–1 | Peptide plane twist; exposed as one optimisable DOF per peptide bond. By default omega phases are mapped into the 170–190° trans window; `omega_mode=free` keeps the old full-range raw DOF with a trans-window penalty, and `omega_mode=fixed` removes omega DOFs. |
 | χ₁–χ₅ | 0–5 (residue-dependent) | Side-chain rotamer angles |
 
 **Side-chain torsion counts by residue:**

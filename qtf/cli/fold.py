@@ -76,6 +76,8 @@ def main(argv=None):
     parser.add_argument('--rosetta_repack', default=0, type=int)
     parser.add_argument('--rosetta_fa_min', default=0, type=int)
     parser.add_argument('--rosetta_cen_min', default=0, type=int)
+    parser.add_argument('--omega_mode', default='window', choices=['free', 'fixed', 'window'],
+                        help='omega handling: window=default map DOF into 170-190 degree trans band, free=raw full-range DOF with penalty, fixed=trans/no DOF')
     parser.add_argument('--gromacs_minimize', default=None, type=int,
                         help='1 to add hydrogens/topology and minimize each saved full PDB with GROMACS')
     parser.add_argument('--gromacs_forcefield', default='amber99sb-ildn')
@@ -131,6 +133,7 @@ def main(argv=None):
         rosetta_repack=bool(args.rosetta_repack),
         rosetta_fa_min=bool(args.rosetta_fa_min),
         rosetta_cen_min=bool(args.rosetta_cen_min),
+        omega_mode=args.omega_mode,
     )
 
     manager = EnsembleFoldingManager(folder)
@@ -165,9 +168,9 @@ def main(argv=None):
 
     model_rows = []
     snapshot_rows = []
-    os.makedirs(os.path.join(job_output_dir, "raw_pdbs"), exist_ok=True)
+    os.makedirs(os.path.join(job_output_dir, "raw_models"), exist_ok=True)
     if bool(args.gromacs_minimize):
-        os.makedirs(os.path.join(job_output_dir, "gromacs_pdbs"), exist_ok=True)
+        os.makedirs(os.path.join(job_output_dir, "gromacs_minimized_models"), exist_ok=True)
     for rank, res in enumerate(selected_results, start=1):
         coords = res['coords']
         labels = res.get('labels') or folder.static_labels
@@ -176,9 +179,9 @@ def main(argv=None):
         nonlocal_clash_metrics = nonlocal_heavy_clash_metrics(coords, labels)
         local_clash_metrics = adjacent_heavy_clash_metrics(coords, labels)
         ring_penetration_metrics = qtf_gromacs.ring_penetration_metrics(coords, labels)
-        ca_pdb_path = os.path.join(job_output_dir, "raw_pdbs", f"model_{rank}_ca.pdb")
-        ca_centroid_pdb_path = os.path.join(job_output_dir, "raw_pdbs", f"model_{rank}_ca_centroid.pdb")
-        full_pdb_path = os.path.join(job_output_dir, "raw_pdbs", f"model_{rank}_full.pdb")
+        ca_pdb_path = os.path.join(job_output_dir, "raw_models", f"model_{rank}_ca.pdb")
+        ca_centroid_pdb_path = os.path.join(job_output_dir, "raw_models", f"model_{rank}_ca_centroid.pdb")
+        full_pdb_path = os.path.join(job_output_dir, "raw_models", f"model_{rank}_full.pdb")
         folder.save_reduced_pdb(pred_ca, filename=ca_pdb_path, sidechain_centroids=None, energy=res['energy'])
         folder.save_reduced_pdb(pred_ca, filename=ca_centroid_pdb_path, sidechain_centroids=sidechain_centroids, energy=res['energy'])
         folder.save_pdb(
@@ -211,7 +214,7 @@ def main(argv=None):
         # Save best-K intermediate snapshots if available
         snapshots = res.get("best_snapshots", [])
         if snapshots:
-            snap_dir = os.path.join(job_output_dir, "raw_pdbs", "snapshots", f"model_{rank}")
+            snap_dir = os.path.join(job_output_dir, "raw_models", "snapshots", f"model_{rank}")
             os.makedirs(snap_dir, exist_ok=True)
             for si, snap in enumerate(snapshots, start=1):
                 snap_coords = snap["coords"]
@@ -249,9 +252,16 @@ def main(argv=None):
                 snap_gromacs_final_max_force = np.nan
                 snap_gromacs_converged_fmax_lt_100 = False
                 snap_gromacs_minimized_full_pdb_path = ""
+                snap_raw_pdb_retained = True
                 run_snapshot_gromacs = bool(args.gromacs_minimize)
                 if run_snapshot_gromacs:
-                    snap_gromacs_dir = os.path.join(snap_dir, f"snapshot_{si}_gromacs")
+                    snap_gromacs_dir = os.path.join(
+                        job_output_dir,
+                        "gromacs_minimized_models",
+                        "snapshots",
+                        f"model_{rank}",
+                        f"snapshot_{si}",
+                    )
                     snap_gromacs_result = qtf_gromacs.minimize_pdb_with_gromacs(
                         snap_pdb,
                         snap_gromacs_dir,
@@ -282,12 +292,19 @@ def main(argv=None):
                                 args.rmsd_mode,
                                 args.rmsd_residue_scope,
                             )
+                    if snap_gromacs_status == "ok" and os.path.exists(snap_pdb):
+                        os.remove(snap_pdb)
+                snap_raw_pdb_retained = os.path.exists(snap_pdb)
+                snap_effective_rmsd = snap_gromacs_rmsd if not np.isnan(snap_gromacs_rmsd) else snap_rmsd
                 snapshot_rows.append({
                     "ensemble_id": int(res["id"]),
                     "ensemble_rank": int(rank),
                     "snapshot_rank_within_replica": int(si),
                     "snapshot_energy": float(snap["energy"]),
                     "snapshot_rmsd_to_reference_A": float(snap_rmsd) if not np.isnan(snap_rmsd) else np.nan,
+                    "snapshot_effective_rmsd_to_reference_A": (
+                        float(snap_effective_rmsd) if not np.isnan(snap_effective_rmsd) else np.nan
+                    ),
                     "snapshot_gromacs_enabled": bool(args.gromacs_minimize),
                     "snapshot_gromacs_status": snap_gromacs_status,
                     "snapshot_gromacs_potential_kj_mol": snap_gromacs_potential_kj_mol,
@@ -299,7 +316,8 @@ def main(argv=None):
                     "rmsd_mode": args.rmsd_mode,
                     "rmsd_residue_scope": args.rmsd_residue_scope,
                     **snap_rmsd_meta,
-                    "snapshot_pdb_path": snap_pdb,
+                    "snapshot_pdb_path": snap_pdb if snap_raw_pdb_retained else "",
+                    "snapshot_raw_pdb_retained": bool(snap_raw_pdb_retained),
                     "replica_final_energy": float(res["energy"]),
                     "replica_final_rmsd_to_reference_A": float(raw_rmsd) if not np.isnan(raw_rmsd) else np.nan,
                 })
@@ -325,7 +343,7 @@ def main(argv=None):
         gromacs_result = utils.gromacs_postprocess_structure(
             enabled=bool(args.gromacs_minimize),
             full_pdb_path=full_pdb_path,
-            gromacs_dir=os.path.join(job_output_dir, "gromacs_pdbs", f"model_{rank}"),
+            gromacs_dir=os.path.join(job_output_dir, "gromacs_minimized_models", f"model_{rank}"),
             forcefield=args.gromacs_forcefield,
             water=args.gromacs_water,
             nsteps=args.gromacs_nsteps,
@@ -443,16 +461,10 @@ def main(argv=None):
     if snapshot_rows:
         df_snapshots = pd.DataFrame(snapshot_rows)
         if snapshot_sort_by == "rmsd" and true_rmsd_coords is not None:
-            if "snapshot_gromacs_rmsd_to_reference_A" in df_snapshots.columns:
-                df_snapshots = df_snapshots.sort_values(
-                    ["snapshot_rmsd_to_reference_A", "snapshot_gromacs_rmsd_to_reference_A", "snapshot_energy"],
-                    na_position="last",
-                ).reset_index(drop=True)
-            else:
-                df_snapshots = df_snapshots.sort_values(
-                    ["snapshot_rmsd_to_reference_A", "snapshot_energy"],
-                    na_position="last",
-                ).reset_index(drop=True)
+            df_snapshots = df_snapshots.sort_values(
+                ["snapshot_effective_rmsd_to_reference_A", "snapshot_energy"],
+                na_position="last",
+            ).reset_index(drop=True)
         else:
             df_snapshots = df_snapshots.sort_values(["snapshot_energy"], na_position="last").reset_index(drop=True)
         df_snapshots["snapshot_global_rank"] = np.arange(1, len(df_snapshots) + 1)
@@ -496,6 +508,7 @@ def main(argv=None):
         "rosetta_repack": bool(args.rosetta_repack),
         "rosetta_fa_min": bool(args.rosetta_fa_min),
         "rosetta_cen_min": bool(args.rosetta_cen_min),
+        "omega_mode": args.omega_mode,
         "Top K": int(top_k) if top_k is not None else None,
         "Top Frac": float(top_frac) if top_frac is not None else None,
         "Snapshot Sort By": snapshot_sort_by,

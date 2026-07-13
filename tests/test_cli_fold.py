@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import pandas as pd
 
@@ -50,6 +52,19 @@ class _FakeManager:
         return self.results[:top_k]
 
 
+class _RmsdFakeManager(_FakeManager):
+    def __init__(self, folder):
+        super().__init__(folder)
+        coords = np.asarray([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=float)
+        labels = [(0, "CA", "C"), (0, "CB", "C")]
+        self.results[0]["coords"] = coords
+        self.results[0]["labels"] = labels
+        self.results[0]["best_snapshots"] = [
+            {"energy": -2.0, "coords": np.asarray([[10.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=float), "labels": labels, "bonds": []},
+            {"energy": -1.5, "coords": np.asarray([[20.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=float), "labels": labels, "bonds": []},
+        ]
+
+
 def _patch_fast_fold(monkeypatch):
     monkeypatch.setattr(fold_cli.utils, "make_folder", lambda **kwargs: _FakeFolder())
     monkeypatch.setattr(fold_cli, "EnsembleFoldingManager", _FakeManager)
@@ -74,13 +89,62 @@ def _patch_fast_fold(monkeypatch):
     monkeypatch.setattr(fold_cli.qtf_gromacs, "ring_penetration_metrics", lambda coords, labels: {})
 
 
+def test_fold_cli_defaults_to_window_omega_mode(monkeypatch, tmp_path):
+    _patch_fast_fold(monkeypatch)
+    make_folder_kwargs = {}
+
+    def fake_make_folder(**kwargs):
+        make_folder_kwargs.update(kwargs)
+        return _FakeFolder()
+
+    def fake_gromacs_postprocess_structure(enabled, full_pdb_path, gromacs_dir, coords, labels, ca_coords, sidechain_centroid_fn, **kwargs):
+        return {
+            "coords": coords,
+            "labels": labels,
+            "ca_coords": ca_coords,
+            "sidechain_centroids": sidechain_centroid_fn(coords, labels),
+            "nonlocal_clash_metrics": {},
+            "local_clash_metrics": {},
+            "ring_penetration_metrics": {},
+            "gromacs_info": {"gromacs_status": "not_run"},
+        }
+
+    monkeypatch.setattr(fold_cli.utils, "make_folder", fake_make_folder)
+    monkeypatch.setattr(fold_cli.utils, "gromacs_postprocess_structure", fake_gromacs_postprocess_structure)
+
+    fold_cli.main(
+        [
+            "--predict",
+            "GA",
+            "--mode",
+            "predict_only",
+            "--ensemble_size",
+            "1",
+            "--maxiter",
+            "1",
+            "--top_k",
+            "1",
+            "--top_k_snapshots",
+            "0",
+            "--gromacs_minimize",
+            "0",
+            "--output_root",
+            str(tmp_path),
+        ]
+    )
+
+    assert make_folder_kwargs["omega_mode"] == "window"
+
+
 def test_fold_snapshot_gromacs_follows_gromacs_minimize(monkeypatch, tmp_path):
     _patch_fast_fold(monkeypatch)
     minimized_snapshot_inputs = []
+    minimized_snapshot_workdirs = []
     final_postprocess_enabled = []
 
     def fake_minimize_pdb_with_gromacs(input_pdb, workdir, **kwargs):
         minimized_snapshot_inputs.append(input_pdb)
+        minimized_snapshot_workdirs.append(workdir)
         return {
             "gromacs_status": "ok",
             "gromacs_potential_kj_mol": -10.0,
@@ -132,9 +196,18 @@ def test_fold_snapshot_gromacs_follows_gromacs_minimize(monkeypatch, tmp_path):
 
     assert final_postprocess_enabled == [True]
     assert len(minimized_snapshot_inputs) == 2
+    run_dir = next(path for path in tmp_path.iterdir() if path.is_dir())
+    assert minimized_snapshot_workdirs == [
+        str(run_dir / "gromacs_minimized_models" / "snapshots" / "model_1" / "snapshot_1"),
+        str(run_dir / "gromacs_minimized_models" / "snapshots" / "model_1" / "snapshot_2"),
+    ]
+    assert all("raw_models/snapshots/model_1" in path for path in minimized_snapshot_inputs)
+    assert all(not os.path.exists(path) for path in minimized_snapshot_inputs)
     snapshot_csv = next(tmp_path.glob("*/snapshot_ranked.csv"))
     snapshots = pd.read_csv(snapshot_csv)
     assert snapshots["snapshot_gromacs_enabled"].tolist() == [True, True]
+    assert snapshots["snapshot_raw_pdb_retained"].tolist() == [False, False]
+    assert snapshots["snapshot_pdb_path"].isna().tolist() == [True, True]
 
 
 def test_fold_snapshot_gromacs_disabled_with_gromacs_minimize_zero(monkeypatch, tmp_path):
@@ -189,3 +262,156 @@ def test_fold_snapshot_gromacs_disabled_with_gromacs_minimize_zero(monkeypatch, 
     snapshot_csv = next(tmp_path.glob("*/snapshot_ranked.csv"))
     snapshots = pd.read_csv(snapshot_csv)
     assert snapshots["snapshot_gromacs_enabled"].tolist() == [False, False]
+    assert snapshots["snapshot_raw_pdb_retained"].tolist() == [True, True]
+    assert all(os.path.exists(path) for path in snapshots["snapshot_pdb_path"])
+
+
+def test_fold_keeps_raw_snapshot_when_gromacs_fails(monkeypatch, tmp_path):
+    _patch_fast_fold(monkeypatch)
+    minimized_snapshot_inputs = []
+    final_postprocess_enabled = []
+
+    def fake_minimize_pdb_with_gromacs(input_pdb, workdir, **kwargs):
+        minimized_snapshot_inputs.append(input_pdb)
+        return {
+            "gromacs_status": "failed",
+            "gromacs_message": "command failed: gmx mdrun",
+            "gromacs_potential_kj_mol": np.nan,
+            "gromacs_potential_kcal_mol": np.nan,
+            "gromacs_final_max_force": np.nan,
+            "gromacs_converged_fmax_lt_100": False,
+            "gromacs_minimized_full_pdb_path": "",
+        }
+
+    def fake_gromacs_postprocess_structure(enabled, full_pdb_path, gromacs_dir, coords, labels, ca_coords, sidechain_centroid_fn, **kwargs):
+        final_postprocess_enabled.append(enabled)
+        return {
+            "coords": coords,
+            "labels": labels,
+            "ca_coords": ca_coords,
+            "sidechain_centroids": sidechain_centroid_fn(coords, labels),
+            "nonlocal_clash_metrics": {},
+            "local_clash_metrics": {},
+            "ring_penetration_metrics": {},
+            "gromacs_info": {"gromacs_status": "ok"},
+        }
+
+    monkeypatch.setattr(fold_cli.qtf_gromacs, "minimize_pdb_with_gromacs", fake_minimize_pdb_with_gromacs)
+    monkeypatch.setattr(fold_cli.utils, "gromacs_postprocess_structure", fake_gromacs_postprocess_structure)
+
+    fold_cli.main(
+        [
+            "--predict",
+            "GA",
+            "--mode",
+            "predict_only",
+            "--ensemble_size",
+            "1",
+            "--maxiter",
+            "1",
+            "--top_k",
+            "1",
+            "--top_k_snapshots",
+            "2",
+            "--gromacs_minimize",
+            "1",
+            "--output_root",
+            str(tmp_path),
+        ]
+    )
+
+    assert final_postprocess_enabled == [True]
+    assert all(os.path.exists(path) for path in minimized_snapshot_inputs)
+    snapshot_csv = next(tmp_path.glob("*/snapshot_ranked.csv"))
+    snapshots = pd.read_csv(snapshot_csv)
+    assert snapshots["snapshot_gromacs_status"].tolist() == ["failed", "failed"]
+    assert snapshots["snapshot_raw_pdb_retained"].tolist() == [True, True]
+    assert all(os.path.exists(path) for path in snapshots["snapshot_pdb_path"])
+
+
+def test_snapshot_rmsd_sort_uses_effective_gromacs_rmsd_when_available(monkeypatch, tmp_path):
+    _patch_fast_fold(monkeypatch)
+    monkeypatch.setattr(fold_cli, "EnsembleFoldingManager", _RmsdFakeManager)
+    monkeypatch.setattr(
+        fold_cli.utils,
+        "load_reference_rmsd_coords",
+        lambda *args, **kwargs: (np.asarray([[0.0, 0.0, 0.0]], dtype=float), [(0, "CA", "C")], {}),
+    )
+
+    def fake_rmsd_between_structures(coords, labels, *args, **kwargs):
+        marker = float(np.asarray(coords)[0, 0])
+        rmsd_by_marker = {
+            0.0: 9.0,
+            10.0: 1.0,
+            20.0: 4.0,
+            110.0: 5.0,
+            120.0: 0.5,
+        }
+        return rmsd_by_marker.get(marker, 9.0), {}
+
+    def fake_minimize_pdb_with_gromacs(input_pdb, workdir, **kwargs):
+        os.makedirs(workdir, exist_ok=True)
+        minimized_pdb = os.path.join(workdir, "minimized.pdb")
+        with open(minimized_pdb, "w", encoding="utf-8") as handle:
+            handle.write("MODEL\n")
+        return {
+            "gromacs_status": "ok",
+            "gromacs_potential_kj_mol": -10.0,
+            "gromacs_potential_kcal_mol": -2.39,
+            "gromacs_final_max_force": 50.0,
+            "gromacs_converged_fmax_lt_100": True,
+            "gromacs_minimized_full_pdb_path": minimized_pdb,
+        }
+
+    def fake_parse_pdb_atoms(path):
+        marker = 110.0 if "snapshot_1" in path else 120.0
+        return np.asarray([[marker, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=float), [(0, "CA", "C"), (0, "CB", "C")]
+
+    def fake_gromacs_postprocess_structure(enabled, full_pdb_path, gromacs_dir, coords, labels, ca_coords, sidechain_centroid_fn, **kwargs):
+        return {
+            "coords": coords,
+            "labels": labels,
+            "ca_coords": ca_coords,
+            "sidechain_centroids": sidechain_centroid_fn(coords, labels),
+            "nonlocal_clash_metrics": {},
+            "local_clash_metrics": {},
+            "ring_penetration_metrics": {},
+            "gromacs_info": {"gromacs_status": "ok"},
+        }
+
+    monkeypatch.setattr(fold_cli.utils, "rmsd_between_structures", fake_rmsd_between_structures)
+    monkeypatch.setattr(fold_cli.qtf_gromacs, "minimize_pdb_with_gromacs", fake_minimize_pdb_with_gromacs)
+    monkeypatch.setattr(fold_cli.qtf_gromacs, "parse_pdb_atoms", fake_parse_pdb_atoms)
+    monkeypatch.setattr(fold_cli.utils, "gromacs_postprocess_structure", fake_gromacs_postprocess_structure)
+
+    fold_cli.main(
+        [
+            "--predict",
+            "GA",
+            "--reference_pdb",
+            "fake.pdb",
+            "--mode",
+            "predict_and_compare",
+            "--ensemble_size",
+            "1",
+            "--maxiter",
+            "1",
+            "--top_k",
+            "1",
+            "--top_k_snapshots",
+            "2",
+            "--snapshot_sort_by",
+            "rmsd",
+            "--gromacs_minimize",
+            "1",
+            "--output_root",
+            str(tmp_path),
+        ]
+    )
+
+    snapshot_csv = next(tmp_path.glob("*/snapshot_ranked.csv"))
+    snapshots = pd.read_csv(snapshot_csv)
+    assert snapshots["snapshot_rank_within_replica"].tolist() == [2, 1]
+    assert snapshots["snapshot_rmsd_to_reference_A"].tolist() == [4.0, 1.0]
+    assert snapshots["snapshot_gromacs_rmsd_to_reference_A"].tolist() == [0.5, 5.0]
+    assert snapshots["snapshot_effective_rmsd_to_reference_A"].tolist() == [0.5, 5.0]

@@ -53,9 +53,9 @@ def main(argv=None):
 
     base_output_dir = Path(args.out_json).parent if args.out_json else Path(args.out_csv).parent
     base_output_dir.mkdir(parents=True, exist_ok=True)
-    pdb_output_dir = base_output_dir / "raw_pdbs"
+    pdb_output_dir = base_output_dir / "raw_models"
     pdb_output_dir.mkdir(parents=True, exist_ok=True)
-    gromacs_output_dir = base_output_dir / "gromacs_pdbs"
+    gromacs_output_dir = base_output_dir / "gromacs_minimized_models"
     gromacs_output_dir.mkdir(parents=True, exist_ok=True)
 
     rows = []
