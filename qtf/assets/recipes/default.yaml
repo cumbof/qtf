@@ -97,6 +97,161 @@ recipes:
           disp: false
     readouts: []
 
+  qtf-main-snapshot-equivalent:
+    description: Main-style three-stage coarse fold with final-phase top-snapshot export and GROMACS validation.
+    circuit_template:
+      description: Qiskit library ansatz used by the legacy recipe.
+      source: qiskit-library
+      name: EfficientSU2
+      options:
+        reps: auto
+        entanglement: circular
+    fold:
+      description: Default outer-loop controls used by qtf fold before phase-specific overrides are applied.
+      force_field: protein-coarse-charge-v1
+      max_iter: 2000
+      scout_attempts: 50
+    geometry:
+      description: Legacy angle-only geometry defaults with all residue-supported chi torsions active.
+      stored_angles: []
+      stored_lengths: []
+      max_chi: null
+    metrics:
+      description: Reference comparison atom sets reported when a known structure is available.
+      atom_sets:
+        - ca
+        - backbone
+        - all-heavy
+      rmsd_alignment_atom_set: same-as-rmsd
+    report:
+      description: Report only protein heavy atoms by default.
+      structure_domain: protein-heavy
+    basis_circuit_batching: auto
+    result:
+      description: Score the retained structure with the same coarse protein-folding objective used for the final stage.
+      primary: last_phase_structure
+      score_model: pheat-coarse-protein-folding-v1
+      score_options:
+        charge_profile: protein-coarse-charge-v1
+        hydrophobic_gamma: 5.0
+        hydrophobic_burial_denominator: 35.0
+        hydrophobic_burial_scale: 0.7
+        end_to_end_weight: 5.0
+        use_end_to_end_constraint: true
+        end_to_end_scale: 1.0
+    evaluators:
+      gromacs_minimize:
+        description: GROMACS minimization/rerun validation for retained structures.
+        score_model: pheat-gromacs-mdrun
+        required: false
+        options:
+          domain: protein-heavy
+          prepare: auto
+          gromacs_forcefield: amber99sb-ildn
+          gromacs_water: none
+          gromacs_run_mode: minimize-rerun
+          gromacs_preflight: warn
+          gromacs_metrics: true
+          external_timeout_seconds: 600
+          prep_cache_mode: readwrite
+          gromacs_run_settings:
+            minimize_steps: 500
+            emtol: 1000.0
+            cutoff_nm: 1.0
+            mdrun_flags:
+              - -ntmpi
+              - "1"
+            grompp_maxwarn: 2
+    reranking:
+      description: Disabled for this recipe; use --top-k-snapshots and --snapshot-sort-by for QTF-main-style final snapshot selection.
+      enabled: false
+      evaluator: null
+      triggers: []
+      candidate_pool: {}
+      apply: next_phase_start
+    validation:
+      description: Run GROMACS validation on the primary result, phase ends, and selected top snapshots.
+      enabled: true
+      candidates:
+        - primary
+        - phase_ends
+        - top_snapshots
+      evaluators:
+        - gromacs_minimize
+    scouting:
+      description: Generate collapsed starting candidates using a stronger hydrophobic/end-to-end bias.
+      score_model: pheat-coarse-protein-folding-v1
+      backend: inherit
+      shots: null
+      attempts: 50
+      score_options:
+        charge_profile: protein-coarse-charge-v1
+        hydrophobic_gamma: 15.0
+        hydrophobic_burial_denominator: 35.0
+        hydrophobic_burial_scale: 0.7
+        end_to_end_weight: 50.0
+        use_end_to_end_constraint: true
+        end_to_end_scale: 1.0
+    phases:
+      - name: collapse
+        label: Mechanical collapse
+        description: Drive the chain into a compact starting shape before refinement.
+        optimizer: COBYLA
+        score_model: pheat-coarse-protein-folding-v1
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        score_options:
+          charge_profile: protein-coarse-charge-v1
+          hydrophobic_gamma: 15.0
+          hydrophobic_burial_denominator: 35.0
+          hydrophobic_burial_scale: 0.7
+          end_to_end_weight: 50.0
+          use_end_to_end_constraint: true
+          end_to_end_scale: 1.0
+        options:
+          rhobeg: 1.0
+      - name: refine
+        label: Physics refinement
+        description: Continue optimizing the strong coarse objective.
+        optimizer: COBYLA
+        score_model: pheat-coarse-protein-folding-v1
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        score_options:
+          charge_profile: protein-coarse-charge-v1
+          hydrophobic_gamma: 15.0
+          hydrophobic_burial_denominator: 35.0
+          hydrophobic_burial_scale: 0.7
+          end_to_end_weight: 50.0
+          use_end_to_end_constraint: true
+          end_to_end_scale: 1.0
+        options:
+          rhobeg: 0.5
+      - name: relax
+        label: Natural relaxation
+        description: Reduce the coarse bias and relax toward the final PHEAT coarse physics score.
+        optimizer: COBYLA
+        score_model: pheat-coarse-protein-folding-v1
+        optimizer_backend: inherit
+        readout_backend: inherit
+        shots: null
+        maxiter: null
+        score_options:
+          charge_profile: protein-coarse-charge-v1
+          hydrophobic_gamma: 5.0
+          hydrophobic_burial_denominator: 35.0
+          hydrophobic_burial_scale: 0.7
+          end_to_end_weight: 5.0
+          use_end_to_end_constraint: true
+          end_to_end_scale: 1.0
+        options:
+          rhobeg: 0.25
+    readouts: []
+
   qtf-pheat-coarse-to-fine-lengths: &qtf_pheat_coarse_to_fine_lengths
     description: Coarse-to-fine PHEAT recipe that progressively activates backbone angles, shared bond lengths, and per-residue bond lengths while guarding unsafe handoffs.
     circuit_template:

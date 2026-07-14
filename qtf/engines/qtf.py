@@ -69,6 +69,7 @@ from qtf.scoring import (
     pheat_score_model_capabilities,
     score_pheat_structure,
 )
+from qtf.utils import gromacs as qtf_gromacs
 
 try:
     from pheat import (
@@ -88,6 +89,7 @@ try:
     )
     from pheat.metrics import align_structure_to_reference
     from pheat.geometry import radius_of_gyration as pheat_radius_of_gyration
+    from qtf.structures import qtf_structure_to_pheat
     from pheat.residue_geometry import (
         ANGLE_CA_C_N,
         ANGLE_N_CA_C,
@@ -1418,6 +1420,24 @@ def _validation_candidate_entries(
                     "structure": snapshot_structures[key],
                 }
             )
+    if "top_snapshots" in validation_config.candidates:
+        for snapshot in structure_snapshot_payloads:
+            key = snapshot.get("key")
+            if snapshot.get("role") != "top_snapshot" or key not in snapshot_structures:
+                continue
+            if "primary" in validation_config.candidates and key == primary_snapshot_key:
+                continue
+            rank = snapshot.get("snapshot_rank")
+            rank_label = f" {rank}" if rank is not None else ""
+            entries.append(
+                {
+                    "candidate_set": "top_snapshots",
+                    "candidate_key": str(key),
+                    "label": f"Top snapshot{rank_label}",
+                    "snapshot_key": key,
+                    "structure": snapshot_structures[key],
+                }
+            )
     deduped: dict[tuple[str, str], dict[str, Any]] = {}
     for entry in entries:
         deduped[(entry["candidate_set"], entry["candidate_key"])] = entry
@@ -2086,6 +2106,19 @@ def _pheat_alignment_details(
         "reference_atom_count": len(reference_structure.atoms),
         "target_atom_count": len(target_structure.atoms),
     }
+
+
+def _selected_rmsd_metric(details: Optional[Mapping[str, Any]], atom_sets: Sequence[str]) -> tuple[Optional[float], Optional[int], str]:
+    if details is None:
+        return None, None, "all-heavy"
+    normalized = normalize_metric_atom_sets(atom_sets)
+    if "all-heavy" in normalized:
+        return details.get("all_heavy_rmsd"), details.get("matched_heavy_atoms"), "PHEAT heavy atoms"
+    if "backbone" in normalized:
+        return details.get("backbone_rmsd"), details.get("matched_backbone_atoms"), "PHEAT backbone atoms"
+    if "ca" in normalized:
+        return details.get("ca_rmsd"), details.get("matched_ca_atoms"), "CA atoms"
+    return details.get("all_heavy_rmsd"), details.get("matched_heavy_atoms"), "PHEAT heavy atoms"
 
 
 def _pheat_heavy_atom_rmsd(
@@ -3563,8 +3596,8 @@ def _normalize_validation_config(
     raw = dict(raw_config or {})
     candidate_sets = _config_string_list(parser, raw.get("candidates"), "validation candidates")
     for candidate in candidate_sets:
-        if candidate not in {"primary", "phase_ends", "reranked_top"}:
-            parser.error("validation candidates must be one of primary, phase_ends, reranked_top.")
+        if candidate not in {"primary", "phase_ends", "reranked_top", "top_snapshots"}:
+            parser.error("validation candidates must be one of primary, phase_ends, reranked_top, top_snapshots.")
     evaluator_names = _validate_evaluator_references(
         parser,
         _config_string_list(parser, raw.get("evaluators"), "validation evaluators"),
@@ -7382,6 +7415,8 @@ def _run_optimization_phases(
     reranking_config: Optional[RerankingConfig] = None,
     phase_readiness_config: Optional[PhaseReadinessConfig] = None,
     handoff_guard_config: Optional[HandoffGuardConfig] = None,
+    top_k_snapshots: int = 0,
+    snapshot_sort_by: str = "energy",
     outdir: Optional[Path] = None,
     prefix: Optional[str] = None,
     status_writer: Optional[RunStatusWriter] = None,
@@ -7458,6 +7493,7 @@ def _run_optimization_phases(
     folder.phase_readiness_results = []
     folder.handoff_guard_results = []
     folder.candidate_records = []
+    folder.top_snapshot_results = []
     metric_atom_sets = normalize_metric_atom_sets(metric_atom_sets)
     rmsd_alignment_atom_set = normalize_rmsd_alignment_atom_set(rmsd_alignment_atom_set)
 
@@ -7599,6 +7635,29 @@ def _run_optimization_phases(
             (snapshot for snapshot in folder.structure_snapshots if snapshot.get("key") == key),
             None,
         )
+
+    def _candidate_structure(
+        candidate: Mapping[str, Any],
+        *,
+        phase: PhaseConfig,
+        readout_angle_mode: str,
+        readout_backend,
+        readout_transpile: Optional[TranspileConfig],
+    ) -> HeavyAtomStructure:
+        params = candidate.get("params")
+        if params is None:
+            raise ValueError("candidate has no parameter vector")
+        angles = folder._angle_vector_from_params(
+            params,
+            angle_mode=readout_angle_mode,
+            backend=readout_backend,
+            shots=phase.readout_shots,
+            transpile_optimization_level=(
+                None if readout_transpile is None else readout_transpile.optimization_level
+            ),
+            transpile_seed=None if readout_transpile is None else readout_transpile.seed,
+        )
+        return folder.structure_from_angle_vector(angles)
 
     def _score_snapshot_with_evaluator(
         snapshot: dict,
@@ -8670,13 +8729,12 @@ def _run_optimization_phases(
                 readout_angle_mode=phase_readout_angle_mode,
                 transpile_config=phase.readout_transpile,
             )
-            rmsd_value = details.get("all_heavy_rmsd") if details is not None else None
-            rmsd_atoms = details.get("matched_heavy_atoms") if details is not None else None
+            rmsd_value, rmsd_atoms, rmsd_atom_label = _selected_rmsd_metric(details, metric_atom_sets)
             print(f" > Phase Energy : {final_result.fun:.2f}")
             if rmsd_value is not None:
                 print(
                     f" > Phase RMSD   : {rmsd_value:.4f} Å "
-                    f"({rmsd_atoms} PHEAT heavy atoms, readout_shots={phase.readout_shots})"
+                    f"({rmsd_atoms} {rmsd_atom_label}, readout_shots={phase.readout_shots})"
                 )
             phase_end_iter = int(folder.tracker.current_iter)
 
@@ -8748,6 +8806,7 @@ def _run_optimization_phases(
             "phase_readiness_snapshot_key": None if phase_readiness_result is None else phase_readiness_result.get("snapshot_key"),
             "rmsd": rmsd_value,
             "rmsd_atom_count": rmsd_atoms,
+            "rmsd_atom_label": rmsd_atom_label,
             "rmsd_details": details,
             "elapsed_s": timing_record.get("elapsed_s"),
             "energy_start_index": phase_start_iter,
@@ -8925,7 +8984,11 @@ def _run_optimization_phases(
         raise RuntimeError("No optimizer phases ran.")
 
     if pheat_reference_structure is not None:
-        print("\n── RMSD Progress by Phase (PHEAT heavy atoms) ──────")
+        progress_atom_label = next(
+            (str(result.get("rmsd_atom_label")) for result in phase_results if result.get("rmsd_atom_label")),
+            "PHEAT heavy atoms",
+        )
+        print(f"\n── RMSD Progress by Phase ({progress_atom_label}) ──────")
         for phase_result in phase_results:
             if phase_result["rmsd"] is None:
                 print(f"  {phase_result['label']} : N/A")
@@ -8953,6 +9016,126 @@ def _run_optimization_phases(
     folder.active_score_options = {}
 
     optimal_params = np.asarray(current_params, dtype=float).copy()
+    selected_top_snapshot_key = None
+    selected_top_snapshot_params = None
+
+    top_k_snapshot_limit = int(top_k_snapshots or 0)
+    if top_k_snapshot_limit > 0:
+        if snapshot_sort_by == "rmsd" and pheat_reference_structure is None:
+            raise ValueError("--snapshot-sort-by rmsd requires --reference-structure.")
+        final_phase = phases[-1]
+        final_phase_result = phase_results[-1]
+        final_phase_index = int(final_phase_result["index"])
+        final_phase_start = int(final_phase_result.get("energy_start_index") or 0)
+        final_phase_end = int(final_phase_result.get("energy_end_index") or folder.tracker.current_iter)
+        final_readout_backend = _backend_for_spec(final_phase.readout_backend)
+        final_readout_angle_mode = folder._angle_mode_for_backend(final_readout_backend)
+        candidates = [
+            record
+            for record in getattr(folder, "candidate_records", []) or []
+            if record.get("phase_index") == final_phase_index
+            and final_phase_start <= int(record.get("iteration", -1)) < final_phase_end
+            and record.get("params") is not None
+            and np.isfinite(float(record.get("objective", math.inf)))
+        ]
+        ranked_candidates = []
+        for candidate in candidates:
+            try:
+                structure = _candidate_structure(
+                    candidate,
+                    phase=final_phase,
+                    readout_angle_mode=final_readout_angle_mode,
+                    readout_backend=final_readout_backend,
+                    readout_transpile=final_phase.readout_transpile,
+                )
+                rmsd_details = None
+                rmsd_value = None
+                if pheat_reference_structure is not None:
+                    rmsd_details = _pheat_alignment_details(
+                        pheat_reference_structure,
+                        structure,
+                        atom_sets=metric_atom_sets,
+                        alignment_atom_set=rmsd_alignment_atom_set,
+                    )
+                    rmsd_value, _, _ = _selected_rmsd_metric(rmsd_details, metric_atom_sets)
+                objective = float(candidate.get("objective"))
+                sort_value = float(rmsd_value) if snapshot_sort_by == "rmsd" else objective
+                if not math.isfinite(sort_value):
+                    continue
+                ranked_candidates.append(
+                    {
+                        "candidate": candidate,
+                        "structure": structure,
+                        "objective": objective,
+                        "rmsd": rmsd_value,
+                        "rmsd_details": rmsd_details,
+                        "sort_value": sort_value,
+                    }
+                )
+            except Exception as exc:
+                folder.top_snapshot_results.append(
+                    {
+                        "status": "error",
+                        "candidate_id": candidate.get("candidate_id"),
+                        "iteration": candidate.get("iteration"),
+                        "error": str(exc),
+                    }
+                )
+        ranked_candidates.sort(key=lambda item: (float(item["sort_value"]), float(item["objective"])))
+        top_ranked = ranked_candidates[:top_k_snapshot_limit]
+        if top_ranked:
+            print(
+                " > Top snapshots: "
+                f"saving {len(top_ranked)} final-phase candidates sorted by {snapshot_sort_by}"
+            )
+        for rank, item in enumerate(top_ranked, start=1):
+            candidate = item["candidate"]
+            snapshot_key = f"snapshot_top_{rank:03d}"
+            _record_structure_snapshot(
+                key=snapshot_key,
+                role="top_snapshot",
+                label=f"Top snapshot {rank} by {snapshot_sort_by}",
+                structure=item["structure"],
+                angle_mode=final_readout_angle_mode,
+                backend=final_readout_backend,
+                shots=final_phase.readout_shots,
+                transpile_config=final_phase.readout_transpile,
+                score_model=final_phase.score_model,
+                phase_index=final_phase_index,
+                phase_name=final_phase.name,
+                phase_label=final_phase.label,
+                visible_default=(rank == 1),
+            )
+            snapshot = _snapshot_by_key(snapshot_key)
+            if snapshot is not None:
+                snapshot["candidate_id"] = candidate.get("candidate_id")
+                snapshot["iteration"] = candidate.get("iteration")
+                snapshot["objective"] = item["objective"]
+                snapshot["snapshot_rank"] = rank
+                snapshot["snapshot_sort_by"] = snapshot_sort_by
+                snapshot["snapshot_sort_value"] = item["sort_value"]
+                snapshot["rmsd"] = item["rmsd"]
+                snapshot["rmsd_details"] = item["rmsd_details"]
+            result = {
+                "rank": rank,
+                "snapshot_key": snapshot_key,
+                "candidate_id": candidate.get("candidate_id"),
+                "iteration": candidate.get("iteration"),
+                "phase_index": final_phase_index,
+                "phase_name": final_phase.name,
+                "phase_label": final_phase.label,
+                "objective": item["objective"],
+                "rmsd": item["rmsd"],
+                "sort_by": snapshot_sort_by,
+                "sort_value": item["sort_value"],
+                "status": "ok",
+            }
+            folder.top_snapshot_results.append(result)
+            if rank == 1:
+                selected_top_snapshot_key = snapshot_key
+                selected_top_snapshot_params = np.asarray(candidate["params"], dtype=float).copy()
+        if selected_top_snapshot_params is not None:
+            optimal_params = selected_top_snapshot_params
 
     if workflow_progress is not None:
         workflow_progress.start("Optional readouts")
@@ -8996,6 +9179,7 @@ def _run_optimization_phases(
                         atom_sets=metric_atom_sets,
                         alignment_atom_set=rmsd_alignment_atom_set,
                     )
+                readout_rmsd, _, _ = _selected_rmsd_metric(details, metric_atom_sets)
                 folder.readout_results.append(
                     {
                         "name": readout.name,
@@ -9012,7 +9196,7 @@ def _run_optimization_phases(
                         ),
                         "snapshot_key": readout_key,
                         "atom_count": None if structure is None else len(structure.atoms),
-                        "rmsd": None if details is None else details["all_heavy_rmsd"],
+                        "rmsd": readout_rmsd,
                         "rmsd_details": details,
                     }
                 )
@@ -9044,7 +9228,11 @@ def _run_optimization_phases(
             None,
         )
         if result_config.primary == PRIMARY_LAST_PHASE:
-            primary_snapshot = last_phase_snapshot
+            primary_snapshot = (
+                _snapshot_by_key(selected_top_snapshot_key)
+                if selected_top_snapshot_key is not None
+                else last_phase_snapshot
+            )
         else:
             primary_snapshot = next(
                 (
@@ -9066,7 +9254,7 @@ def _run_optimization_phases(
         folder.primary_backend_mode = primary_snapshot.get("backend")
         folder.primary_shots = primary_snapshot.get("shots")
         folder.primary_result = {
-            "source": result_config.primary,
+            "source": "top_snapshot" if selected_top_snapshot_key is not None else result_config.primary,
             "snapshot_key": primary_snapshot.get("key"),
             "label": primary_snapshot.get("label"),
             "score_model": result_config.score_model,
@@ -9076,6 +9264,16 @@ def _run_optimization_phases(
             "transpile": primary_snapshot.get("transpile"),
             "atom_count": len(primary_structure.atoms),
         }
+        if selected_top_snapshot_key is not None:
+            folder.primary_result["selection"] = {
+                "method": "top_snapshot",
+                "sort_by": snapshot_sort_by,
+                "candidate_id": primary_snapshot.get("candidate_id"),
+                "iteration": primary_snapshot.get("iteration"),
+                "objective": primary_snapshot.get("objective"),
+                "rmsd": primary_snapshot.get("rmsd"),
+                "snapshot_rank": primary_snapshot.get("snapshot_rank"),
+            }
         primary_score = _safe_score_payload_for_folder(
             folder,
             optimal_params,
@@ -9149,6 +9347,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Abort after a phase classified as an optimizer error; warnings still continue.",
     )
     parser.add_argument("--maxiter", type=int, default=2000)
+    parser.add_argument(
+        "--top-k-snapshots",
+        type=int,
+        default=0,
+        help="Save the top N final-phase optimizer snapshots and use the best one as the primary result.",
+    )
+    parser.add_argument(
+        "--snapshot-sort-by",
+        choices=["energy", "rmsd"],
+        default="energy",
+        help="Rank --top-k-snapshots by optimizer energy or reference RMSD.",
+    )
     parser.add_argument(
         "--backend",
         dest="hw_backend",
@@ -9436,6 +9646,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     derived_seed = (base_seed + args.replica_id) % SEED_MODULUS
     if args.maxiter <= 0:
         parser.error("--maxiter must be > 0.")
+    if args.top_k_snapshots < 0:
+        parser.error("--top-k-snapshots must be >= 0.")
+    if args.snapshot_sort_by == "rmsd" and args.top_k_snapshots > 0 and not args.reference_structure:
+        parser.error("--snapshot-sort-by rmsd requires --reference-structure when --top-k-snapshots is > 0.")
     if args.seed is not None and args.seed < 0:
         parser.error("--seed must be a non-negative integer.")
     if args.shot_seed is not None and args.shot_seed < 0:
@@ -9957,6 +10171,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             reranking_config=phase_schedule.reranking,
             phase_readiness_config=phase_schedule.phase_readiness,
             handoff_guard_config=phase_schedule.handoff_guard,
+            top_k_snapshots=args.top_k_snapshots,
+            snapshot_sort_by=args.snapshot_sort_by,
             outdir=outdir,
             prefix=prefix,
             status_writer=status_writer,
@@ -10005,9 +10221,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     reference_residue_geometry_path = None
     reference_metric_residue_geometry_path = None
     structure_snapshots = list(getattr(folder, "structure_snapshots", []) or [])
+    top_snapshot_results = list(getattr(folder, "top_snapshot_results", []) or [])
     structure_snapshot_payloads = []
     snapshot_structures = {}
     report_structure_domain_coverages: dict[str, dict[str, Any]] = {}
+    top_snapshot_gromacs_evaluator = None
+    if phase_schedule.validation.enabled and "top_snapshots" in phase_schedule.validation.candidates:
+        for evaluator_name in phase_schedule.validation.evaluators:
+            evaluator = phase_schedule.evaluators.get(evaluator_name)
+            if evaluator is not None and evaluator.score_model == "pheat-gromacs-mdrun":
+                top_snapshot_gromacs_evaluator = evaluator
+                break
+
+    def _gromacs_minimize_settings(evaluator: EvaluatorConfig) -> tuple[str, str, int, float, int]:
+        options = dict(evaluator.options or {})
+        run_settings = dict(options.get("gromacs_run_settings") or {})
+        forcefield = str(options.get("gromacs_forcefield") or "amber99sb-ildn")
+        water = str(options.get("gromacs_water") or "tip3p")
+        nsteps = int(run_settings.get("minimize_steps") or options.get("gromacs_nsteps") or 5000)
+        emtol = float(run_settings.get("emtol") or options.get("gromacs_emtol") or 100.0)
+        maxwarn = int(run_settings.get("grompp_maxwarn") or options.get("gromacs_maxwarn") or 2)
+        return forcefield, water, nsteps, emtol, maxwarn
 
     workflow_progress.start("Artifact generation")
     with timings.section(
@@ -10070,6 +10304,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             payload["key"] = key
             structure = snapshot.get("structure")
             raw_pdb_path = None
+            gromacs_payload: dict[str, Any] = {}
             if payload.get("snapshot_status") == "ok" and structure is not None:
                 raw_pdb_path = outdir / f"{_snapshot_file_stem(prefix, payload)}.pdb"
                 report_structure, report_coverage = _write_report_pdb(
@@ -10081,13 +10316,97 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 payload["atom_count"] = len(report_structure.atoms)
                 payload["report_structure_domain"] = report_structure_domain
                 payload["report_domain_coverage"] = report_coverage
+                if payload.get("role") == "top_snapshot" and top_snapshot_gromacs_evaluator is not None:
+                    gromacs_dir = outdir / "gromacs_minimized_models" / "snapshots" / _snapshot_file_stem(prefix, payload)
+                    forcefield, water, nsteps, emtol, maxwarn = _gromacs_minimize_settings(
+                        top_snapshot_gromacs_evaluator
+                    )
+                    gromacs_payload = qtf_gromacs.minimize_pdb_with_gromacs(
+                        str(raw_pdb_path),
+                        str(gromacs_dir),
+                        forcefield=forcefield,
+                        water=water,
+                        nsteps=nsteps,
+                        emtol=emtol,
+                        maxwarn=maxwarn,
+                    )
+                    payload["gromacs_status"] = gromacs_payload.get("gromacs_status")
+                    payload["gromacs_message"] = gromacs_payload.get("gromacs_message")
+                    payload["gromacs_workdir"] = gromacs_payload.get("gromacs_workdir")
+                    payload["gromacs_log_path"] = gromacs_payload.get("gromacs_log_path")
+                    payload["gromacs_minimized_full_pdb_path"] = gromacs_payload.get("gromacs_minimized_full_pdb_path")
+                    payload["gromacs_potential_kj_mol"] = gromacs_payload.get("gromacs_potential_kj_mol")
+                    payload["gromacs_potential_kcal_mol"] = gromacs_payload.get("gromacs_potential_kcal_mol")
+                    payload["gromacs_converged_fmax_lt_100"] = gromacs_payload.get("gromacs_converged_fmax_lt_100")
+                    payload["gromacs_final_max_force"] = gromacs_payload.get("gromacs_final_max_force")
+                    payload["raw_pdb_path"] = str(raw_pdb_path)
+                    if gromacs_payload.get("gromacs_status") == "ok":
+                        minimized_path = gromacs_payload.get("gromacs_minimized_full_pdb_path") or ""
+                        if minimized_path and os.path.isfile(str(minimized_path)):
+                            min_coords, min_labels = qtf_gromacs.parse_pdb_atoms(str(minimized_path))
+                            heavy_indices = [
+                                index
+                                for index, label in enumerate(min_labels)
+                                if str(label[2]).strip().upper() not in {"H", "D", "T"}
+                            ]
+                            min_coords = min_coords[heavy_indices]
+                            min_labels = [min_labels[index] for index in heavy_indices]
+                            minimized_structure = qtf_structure_to_pheat(
+                                min_coords,
+                                min_labels,
+                                folder.sequence,
+                                name=f"{prefix}_{key}_gromacs_minimized",
+                            )
+                            snapshot["structure"] = minimized_structure
+                            snapshot["atom_count"] = len(minimized_structure.atoms)
+                            structure = minimized_structure
+                            payload["source_atom_count"] = len(minimized_structure.atoms)
+                            payload["atom_count"] = len(minimized_structure.atoms)
+                            report_structure, report_coverage = _write_report_pdb(
+                                minimized_structure,
+                                Path(str(minimized_path)),
+                                domain=report_structure_domain,
+                            )
+                            payload["viewer_pdb_path"] = str(minimized_path)
+                            payload["pdb_path"] = str(raw_pdb_path)
+                            payload["report_structure_domain"] = report_structure_domain
+                            payload["report_domain_coverage"] = report_coverage
+                            snapshot_structures[key] = minimized_structure
+                            if pheat_reference is not None:
+                                try:
+                                    minimized_details = _pheat_alignment_details(
+                                        pheat_reference.structure,
+                                        minimized_structure,
+                                        atom_sets=metric_atom_sets,
+                                        alignment_atom_set=rmsd_alignment_atom_set,
+                                    )
+                                    minimized_rmsd, _, _ = _selected_rmsd_metric(
+                                        minimized_details,
+                                        metric_atom_sets,
+                                    )
+                                    payload["rmsd"] = minimized_rmsd
+                                    payload["rmsd_details"] = minimized_details
+                                except Exception:
+                                    pass
             if raw_pdb_path is not None:
-                payload["pdb_path"] = str(raw_pdb_path)
-                payload["viewer_pdb_path"] = str(raw_pdb_path)
+                payload.setdefault("pdb_path", str(raw_pdb_path))
+                payload.setdefault("viewer_pdb_path", str(raw_pdb_path))
             if structure is not None:
                 snapshot_structures[key] = structure
                 payload.setdefault("source_atom_count", len(structure.atoms))
                 payload.setdefault("atom_count", len(structure.atoms))
+                if payload.get("role") == "top_snapshot" and gromacs_payload.get("gromacs_status") == "ok":
+                    for result_item in top_snapshot_results:
+                        if result_item.get("snapshot_key") == key:
+                            result_item["gromacs_status"] = gromacs_payload.get("gromacs_status")
+                            result_item["gromacs_potential_kj_mol"] = gromacs_payload.get("gromacs_potential_kj_mol")
+                            result_item["gromacs_potential_kcal_mol"] = gromacs_payload.get("gromacs_potential_kcal_mol")
+                            result_item["gromacs_minimized_full_pdb_path"] = gromacs_payload.get(
+                                "gromacs_minimized_full_pdb_path"
+                            )
+                            if payload.get("rmsd") is not None:
+                                result_item["rmsd"] = payload.get("rmsd")
+                            break
             structure_snapshot_payloads.append(payload)
 
     phase_results = getattr(folder, "phase_results", [])
@@ -10153,12 +10472,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 atom_sets=metric_atom_sets,
                 alignment_atom_set=rmsd_alignment_atom_set,
             )
-            primary_vs_last_phase_rmsd = primary_vs_last_phase_details["all_heavy_rmsd"]
-            primary_vs_last_phase_atom_count = primary_vs_last_phase_details["matched_heavy_atoms"]
+            (
+                primary_vs_last_phase_rmsd,
+                primary_vs_last_phase_atom_count,
+                primary_vs_last_phase_atom_label,
+            ) = _selected_rmsd_metric(primary_vs_last_phase_details, metric_atom_sets)
             print(
                 f"{_console_prefix(args.replica_id)} Primary vs last phase RMSD: "
                 f"{_format_optional_angstrom(primary_vs_last_phase_rmsd, 3)} "
-                f"({primary_vs_last_phase_atom_count} PHEAT heavy atoms)"
+                f"({primary_vs_last_phase_atom_count} {primary_vs_last_phase_atom_label})"
             )
         except Exception as exc:
             primary_vs_last_phase_details = {"status": "unavailable", "error": str(exc)}
@@ -10173,8 +10495,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 atom_sets=metric_atom_sets,
                 alignment_atom_set=rmsd_alignment_atom_set,
             )
-            readout_result["primary_drift_rmsd"] = drift_details["all_heavy_rmsd"]
-            readout_result["primary_drift_atom_count"] = drift_details["matched_heavy_atoms"]
+            drift_rmsd, drift_atoms, _ = _selected_rmsd_metric(drift_details, metric_atom_sets)
+            readout_result["primary_drift_rmsd"] = drift_rmsd
+            readout_result["primary_drift_atom_count"] = drift_atoms
             readout_result["primary_drift_details"] = drift_details
         except Exception as exc:
             readout_result["primary_drift_details"] = {"status": "unavailable", "error": str(exc)}
@@ -10279,6 +10602,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     rmsd = None
     rmsd_atom_count = None
+    rmsd_atom_label = "PHEAT heavy atoms"
     rmsd_reference_atom_count = None
     rmsd_predicted_atom_count = None
     rmsd_details = None
@@ -10305,15 +10629,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     atom_sets=metric_atom_sets,
                     alignment_atom_set=rmsd_alignment_atom_set,
                 )
-                rmsd = rmsd_details["all_heavy_rmsd"]
-                rmsd_atom_count = rmsd_details["matched_heavy_atoms"]
+                rmsd, rmsd_atom_count, rmsd_atom_label = _selected_rmsd_metric(rmsd_details, metric_atom_sets)
                 rmsd_reference_atom_count = rmsd_details["reference_atom_count"]
                 rmsd_predicted_atom_count = rmsd_details["target_atom_count"]
                 reference_ca = _ca_coords_from_structure(pheat_reference.metric_structure)
                 t_e2e, t_rg = _physics_metrics(reference_ca)
                 print(
                     f"{_console_prefix(args.replica_id)} Primary RMSD: {_format_optional_angstrom(rmsd, 3)} "
-                    f"({rmsd_atom_count} PHEAT heavy atoms)"
+                    f"({rmsd_atom_count} {rmsd_atom_label})"
                 )
             except Exception as exc:
                 print(f"{_console_prefix(args.replica_id)} Primary RMSD failed: {exc}")
@@ -10468,6 +10791,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "phase_comparison_results": phase_comparison_results,
         "reranking_config": asdict(phase_schedule.reranking),
         "reranking_results": reranking_results,
+        "top_snapshot_config": {
+            "top_k": int(args.top_k_snapshots),
+            "sort_by": args.snapshot_sort_by,
+            "scope": "final_phase",
+            "select_primary": bool(args.top_k_snapshots > 0),
+        },
+        "top_snapshot_results": top_snapshot_results,
         "phase_readiness_config": asdict(phase_schedule.phase_readiness),
         "phase_readiness_results": phase_readiness_results,
         "handoff_guard_config": asdict(phase_schedule.handoff_guard),
@@ -10622,7 +10952,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"  Objective  : {final_energy:.4f}")
     print(f"  Score      : {final_score.get('total')} {final_score.get('units')}")
     print(
-        f"  RMSD primary: {rmsd:.3f} A ({rmsd_atom_count} PHEAT heavy atoms)"
+        f"  RMSD primary: {rmsd:.3f} A ({rmsd_atom_count} {rmsd_atom_label})"
         if rmsd is not None
         else "  RMSD primary: N/A"
     )

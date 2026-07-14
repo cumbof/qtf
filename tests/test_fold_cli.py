@@ -708,6 +708,30 @@ def test_validation_report_section_lists_scorer_warnings():
     assert "force-field validation energy is extremely large" in html
 
 
+def test_validation_candidate_entries_include_top_snapshots():
+    from types import SimpleNamespace
+
+    import qtf.engines.qtf as qtf_engine
+
+    validation_config = SimpleNamespace(candidates=["top_snapshots"], evaluators=["gromacs_minimize"])
+    structure_snapshot_payloads = [
+        {"role": "top_snapshot", "key": "snapshot_top_001", "snapshot_rank": 1},
+        {"role": "phase", "key": "phase_01_collapse"},
+    ]
+    snapshot_structures = {"snapshot_top_001": object()}
+
+    entries = qtf_engine._validation_candidate_entries(
+        validation_config,
+        primary_structure=object(),
+        primary_snapshot_key=None,
+        structure_snapshot_payloads=structure_snapshot_payloads,
+        snapshot_structures=snapshot_structures,
+        reranking_results=[],
+    )
+
+    assert any(entry["candidate_set"] == "top_snapshots" and entry["snapshot_key"] == "snapshot_top_001" for entry in entries)
+
+
 def test_phase_geometry_overrides_resolve_in_schedule():
     import qtf.engines.qtf as qtf_engine
 
@@ -1239,6 +1263,44 @@ def test_pheat_native_robust_schedule_resolves():
     assert schedule.validation.enabled is True
     assert schedule.validation.candidates == ["primary", "phase_ends", "reranked_top"]
     assert schedule.report.structure_domain == "protein-heavy"
+
+
+def test_main_snapshot_equivalent_schedule_resolves():
+    import qtf.engines.qtf as qtf_engine
+
+    parser = qtf_engine._build_parser()
+    args = parser.parse_args([
+        "--predict",
+        "GA",
+        "--replica-id",
+        "0",
+        "--recipe",
+        "qtf-main-snapshot-equivalent",
+        "--backend",
+        "statevector",
+        "--shots",
+        "16",
+        "--maxiter",
+        "1",
+    ])
+    schedule = qtf_engine._resolve_phase_schedule(args, parser, global_shots=16, global_maxiter=1)
+    assert schedule.preset == "qtf-main-snapshot-equivalent"
+    assert [phase.name for phase in schedule.phases] == ["collapse", "refine", "relax"]
+    assert {phase.optimizer for phase in schedule.phases} == {"COBYLA"}
+    assert {phase.score_model for phase in schedule.phases} == {"pheat-coarse-protein-folding-v1"}
+    assert {phase.score_options["use_end_to_end_constraint"] for phase in schedule.phases} == {True}
+    assert {phase.score_options["end_to_end_scale"] for phase in schedule.phases} == {1.0}
+    assert {phase.score_options["hydrophobic_burial_denominator"] for phase in schedule.phases} == {35.0}
+    assert {phase.score_options["hydrophobic_burial_scale"] for phase in schedule.phases} == {0.7}
+    assert all("end_to_end_target" not in phase.score_options for phase in schedule.phases)
+    assert all("end_to_end_slack" not in phase.score_options for phase in schedule.phases)
+    assert schedule.reranking.enabled is False
+    assert schedule.reranking.evaluator is None
+    assert schedule.reranking.candidate_pool == {}
+    assert schedule.validation.enabled is True
+    assert schedule.validation.candidates == ["primary", "phase_ends", "top_snapshots"]
+    assert schedule.validation.evaluators == ["gromacs_minimize"]
+    assert schedule.evaluators["gromacs_minimize"].score_model == "pheat-gromacs-mdrun"
 
 
 
@@ -1780,7 +1842,7 @@ recipes:
       apply: next_phase_start
     validation:
       enabled: true
-      candidates: [primary, phase_ends, reranked_top]
+      candidates: [primary, phase_ends, reranked_top, top_snapshots]
       evaluators: [ambertools_gb, gromacs_minimize]
     phases:
       - name: phase-a
@@ -1792,7 +1854,7 @@ recipes:
     recipes = load_recipe_file(recipe_file)
     assert recipes["external"]["evaluators"]["ambertools_gb"]["score_model"] == "pheat-ambertools-sander"
     assert recipes["external"]["evaluators"]["gromacs_minimize"]["options"]["gromacs_preflight"] == "warn"
-    assert recipes["external"]["validation"]["candidates"] == ["primary", "phase_ends", "reranked_top"]
+    assert recipes["external"]["validation"]["candidates"] == ["primary", "phase_ends", "reranked_top", "top_snapshots"]
 
 
 def test_fold_cli_passes_metric_and_geometry_options_from_recipe():
@@ -1806,6 +1868,42 @@ def test_fold_cli_passes_metric_and_geometry_options_from_recipe():
     assert argv[argv.index("--report-structure-domain") + 1] == "protein-heavy"
     assert argv[argv.index("--store-lengths") + 1] == ""
     assert "--chi-mode" not in argv
+
+
+def test_fold_cli_passes_snapshot_options_to_engine():
+    from qtf.cli import _build_parser, _qtf_argv
+    from qtf.recipes import resolve_recipe
+
+    args = _build_parser().parse_args([
+        "fold",
+        "qtf-main-snapshot-equivalent",
+        "--sequence",
+        "GA",
+        "--top-k-snapshots",
+        "12",
+        "--snapshot-sort-by",
+        "rmsd",
+    ])
+    argv = _qtf_argv(args, resolve_recipe("qtf-main-snapshot-equivalent"))
+    assert argv[argv.index("--top-k-snapshots") + 1] == "12"
+    assert argv[argv.index("--snapshot-sort-by") + 1] == "rmsd"
+
+
+def test_engine_parser_accepts_snapshot_options():
+    import qtf.engines.qtf as qtf_engine
+
+    args = qtf_engine._build_parser().parse_args([
+        "--predict",
+        "GA",
+        "--replica-id",
+        "0",
+        "--top-k-snapshots",
+        "7",
+        "--snapshot-sort-by",
+        "energy",
+    ])
+    assert args.top_k_snapshots == 7
+    assert args.snapshot_sort_by == "energy"
 
 
 def test_fold_cli_passes_length_encoding_options_from_recipe():
