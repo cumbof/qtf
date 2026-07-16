@@ -52,6 +52,7 @@ from qtf.core.circuits import DEFAULT_CIRCUIT_TEMPLATE, build_circuit
 from qtf.core.folder import (
     TRANSPILE_OPTIMIZATION_LEVELS,
     QuantumBiophysicsFolder,
+    _energy_spaced_records,
 )
 from qtf.metrics import (
     DEFAULT_RMSD_ALIGNMENT_ATOM_SET,
@@ -700,6 +701,84 @@ def _jsonify(value):
 def _write_json(path: Path, payload: dict) -> None:
     text = json.dumps(_jsonify(payload), indent=4)
     path.write_text(text + "\n", encoding="utf-8")
+
+
+def _ranked_pdb_value(value) -> str:
+    if value is None:
+        return "NA"
+    try:
+        if isinstance(value, float) and not math.isfinite(value):
+            return "NA"
+        if isinstance(value, (np.floating, np.integer)):
+            value = value.item()
+        if isinstance(value, float):
+            return f"{value:.6g}"
+    except Exception:
+        pass
+    return str(value)
+
+
+def _first_existing_path(*paths) -> Optional[Path]:
+    for raw in paths:
+        if not raw:
+            continue
+        path = Path(str(raw))
+        if path.is_file():
+            return path
+    return None
+
+
+def _first_present(*values):
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _write_ranked_multimodel_pdb(path: Path, entries: Sequence[Mapping[str, Any]]) -> Optional[Path]:
+    model_index = 0
+    with path.open("w", encoding="utf-8") as out:
+        for entry in entries:
+            pdb_path = _first_existing_path(entry.get("pdb_path"))
+            if pdb_path is None:
+                continue
+            model_index += 1
+            out.write(f"MODEL     {model_index:4d}\n")
+            for remark in entry.get("remarks") or []:
+                out.write(f"REMARK {remark}\n")
+            with pdb_path.open("r", encoding="utf-8") as inp:
+                for line in inp:
+                    record = line[:6].strip().upper()
+                    if record in {"MODEL", "ENDMDL", "END"}:
+                        continue
+                    out.write(line if line.endswith("\n") else f"{line}\n")
+            out.write("ENDMDL\n")
+    if model_index == 0:
+        path.unlink(missing_ok=True)
+        return None
+    return path
+
+
+def _rank_by_numeric_value(items: Sequence[Mapping[str, Any]], key: str) -> dict[str, int]:
+    ranked = []
+    for item in items:
+        try:
+            value = float(item.get(key))
+        except Exception:
+            continue
+        if not math.isfinite(value):
+            continue
+        ranked.append((value, str(item.get("snapshot_key") or item.get("key") or item.get("id") or len(ranked))))
+    ranked.sort(key=lambda pair: pair[0])
+    ranks = {}
+    previous_value = None
+    previous_rank = 1
+    for index, (value, item_key) in enumerate(ranked, start=1):
+        if previous_value is None or value != previous_value:
+            previous_rank = index
+        ranks[item_key] = previous_rank
+        previous_value = value
+    return ranks
 
 
 def _report_structure_domain(value: Optional[str]) -> str:
@@ -2119,6 +2198,24 @@ def _selected_rmsd_metric(details: Optional[Mapping[str, Any]], atom_sets: Seque
     if "ca" in normalized:
         return details.get("ca_rmsd"), details.get("matched_ca_atoms"), "CA atoms"
     return details.get("all_heavy_rmsd"), details.get("matched_heavy_atoms"), "PHEAT heavy atoms"
+
+
+def _selected_rmsd_atom_set(atom_sets: Sequence[str]) -> str:
+    normalized = normalize_metric_atom_sets(atom_sets)
+    if "all-heavy" in normalized:
+        return "all-heavy"
+    if "backbone" in normalized:
+        return "backbone"
+    if "ca" in normalized:
+        return "ca"
+    return "all-heavy"
+
+
+def _pdb_alignment_atom_set(metric_atom_sets: Sequence[str], alignment_atom_set: str) -> str:
+    normalized = normalize_rmsd_alignment_atom_set(alignment_atom_set)
+    if normalized == "same-as-rmsd":
+        return _selected_rmsd_atom_set(metric_atom_sets)
+    return normalized
 
 
 def _pheat_heavy_atom_rmsd(
@@ -7416,6 +7513,7 @@ def _run_optimization_phases(
     phase_readiness_config: Optional[PhaseReadinessConfig] = None,
     handoff_guard_config: Optional[HandoffGuardConfig] = None,
     top_k_snapshots: int = 0,
+    snapshot_energy_gap: float = 0.25,
     snapshot_sort_by: str = "energy",
     outdir: Optional[Path] = None,
     prefix: Optional[str] = None,
@@ -9038,6 +9136,11 @@ def _run_optimization_phases(
             and record.get("params") is not None
             and np.isfinite(float(record.get("objective", math.inf)))
         ]
+        candidates = _energy_spaced_records(
+            sorted(candidates, key=lambda item: float(item.get("objective", PHEAT_FAILURE_PENALTY))),
+            limit=top_k_snapshot_limit,
+            min_energy_gap=snapshot_energy_gap,
+        )
         ranked_candidates = []
         for candidate in candidates:
             try:
@@ -9113,6 +9216,7 @@ def _run_optimization_phases(
                 snapshot["objective"] = item["objective"]
                 snapshot["snapshot_rank"] = rank
                 snapshot["snapshot_sort_by"] = snapshot_sort_by
+                snapshot["snapshot_energy_gap"] = float(snapshot_energy_gap)
                 snapshot["snapshot_sort_value"] = item["sort_value"]
                 snapshot["rmsd"] = item["rmsd"]
                 snapshot["rmsd_details"] = item["rmsd_details"]
@@ -9127,6 +9231,7 @@ def _run_optimization_phases(
                 "objective": item["objective"],
                 "rmsd": item["rmsd"],
                 "sort_by": snapshot_sort_by,
+                "energy_gap": float(snapshot_energy_gap),
                 "sort_value": item["sort_value"],
                 "status": "ok",
             }
@@ -9358,6 +9463,12 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["energy", "rmsd"],
         default="energy",
         help="Rank --top-k-snapshots by optimizer energy or reference RMSD.",
+    )
+    parser.add_argument(
+        "--snapshot-energy-gap",
+        type=float,
+        default=0.25,
+        help="Minimum raw objective-energy spacing between saved top snapshots; 0 disables energy-spacing filtering.",
     )
     parser.add_argument(
         "--backend",
@@ -9648,6 +9759,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parser.error("--maxiter must be > 0.")
     if args.top_k_snapshots < 0:
         parser.error("--top-k-snapshots must be >= 0.")
+    if args.snapshot_energy_gap < 0:
+        parser.error("--snapshot-energy-gap must be >= 0.")
     if args.snapshot_sort_by == "rmsd" and args.top_k_snapshots > 0 and not args.reference_structure:
         parser.error("--snapshot-sort-by rmsd requires --reference-structure when --top-k-snapshots is > 0.")
     if args.seed is not None and args.seed < 0:
@@ -10172,6 +10285,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             phase_readiness_config=phase_schedule.phase_readiness,
             handoff_guard_config=phase_schedule.handoff_guard,
             top_k_snapshots=args.top_k_snapshots,
+            snapshot_energy_gap=args.snapshot_energy_gap,
             snapshot_sort_by=args.snapshot_sort_by,
             outdir=outdir,
             prefix=prefix,
@@ -10680,6 +10794,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     report_path = outdir / f"{prefix}_report.html"
     folded_aligned_pdb_path = pdb_path
+    ranked_pdb_alignment_atom_set = _pdb_alignment_atom_set(metric_atom_sets, rmsd_alignment_atom_set)
     timings.start("report_generation")
     try:
         try:
@@ -10689,6 +10804,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 aligned_reference, aligned_folded, _aligned_atom_count = _aligned_pheat_structures(
                     pheat_reference.metric_structure,
                     final_structure,
+                    atom_set=ranked_pdb_alignment_atom_set,
                 )
                 _aligned_reference_report, aligned_reference_coverage = _write_report_pdb(
                     aligned_reference,
@@ -10713,6 +10829,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     _snapshot_reference, aligned_snapshot, aligned_atom_count = _aligned_pheat_structures(
                         pheat_reference.metric_structure,
                         structure,
+                        atom_set=ranked_pdb_alignment_atom_set,
                     )
                     aligned_snapshot_report, aligned_snapshot_coverage = _write_report_pdb(
                         aligned_snapshot,
@@ -10736,6 +10853,111 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             status="error" if report_error else "ok",
             metadata={"report_path": str(report_path), "error": report_error} if report_error else {"report_path": str(report_path)},
         )
+
+    primary_gromacs_validation = next(
+        (
+            item
+            for item in validation_results
+            if item.get("candidate_set") == "primary"
+            and item.get("score_model") == "pheat-gromacs-mdrun"
+            and item.get("status") == "ok"
+        ),
+        {},
+    )
+    primary_gromacs_kj = primary_gromacs_validation.get("score_total")
+    primary_gromacs_kcal = None
+    try:
+        primary_gromacs_kcal = float(primary_gromacs_kj) / 4.184
+    except Exception:
+        primary_gromacs_kcal = None
+
+    ensemble_ranked_pdb_path = _write_ranked_multimodel_pdb(
+        outdir / "ensemble_ranked.pdb",
+        [
+            {
+                "pdb_path": str(folded_aligned_pdb_path or pdb_path),
+                "remarks": [
+                    f"QTF_SOURCE replica=replica_{int(args.replica_id) + 1} replica_id={int(args.replica_id)}",
+                    "QTF_RANK file_rank=1 energy_rank=1 rmsd_rank=1",
+                    (
+                        f"QTF_SCORE energy={_ranked_pdb_value(final_energy)} "
+                        f"score_total={_ranked_pdb_value(final_score.get('total'))} "
+                        f"score_units={_ranked_pdb_value(final_score.get('units'))} "
+                        f"gromacs_potential_kj_mol={_ranked_pdb_value(primary_gromacs_kj)} "
+                        f"gromacs_potential_kcal_mol={_ranked_pdb_value(primary_gromacs_kcal)} "
+                        f"rmsd_A={_ranked_pdb_value(rmsd)} "
+                        f"alignment_atom_set={_ranked_pdb_value(ranked_pdb_alignment_atom_set)}"
+                    ),
+                    f"QTF_PDB_SOURCE {folded_aligned_pdb_path or pdb_path}",
+                ],
+            }
+        ],
+    )
+
+    top_snapshot_payload_by_key = {
+        str(snapshot.get("key")): snapshot
+        for snapshot in structure_snapshot_payloads
+        if snapshot.get("role") == "top_snapshot"
+    }
+    ok_top_snapshot_results = [
+        item
+        for item in top_snapshot_results
+        if item.get("status") == "ok"
+        and str(item.get("snapshot_key")) in top_snapshot_payload_by_key
+    ]
+    energy_ranks = _rank_by_numeric_value(ok_top_snapshot_results, "objective")
+    rmsd_ranks = _rank_by_numeric_value(ok_top_snapshot_results, "rmsd")
+    snapshot_ranked_entries = []
+    for file_rank, item in enumerate(ok_top_snapshot_results, start=1):
+        key = str(item.get("snapshot_key"))
+        payload = top_snapshot_payload_by_key[key]
+        pdb_source = _first_existing_path(
+            payload.get("aligned_pdb_path"),
+            payload.get("viewer_pdb_path"),
+            payload.get("gromacs_minimized_full_pdb_path"),
+            payload.get("pdb_path"),
+            payload.get("raw_pdb_path"),
+        )
+        if pdb_source is None:
+            continue
+        snapshot_rank = item.get("rank") or payload.get("snapshot_rank") or file_rank
+        snapshot_rank_key = str(item.get("snapshot_key") or key)
+        snapshot_ranked_entries.append(
+            {
+                "pdb_path": str(pdb_source),
+                "remarks": [
+                    (
+                        f"QTF_SOURCE replica=replica_{int(args.replica_id) + 1} "
+                        f"replica_id={int(args.replica_id)} snapshot_key={key} "
+                        f"snapshot_rank_within_replica={_ranked_pdb_value(snapshot_rank)}"
+                    ),
+                    (
+                        f"QTF_RANK file_rank={file_rank} "
+                        f"energy_rank={_ranked_pdb_value(energy_ranks.get(snapshot_rank_key))} "
+                        f"rmsd_rank={_ranked_pdb_value(rmsd_ranks.get(snapshot_rank_key))} "
+                        f"snapshot_global_rank={file_rank}"
+                    ),
+                    (
+                        f"QTF_SCORE energy={_ranked_pdb_value(item.get('objective'))} "
+                        f"gromacs_potential_kj_mol={_ranked_pdb_value(_first_present(payload.get('gromacs_potential_kj_mol'), item.get('gromacs_potential_kj_mol')))} "
+                        f"gromacs_potential_kcal_mol={_ranked_pdb_value(_first_present(payload.get('gromacs_potential_kcal_mol'), item.get('gromacs_potential_kcal_mol')))} "
+                        f"effective_rmsd_A={_ranked_pdb_value(_first_present(item.get('rmsd'), payload.get('rmsd')))} "
+                        f"raw_rmsd_A={_ranked_pdb_value(payload.get('raw_rmsd'))} "
+                        f"gromacs_rmsd_A={_ranked_pdb_value(_first_present(item.get('rmsd'), payload.get('rmsd')))} "
+                        f"alignment_atom_set={_ranked_pdb_value(ranked_pdb_alignment_atom_set)}"
+                    ),
+                    f"QTF_PDB_SOURCE {pdb_source}",
+                ],
+            }
+        )
+    snapshot_ranked_pdb_path = _write_ranked_multimodel_pdb(
+        outdir / "snapshot_ranked.pdb",
+        snapshot_ranked_entries,
+    )
+    if ensemble_ranked_pdb_path is not None:
+        print(f"{_console_prefix(args.replica_id)} Ranked ensemble PDB: {ensemble_ranked_pdb_path}")
+    if snapshot_ranked_pdb_path is not None:
+        print(f"{_console_prefix(args.replica_id)} Ranked snapshot PDB: {snapshot_ranked_pdb_path}")
 
     backend_display = None if hw_backend is None else _backend_display_name(hw_backend)
     rmsd_angle_mode = getattr(folder, "rmsd_angle_mode", "statevector" if hw_backend is None else "sampler")
@@ -10793,6 +11015,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "reranking_results": reranking_results,
         "top_snapshot_config": {
             "top_k": int(args.top_k_snapshots),
+            "energy_gap": float(args.snapshot_energy_gap),
             "sort_by": args.snapshot_sort_by,
             "scope": "final_phase",
             "select_primary": bool(args.top_k_snapshots > 0),
@@ -10922,6 +11145,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "phase_gate_estimates": phase_gate_estimates,
         "pdb_path": str(pdb_path),
         "ca_pdb_path": str(ca_pdb_path),
+        "ensemble_ranked_pdb_path": str(ensemble_ranked_pdb_path) if ensemble_ranked_pdb_path is not None else None,
+        "snapshot_ranked_pdb_path": str(snapshot_ranked_pdb_path) if snapshot_ranked_pdb_path is not None else None,
         "heavy_json_path": str(heavy_json_path),
         "residue_geometry_path": str(residue_geometry_path),
         "score_path": str(score_path),

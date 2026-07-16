@@ -53,6 +53,46 @@ from qtf.scoring import canonical_score_model, is_qtf_score_model, score_classic
 
 logger = logging.getLogger(__name__)
 
+
+def _energy_spaced_records(
+    records: list[dict[str, Any]],
+    *,
+    limit: int,
+    min_energy_gap: float = 0.0,
+) -> list[dict[str, Any]]:
+    """Return the lowest-energy records separated by a minimum objective gap."""
+    if limit <= 0:
+        return []
+    min_energy_gap = max(0.0, float(min_energy_gap))
+    selected: list[dict[str, Any]] = []
+    for record in records:
+        objective = float(record.get("objective", PHEAT_FAILURE_PENALTY))
+        close_indices = [
+            idx
+            for idx, kept in enumerate(selected)
+            if abs(objective - float(kept.get("objective", PHEAT_FAILURE_PENALTY))) < min_energy_gap
+        ]
+        if close_indices:
+            best_close_energy = min(
+                float(selected[idx].get("objective", PHEAT_FAILURE_PENALTY))
+                for idx in close_indices
+            )
+            if objective < best_close_energy:
+                close_set = set(close_indices)
+                selected = [
+                    kept
+                    for idx, kept in enumerate(selected)
+                    if idx not in close_set
+                ]
+                selected.append(record)
+                selected.sort(key=lambda item: float(item.get("objective", PHEAT_FAILURE_PENALTY)))
+            continue
+        selected.append(record)
+        selected.sort(key=lambda item: float(item.get("objective", PHEAT_FAILURE_PENALTY)))
+        if len(selected) > limit:
+            selected = selected[:limit]
+    return selected[:limit]
+
 # Coulomb's law prefactor: 332.0637 kcal mol⁻¹ Å e⁻²
 # (charges in elementary charges, distances in Ångströms, energy in kcal/mol)
 _COULOMB_PREFACTOR: float = 332.0637
@@ -1478,6 +1518,7 @@ class QuantumBiophysicsFolder:
         scout_attempts: int | None = None,
         phase_schedule: list[dict] | None = None,
         top_k_snapshots: int = 0,
+        snapshot_energy_gap: float = 0.0,
     ) -> tuple[np.ndarray, list, list, LandscapeTracker, np.ndarray, float, list[dict[str, Any]]]:
         """Run the configurable optimisation phase curriculum.
 
@@ -1511,6 +1552,10 @@ class QuantumBiophysicsFolder:
         top_k_snapshots:
             Number of lowest-objective candidate structures to return from
             the optimization trace. ``0`` disables candidate materialization.
+        snapshot_energy_gap:
+            Minimum raw objective-energy spacing between returned snapshots.
+            Candidates closer than this to an already retained snapshot replace
+            that neighborhood only when they are lower energy.
 
         Returns
         -------
@@ -1634,12 +1679,17 @@ class QuantumBiophysicsFolder:
         if result is None:
             raise ValueError("fold() phase_schedule must contain at least one phase.")
         coords, labels, bonds = self.build_full_structure(self._get_angles(result.x))
-        best_snapshots = self._candidate_snapshots(top_k_snapshots)
+        best_snapshots = self._candidate_snapshots(top_k_snapshots, snapshot_energy_gap=snapshot_energy_gap)
         self.candidate_records = previous_candidate_records
         logger.info("  Final energy: %.2f", result.fun)
         return coords, labels, bonds, self.tracker, result.x, float(result.fun), best_snapshots
 
-    def _candidate_snapshots(self, top_k_snapshots: int) -> list[dict[str, Any]]:
+    def _candidate_snapshots(
+        self,
+        top_k_snapshots: int,
+        *,
+        snapshot_energy_gap: float = 0.0,
+    ) -> list[dict[str, Any]]:
         limit = int(top_k_snapshots or 0)
         records = list(getattr(self, "candidate_records", None) or [])
         if limit <= 0 or not records:
@@ -1648,10 +1698,14 @@ class QuantumBiophysicsFolder:
             record for record in records
             if np.isfinite(float(record.get("objective", PHEAT_FAILURE_PENALTY)))
         ]
-        selected = sorted(
-            finite_records or records,
-            key=lambda item: float(item.get("objective", PHEAT_FAILURE_PENALTY)),
-        )[:limit]
+        selected = _energy_spaced_records(
+            sorted(
+                finite_records or records,
+                key=lambda item: float(item.get("objective", PHEAT_FAILURE_PENALTY)),
+            ),
+            limit=limit,
+            min_energy_gap=snapshot_energy_gap,
+        )
         snapshots: list[dict[str, Any]] = []
         for record in selected:
             params = np.asarray(record.get("params"), dtype=float)

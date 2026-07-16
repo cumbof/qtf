@@ -58,6 +58,7 @@ def _build_parser() -> argparse.ArgumentParser:
     fold.add_argument("--max-iter", dest="max_iter", type=int, default=None)
     fold.add_argument("--scout-attempts", dest="scout_attempts", type=int, default=None)
     fold.add_argument("--top-k-snapshots", dest="top_k_snapshots", type=int, default=None)
+    fold.add_argument("--snapshot-energy-gap", dest="snapshot_energy_gap", type=float, default=None)
     fold.add_argument("--snapshot-sort-by", choices=["energy", "rmsd"], default=None)
     fold.add_argument("--backend", default=None)
     fold.add_argument("--ibm-account", default=None)
@@ -426,6 +427,7 @@ def _qtf_argv(args, recipe: dict) -> list[str]:
         ("--primary-result", args.primary_result),
         ("--report-command-line", args.report_command_line),
         ("--top-k-snapshots", args.top_k_snapshots),
+        ("--snapshot-energy-gap", args.snapshot_energy_gap),
         ("--snapshot-sort-by", args.snapshot_sort_by),
         ("--circuit-template", args.circuit_template),
         ("--circuit-template-source", args.circuit_template_source),

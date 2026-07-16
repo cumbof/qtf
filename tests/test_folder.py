@@ -493,6 +493,18 @@ class TestFoldScoutBudget:
         assert len(result) == 7
         assert result[6] == []
 
+    def test_candidate_snapshots_enforce_energy_gap_bridge_case(self):
+        from qtf.core.folder import _energy_spaced_records
+
+        records = [
+            {"objective": 0.0, "params": np.asarray([0.0])},
+            {"objective": 0.18, "params": np.asarray([1.0])},
+            {"objective": 0.09, "params": np.asarray([2.0])},
+        ]
+
+        selected = _energy_spaced_records(records, limit=3, min_energy_gap=0.1)
+        assert [record["objective"] for record in selected] == [0.0, 0.18]
+
     def test_cobyla_maxfun_warning_not_emitted(self):
         """B10: a small-budget ``fold()`` (max_iter=10) must not leak
         SciPy's ``COBYLA: Invalid MAXFUN`` warning.

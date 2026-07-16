@@ -1881,11 +1881,14 @@ def test_fold_cli_passes_snapshot_options_to_engine():
         "GA",
         "--top-k-snapshots",
         "12",
+        "--snapshot-energy-gap",
+        "0.1",
         "--snapshot-sort-by",
         "rmsd",
     ])
     argv = _qtf_argv(args, resolve_recipe("qtf-main-snapshot-equivalent"))
     assert argv[argv.index("--top-k-snapshots") + 1] == "12"
+    assert argv[argv.index("--snapshot-energy-gap") + 1] == "0.1"
     assert argv[argv.index("--snapshot-sort-by") + 1] == "rmsd"
 
 
@@ -1899,10 +1902,13 @@ def test_engine_parser_accepts_snapshot_options():
         "0",
         "--top-k-snapshots",
         "7",
+        "--snapshot-energy-gap",
+        "0.1",
         "--snapshot-sort-by",
         "energy",
     ])
     assert args.top_k_snapshots == 7
+    assert args.snapshot_energy_gap == 0.1
     assert args.snapshot_sort_by == "energy"
 
 
@@ -2173,6 +2179,55 @@ def test_qtf_report_pdb_filters_by_report_domain(tmp_path):
     assert all_heavy_coverage["scored_atom_count"] == 3
     assert " HOH " in all_heavy_text
     assert " BEN " in all_heavy_text
+
+
+def test_ranked_multimodel_pdb_strips_nested_records(tmp_path):
+    import qtf.engines.qtf as qtf_engine
+
+    source = tmp_path / "source.pdb"
+    source.write_text(
+        "\n".join(
+            [
+                "MODEL        9",
+                "REMARK existing",
+                "ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00  0.00           C",
+                "ENDMDL",
+                "END",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "ranked.pdb"
+
+    written = qtf_engine._write_ranked_multimodel_pdb(
+        out,
+        [
+            {
+                "pdb_path": str(source),
+                "remarks": [
+                    "QTF_SOURCE replica=replica_1 replica_id=0",
+                    "QTF_SCORE energy=-1 gromacs_potential_kj_mol=-2",
+                ],
+            }
+        ],
+    )
+
+    text = out.read_text(encoding="utf-8")
+    assert written == out
+    assert text.count("MODEL") == 1
+    assert text.count("ENDMDL") == 1
+    assert "QTF_SOURCE replica=replica_1" in text
+    assert "gromacs_potential_kj_mol=-2" in text
+    assert text.rstrip().endswith("ENDMDL")
+
+
+def test_pdb_alignment_atom_set_matches_selected_rmsd_metric():
+    import qtf.engines.qtf as qtf_engine
+
+    assert qtf_engine._pdb_alignment_atom_set(["ca"], "same-as-rmsd") == "ca"
+    assert qtf_engine._pdb_alignment_atom_set(["ca", "all-heavy"], "same-as-rmsd") == "all-heavy"
+    assert qtf_engine._pdb_alignment_atom_set(["ca", "all-heavy"], "ca") == "ca"
 
 
 def test_qtf_copies_pheat_managed_molstar_assets(tmp_path, monkeypatch):

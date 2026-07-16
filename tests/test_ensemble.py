@@ -441,5 +441,14 @@ def test_worker_exists_and_accepts_expected_args():
     import inspect
     from qtf.core.ensemble import _run_one_replica
     sig = inspect.signature(_run_one_replica)
-    for param in ("folder_kwargs", "replica_seed", "index", "strat", "max_iter", "scout_attempts", "top_k_snapshots"):
+    for param in (
+        "folder_kwargs",
+        "replica_seed",
+        "index",
+        "strat",
+        "max_iter",
+        "scout_attempts",
+        "top_k_snapshots",
+        "snapshot_energy_gap",
+    ):
         assert param in sig.parameters, f"Missing parameter: {param}"
