@@ -41,6 +41,7 @@ def _run_one_replica(
     scout_attempts: int,
     n_runs: int,
     top_k_snapshots: int = 0,
+    snapshot_energy_gap: float = 0.0,
 ) -> dict:
     """Execute a single folding replica in a subprocess.
 
@@ -57,6 +58,7 @@ def _run_one_replica(
         max_iter=max_iter,
         initial_params=start_params,
         top_k_snapshots=top_k_snapshots,
+        snapshot_energy_gap=snapshot_energy_gap,
         progress_label=f"Replica {index + 1}/{n_runs}",
     )
 
@@ -117,6 +119,7 @@ class EnsembleFoldingManager:
         checkpoint_path: str | None = None,
         max_workers: int = 1,
         top_k_snapshots: int = 0,
+        snapshot_energy_gap: float = 0.0,
     ) -> None:
         """Run *n_runs* independent folding trajectories in parallel.
 
@@ -155,6 +158,10 @@ class EnsembleFoldingManager:
             value greater than ``1`` to enable parallel execution with that
             many workers.  Set to ``0`` or negative to use all available
             CPUs (``os.cpu_count()``).
+        snapshot_energy_gap:
+            Minimum raw objective-energy spacing between saved best snapshots.
+            Candidates closer than this to an already retained snapshot replace
+            that snapshot only when they have lower energy.
         """
         logger.info("Starting ensemble run: %d trajectories", n_runs)
         self.results = []
@@ -195,11 +202,13 @@ class EnsembleFoldingManager:
             self._run_sequential(
                 tasks, folder_kwargs, max_iter, scout_attempts, n_runs,
                 top_k_snapshots=top_k_snapshots,
+                snapshot_energy_gap=snapshot_energy_gap,
             )
         else:
             self._run_parallel(
                 tasks, folder_kwargs, max_iter, scout_attempts, n_runs, n_workers,
                 top_k_snapshots=top_k_snapshots,
+                snapshot_energy_gap=snapshot_energy_gap,
             )
 
         # Restore deterministic insertion order (by replica id)
@@ -217,6 +226,7 @@ class EnsembleFoldingManager:
         scout_attempts: int,
         n_runs: int,
         top_k_snapshots: int = 0,
+        snapshot_energy_gap: float = 0.0,
     ) -> None:
         """Run replicas in-process using ``self.folder`` (no subprocess).
 
@@ -241,6 +251,7 @@ class EnsembleFoldingManager:
                     self.folder.fold(
                         max_iter=max_iter, initial_params=start_params,
                         top_k_snapshots=top_k_snapshots,
+                        snapshot_energy_gap=snapshot_energy_gap,
                         progress_label=f"Replica {i + 1}/{n_runs}",
                     )
                 )
@@ -294,6 +305,7 @@ class EnsembleFoldingManager:
         n_runs: int,
         n_workers: int,
         top_k_snapshots: int = 0,
+        snapshot_energy_gap: float = 0.0,
     ) -> None:
         """Distribute replicas across *n_workers* subprocesses."""
         from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -311,6 +323,7 @@ class EnsembleFoldingManager:
                     scout_attempts,
                     n_runs,
                     top_k_snapshots,
+                    snapshot_energy_gap,
                 )
                 fut_to_idx[fut] = i
 

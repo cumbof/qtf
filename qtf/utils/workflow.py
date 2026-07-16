@@ -494,14 +494,41 @@ def select_rmsd_coords(
     return arr[filtered_idx], keys, filtered_residues
 
 
-def rmsd_between_structures(
+def _kabsch_alignment_transform(model_common_arr: np.ndarray, ref_common_arr: np.ndarray):
+    model_center = model_common_arr.mean(axis=0)
+    ref_center = ref_common_arr.mean(axis=0)
+    model_centered = model_common_arr - model_center
+    ref_centered = ref_common_arr - ref_center
+    h = model_centered.T @ ref_centered
+    v, _s, wt = np.linalg.svd(h)
+    if (np.linalg.det(v) * np.linalg.det(wt)) < 0.0:
+        v[:, -1] = -v[:, -1]
+    rotation = v @ wt
+    return model_center, rotation, ref_center
+
+
+def apply_alignment_transform(coords: Any, transform: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]):
+    if transform is None:
+        if isinstance(coords, dict):
+            return {key: np.asarray(value, dtype=float) for key, value in coords.items()}
+        return np.asarray(coords, dtype=float)
+    if isinstance(coords, dict):
+        return {
+            key: apply_alignment_transform(np.asarray(value, dtype=float).reshape(1, 3), transform)[0]
+            for key, value in coords.items()
+        }
+    model_center, rotation, ref_center = transform
+    return (np.asarray(coords, dtype=float) - model_center) @ rotation + ref_center
+
+
+def align_structure_to_reference(
     model_coords: np.ndarray,
     model_labels: List[Tuple[int, str, str]],
     reference_coords: np.ndarray,
     reference_labels: List[Tuple[int, str, str]],
     rmsd_mode: str,
     rmsd_residue_scope: str,
-) -> Tuple[float, Dict[str, object]]:
+) -> Tuple[np.ndarray, float, Dict[str, object], Tuple[np.ndarray, np.ndarray, np.ndarray]]:
     model_sel, model_keys, model_residues = select_rmsd_coords(model_coords, model_labels, rmsd_mode, rmsd_residue_scope)
     ref_sel, ref_keys, ref_residues = select_rmsd_coords(reference_coords, reference_labels, rmsd_mode, rmsd_residue_scope)
     ref_map = {key: coord for key, coord in zip(ref_keys, ref_sel)}
@@ -535,7 +562,30 @@ def rmsd_between_structures(
         n_matched=len(model_common_arr),
         n_missing=len(missing),
     )
-    rmsd, _ = kabsch_rmsd(model_common_arr, ref_common_arr)
+    transform = _kabsch_alignment_transform(model_common_arr, ref_common_arr)
+    aligned_common = apply_alignment_transform(model_common_arr, transform)
+    diff = aligned_common - ref_common_arr
+    rmsd = float(np.sqrt(np.mean(np.sum(diff ** 2, axis=1))))
+    aligned_coords = apply_alignment_transform(model_coords, transform)
+    return aligned_coords, rmsd, meta, transform
+
+
+def rmsd_between_structures(
+    model_coords: np.ndarray,
+    model_labels: List[Tuple[int, str, str]],
+    reference_coords: np.ndarray,
+    reference_labels: List[Tuple[int, str, str]],
+    rmsd_mode: str,
+    rmsd_residue_scope: str,
+) -> Tuple[float, Dict[str, object]]:
+    _, rmsd, meta, _ = align_structure_to_reference(
+        model_coords,
+        model_labels,
+        reference_coords,
+        reference_labels,
+        rmsd_mode,
+        rmsd_residue_scope,
+    )
     return float(rmsd), meta
 
 

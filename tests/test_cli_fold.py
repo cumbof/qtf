@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 
 from qtf.cli import fold as fold_cli
+from qtf.core.folder import QuantumBiophysicsFolder
 
 
 class _FakeFolder:
@@ -25,6 +26,7 @@ class _FakeManager:
     def __init__(self, folder):
         self.folder = folder
         self.top_k_snapshots = None
+        self.snapshot_energy_gap = None
         coords = np.asarray([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=float)
         labels = [(0, "CA", "C"), (0, "CB", "C")]
         self.results = [
@@ -42,8 +44,9 @@ class _FakeManager:
             }
         ]
 
-    def run_ensemble(self, n_runs, max_iter, top_k_snapshots=0):
+    def run_ensemble(self, n_runs, max_iter, top_k_snapshots=0, snapshot_energy_gap=0.0):
         self.top_k_snapshots = top_k_snapshots
+        self.snapshot_energy_gap = snapshot_energy_gap
 
     def get_results(self, ranked=True):
         return self.results
@@ -136,6 +139,78 @@ def test_fold_cli_defaults_to_window_omega_mode(monkeypatch, tmp_path):
     assert make_folder_kwargs["omega_mode"] == "window"
 
 
+def test_best_snapshot_tracker_enforces_energy_gap():
+    folder = QuantumBiophysicsFolder.__new__(QuantumBiophysicsFolder)
+    energies = iter([-10.0, -9.9, -10.1, -9.74, -9.73, -9.4])
+
+    def fake_energy_function(params, **kwargs):
+        return next(energies)
+
+    folder.energy_function = fake_energy_function
+    tracker = folder._build_best_k_tracker(3, min_energy_gap=0.25)
+
+    for idx in range(6):
+        tracker(np.asarray([idx], dtype=float))
+
+    kept = sorted(-entry[0] for entry in tracker._heap)
+    assert kept == [-10.1, -9.74, -9.4]
+
+
+def test_best_snapshot_tracker_rejects_bridging_energy_gap_candidate():
+    folder = QuantumBiophysicsFolder.__new__(QuantumBiophysicsFolder)
+    energies = iter([0.0, 0.18, 0.09])
+
+    def fake_energy_function(params, **kwargs):
+        return next(energies)
+
+    folder.energy_function = fake_energy_function
+    tracker = folder._build_best_k_tracker(3, min_energy_gap=0.1)
+
+    for idx in range(3):
+        tracker(np.asarray([idx], dtype=float))
+
+    kept = sorted(-entry[0] for entry in tracker._heap)
+    assert kept == [0.0, 0.18]
+
+
+def test_reference_alignment_transform_applies_to_full_structure():
+    reference = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=float,
+    )
+    labels = [(0, "N", "N"), (0, "CA", "C"), (0, "C", "C"), (1, "CA", "C")]
+    rotation = np.asarray(
+        [
+            [0.0, -1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=float,
+    )
+    translation = np.asarray([4.0, -2.0, 7.0], dtype=float)
+    model = reference @ rotation + translation
+
+    aligned, rmsd, _meta, transform = fold_cli.utils.align_structure_to_reference(
+        model,
+        labels,
+        reference,
+        labels,
+        "heavy",
+        "all",
+    )
+
+    assert np.allclose(aligned, reference)
+    assert np.isclose(rmsd, 0.0)
+
+    centroid = fold_cli.utils.apply_alignment_transform({0: model[0]}, transform)
+    assert np.allclose(centroid[0], reference[0])
+
+
 def test_fold_snapshot_gromacs_follows_gromacs_minimize(monkeypatch, tmp_path):
     _patch_fast_fold(monkeypatch)
     minimized_snapshot_inputs = []
@@ -198,10 +273,10 @@ def test_fold_snapshot_gromacs_follows_gromacs_minimize(monkeypatch, tmp_path):
     assert len(minimized_snapshot_inputs) == 2
     run_dir = next(path for path in tmp_path.iterdir() if path.is_dir())
     assert minimized_snapshot_workdirs == [
-        str(run_dir / "gromacs_minimized_models" / "snapshots" / "model_1" / "snapshot_1"),
-        str(run_dir / "gromacs_minimized_models" / "snapshots" / "model_1" / "snapshot_2"),
+        str(run_dir / "gromacs_minimized_models" / "snapshots" / "replica_1" / "snapshot_1"),
+        str(run_dir / "gromacs_minimized_models" / "snapshots" / "replica_1" / "snapshot_2"),
     ]
-    assert all("raw_models/snapshots/model_1" in path for path in minimized_snapshot_inputs)
+    assert all("raw_models/snapshots/replica_1" in path for path in minimized_snapshot_inputs)
     assert all(not os.path.exists(path) for path in minimized_snapshot_inputs)
     snapshot_csv = next(tmp_path.glob("*/snapshot_ranked.csv"))
     snapshots = pd.read_csv(snapshot_csv)
@@ -264,6 +339,20 @@ def test_fold_snapshot_gromacs_disabled_with_gromacs_minimize_zero(monkeypatch, 
     assert snapshots["snapshot_gromacs_enabled"].tolist() == [False, False]
     assert snapshots["snapshot_raw_pdb_retained"].tolist() == [True, True]
     assert all(os.path.exists(path) for path in snapshots["snapshot_pdb_path"])
+    run_dir = snapshot_csv.parent
+    snapshot_pdb = run_dir / "snapshot_ranked.pdb"
+    ensemble_pdb = run_dir / "ensemble_ranked.pdb"
+    assert snapshot_pdb.exists()
+    assert ensemble_pdb.exists()
+    snapshot_text = snapshot_pdb.read_text()
+    ensemble_text = ensemble_pdb.read_text()
+    assert sum(1 for line in snapshot_text.splitlines() if line.startswith("MODEL")) == 2
+    assert sum(1 for line in ensemble_text.splitlines() if line.startswith("MODEL")) == 1
+    assert "QTF_SOURCE replica=replica_1" in snapshot_text
+    assert "QTF_RANK file_rank=1 energy_rank=1 rmsd_rank=" in snapshot_text
+    assert "gromacs_potential_kj_mol=NA" in snapshot_text
+    assert "QTF_SOURCE replica=replica_1" in ensemble_text
+    assert "gromacs_potential_kj_mol=NA" in ensemble_text
 
 
 def test_fold_keeps_raw_snapshot_when_gromacs_fails(monkeypatch, tmp_path):
@@ -349,6 +438,10 @@ def test_snapshot_rmsd_sort_uses_effective_gromacs_rmsd_when_available(monkeypat
         }
         return rmsd_by_marker.get(marker, 9.0), {}
 
+    def fake_align_structure_to_reference(coords, labels, *args, **kwargs):
+        rmsd, meta = fake_rmsd_between_structures(coords, labels, *args, **kwargs)
+        return np.asarray(coords, dtype=float), rmsd, meta, None
+
     def fake_minimize_pdb_with_gromacs(input_pdb, workdir, **kwargs):
         os.makedirs(workdir, exist_ok=True)
         minimized_pdb = os.path.join(workdir, "minimized.pdb")
@@ -379,6 +472,7 @@ def test_snapshot_rmsd_sort_uses_effective_gromacs_rmsd_when_available(monkeypat
             "gromacs_info": {"gromacs_status": "ok"},
         }
 
+    monkeypatch.setattr(fold_cli.utils, "align_structure_to_reference", fake_align_structure_to_reference)
     monkeypatch.setattr(fold_cli.utils, "rmsd_between_structures", fake_rmsd_between_structures)
     monkeypatch.setattr(fold_cli.qtf_gromacs, "minimize_pdb_with_gromacs", fake_minimize_pdb_with_gromacs)
     monkeypatch.setattr(fold_cli.qtf_gromacs, "parse_pdb_atoms", fake_parse_pdb_atoms)
@@ -415,3 +509,9 @@ def test_snapshot_rmsd_sort_uses_effective_gromacs_rmsd_when_available(monkeypat
     assert snapshots["snapshot_rmsd_to_reference_A"].tolist() == [4.0, 1.0]
     assert snapshots["snapshot_gromacs_rmsd_to_reference_A"].tolist() == [0.5, 5.0]
     assert snapshots["snapshot_effective_rmsd_to_reference_A"].tolist() == [0.5, 5.0]
+    snapshot_pdb = snapshot_csv.parent / "snapshot_ranked.pdb"
+    assert snapshot_pdb.exists()
+    snapshot_text = snapshot_pdb.read_text()
+    assert "snapshot_rank_within_replica=2" in snapshot_text.split("ENDMDL")[0]
+    assert "QTF_RANK file_rank=1 energy_rank=2 rmsd_rank=1" in snapshot_text
+    assert "gromacs_potential_kj_mol=-10" in snapshot_text

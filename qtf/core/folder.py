@@ -2512,7 +2512,7 @@ class QuantumBiophysicsFolder:
     # Best-snapshot tracker
     # ------------------------------------------------------------------
 
-    def _build_best_k_tracker(self, k: int):
+    def _build_best_k_tracker(self, k: int, min_energy_gap: float = 0.0):
         """Return a wrapper that records the *k* lowest-energy parameter vectors.
 
         Usage inside ``fold()``::
@@ -2525,6 +2525,7 @@ class QuantumBiophysicsFolder:
         """
         if k <= 0:
             return None
+        min_energy_gap = max(0.0, float(min_energy_gap))
 
         # Store (-energy, counter, params) so Python's min-heap gives us
         # (-energy) at the root = most negative = highest actual energy = WORST
@@ -2539,6 +2540,28 @@ class QuantumBiophysicsFolder:
             nonlocal _counter
             value = self.energy_function(params, **kwargs)
             if not kwargs.get("return_terms"):
+                close_indices = [
+                    idx
+                    for idx, (neg_energy, _, _) in enumerate(_heap)
+                    if abs(value - (-neg_energy)) < min_energy_gap
+                ]
+                if close_indices:
+                    # Keep one best representative for the whole energy neighborhood.
+                    # If the new value bridges multiple existing representatives, it
+                    # must beat all of them; otherwise accepting it could leave two
+                    # retained snapshots closer than ``min_energy_gap``.
+                    best_close_energy = min(-_heap[idx][0] for idx in close_indices)
+                    if value < best_close_energy:
+                        close_set = set(close_indices)
+                        _heap[:] = [
+                            item
+                            for idx, item in enumerate(_heap)
+                            if idx not in close_set
+                        ]
+                        heapq.heappush(_heap, (-value, _counter, params.copy()))
+                        _counter += 1
+                        heapq.heapify(_heap)
+                    return value
                 if len(_heap) < k:
                     heapq.heappush(_heap, (-value, _counter, params.copy()))
                     _counter += 1
@@ -2558,6 +2581,7 @@ class QuantumBiophysicsFolder:
         initial_params: np.ndarray | None = None,
         scout_attempts: int | None = None,
         top_k_snapshots: int = 0,
+        snapshot_energy_gap: float = 0.0,
         progress_label: str | None = None,
     ) -> tuple[np.ndarray, list, list, LandscapeTracker, np.ndarray, float, list]:
         """Run the optimisation curriculum for the configured energy backend.
@@ -2619,6 +2643,11 @@ class QuantumBiophysicsFolder:
         # stage so every candidate is ranked with one consistent score.
         best_tracker = None
 
+        def _make_best_tracker():
+            if float(snapshot_energy_gap) == 0.0:
+                return self._build_best_k_tracker(top_k_snapshots)
+            return self._build_best_k_tracker(top_k_snapshots, snapshot_energy_gap)
+
         def _with_heartbeat(stage_name: str, objective):
             state = {
                 "count": 0,
@@ -2673,7 +2702,7 @@ class QuantumBiophysicsFolder:
         self.tracker.mark_stage("Stage2")
         self.current_stage = 2
         if self.stage_backend != "custom":
-            best_tracker = self._build_best_k_tracker(top_k_snapshots)
+            best_tracker = _make_best_tracker()
         stage_2_obj = best_tracker if best_tracker is not None else self.energy_function
         stage_2_wrapped = _with_heartbeat("Stage 2", stage_2_obj)
         res_2 = minimize(stage_2_wrapped, res_1.x, method="SLSQP",
@@ -2685,7 +2714,7 @@ class QuantumBiophysicsFolder:
             logger.info("Stage 3: Natural Relaxation (releasing constraints)…")
             self.tracker.mark_stage("Stage3")
             self.current_stage = 3
-            best_tracker = self._build_best_k_tracker(top_k_snapshots)
+            best_tracker = _make_best_tracker()
             stage_3_obj = best_tracker if best_tracker is not None else self.energy_function
             stage_3_wrapped = _with_heartbeat("Stage 3", stage_3_obj)
             final_res = minimize(stage_3_wrapped, res_2.x, method="SLSQP",

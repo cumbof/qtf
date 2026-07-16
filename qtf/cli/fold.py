@@ -31,6 +31,85 @@ def _jsonify(x):
     return x
 
 
+def _format_rank_value(value):
+    try:
+        if pd.isna(value):
+            return "NA"
+        return str(int(value))
+    except Exception:
+        return "NA"
+
+
+def _format_score_value(value):
+    try:
+        if pd.isna(value):
+            return "NA"
+        if isinstance(value, (float, np.floating)):
+            return f"{float(value):.6g}"
+    except Exception:
+        pass
+    return str(value)
+
+
+def _first_existing_pdb_path(row, columns):
+    for column in columns:
+        path = row.get(column, "")
+        if isinstance(path, str) and path and os.path.isfile(path):
+            return path
+    return None
+
+
+def _write_ranked_multimodel_pdb(
+    df,
+    output_path,
+    *,
+    path_columns,
+    energy_column,
+    rmsd_column,
+    remark_factory,
+):
+    if df.empty:
+        return
+    energy_values = df[energy_column] if energy_column in df.columns else pd.Series(np.nan, index=df.index)
+    rmsd_values = df[rmsd_column] if rmsd_column in df.columns else pd.Series(np.nan, index=df.index)
+    energy_numeric = pd.to_numeric(energy_values, errors="coerce")
+    rmsd_numeric = pd.to_numeric(rmsd_values, errors="coerce")
+    energy_ranks = energy_numeric.rank(
+        method="min",
+        ascending=True,
+    ).where(energy_numeric.notna(), np.nan)
+    rmsd_ranks = rmsd_numeric.rank(
+        method="min",
+        ascending=True,
+    ).where(rmsd_numeric.notna(), np.nan)
+    model_index = 0
+    with open(output_path, "w", encoding="utf-8") as out:
+        for row_index, row in df.iterrows():
+            pdb_path = _first_existing_pdb_path(row, path_columns)
+            if not pdb_path:
+                continue
+            model_index += 1
+            out.write(f"MODEL     {model_index:4d}\n")
+            remarks = remark_factory(
+                row,
+                model_index,
+                _format_rank_value(energy_ranks.loc[row_index]),
+                _format_rank_value(rmsd_ranks.loc[row_index]),
+                pdb_path,
+            )
+            for remark in remarks:
+                out.write(f"REMARK {remark}\n")
+            with open(pdb_path, "r", encoding="utf-8") as inp:
+                for line in inp:
+                    record = line[:6].strip().upper()
+                    if record in {"MODEL", "ENDMDL", "END"}:
+                        continue
+                    out.write(line if line.endswith("\n") else f"{line}\n")
+            out.write("ENDMDL\n")
+    if model_index == 0 and os.path.exists(output_path):
+        os.remove(output_path)
+
+
 def main(argv=None):
     root_logger = logging.getLogger()
     if not root_logger.handlers:
@@ -93,6 +172,8 @@ def main(argv=None):
                         help='root directory for predictor outputs')
     parser.add_argument('--top_k_snapshots', default=0, type=int,
                         help='save the K lowest-energy intermediate structures encountered during optimisation (0 = disabled)')
+    parser.add_argument('--snapshot_energy_gap', default=0.25, type=float,
+                        help='minimum raw QTF energy spacing between saved best snapshots; 0 disables energy-spacing filtering')
     parser.add_argument(
         '--snapshot_sort_by',
         default='energy',
@@ -138,7 +219,8 @@ def main(argv=None):
 
     manager = EnsembleFoldingManager(folder)
     manager.run_ensemble(n_runs=ensemble_size, max_iter=args.maxiter,
-                         top_k_snapshots=args.top_k_snapshots)
+                         top_k_snapshots=args.top_k_snapshots,
+                         snapshot_energy_gap=args.snapshot_energy_gap)
 
     ranked_results = manager.get_results(ranked=True)
     selected_results = manager.select_top(top_k=top_k, top_frac=top_frac)
@@ -172,6 +254,7 @@ def main(argv=None):
     if bool(args.gromacs_minimize):
         os.makedirs(os.path.join(job_output_dir, "gromacs_minimized_models"), exist_ok=True)
     for rank, res in enumerate(selected_results, start=1):
+        replica_stem = f"replica_{rank}"
         coords = res['coords']
         labels = res.get('labels') or folder.static_labels
         pred_ca = np.array([coords[i] for i, lbl in enumerate(labels) if lbl[1] == 'CA'])
@@ -179,9 +262,9 @@ def main(argv=None):
         nonlocal_clash_metrics = nonlocal_heavy_clash_metrics(coords, labels)
         local_clash_metrics = adjacent_heavy_clash_metrics(coords, labels)
         ring_penetration_metrics = qtf_gromacs.ring_penetration_metrics(coords, labels)
-        ca_pdb_path = os.path.join(job_output_dir, "raw_models", f"model_{rank}_ca.pdb")
-        ca_centroid_pdb_path = os.path.join(job_output_dir, "raw_models", f"model_{rank}_ca_centroid.pdb")
-        full_pdb_path = os.path.join(job_output_dir, "raw_models", f"model_{rank}_full.pdb")
+        ca_pdb_path = os.path.join(job_output_dir, "raw_models", f"{replica_stem}_ca.pdb")
+        ca_centroid_pdb_path = os.path.join(job_output_dir, "raw_models", f"{replica_stem}_ca_centroid.pdb")
+        full_pdb_path = os.path.join(job_output_dir, "raw_models", f"{replica_stem}_full.pdb")
         folder.save_reduced_pdb(pred_ca, filename=ca_pdb_path, sidechain_centroids=None, energy=res['energy'])
         folder.save_reduced_pdb(pred_ca, filename=ca_centroid_pdb_path, sidechain_centroids=sidechain_centroids, energy=res['energy'])
         folder.save_pdb(
@@ -194,7 +277,7 @@ def main(argv=None):
         )
 
         if true_rmsd_coords is not None:
-            raw_rmsd, raw_rmsd_meta = utils.rmsd_between_structures(
+            coords, raw_rmsd, raw_rmsd_meta, raw_alignment = utils.align_structure_to_reference(
                 coords,
                 labels,
                 true_rmsd_coords,
@@ -210,11 +293,32 @@ def main(argv=None):
                 n_atoms=0,
                 n_residues=0,
             )
+        if true_rmsd_coords is not None:
+            pred_ca = utils.apply_alignment_transform(pred_ca, raw_alignment)
+            sidechain_centroids = utils.apply_alignment_transform(sidechain_centroids, raw_alignment)
+            folder.save_reduced_pdb(pred_ca, filename=ca_pdb_path, sidechain_centroids=None, energy=res['energy'])
+            folder.save_reduced_pdb(
+                pred_ca,
+                filename=ca_centroid_pdb_path,
+                sidechain_centroids=sidechain_centroids,
+                energy=res['energy'],
+            )
+            folder.save_pdb(
+                coords,
+                labels,
+                filename=full_pdb_path,
+                energy=res['energy'],
+                remarks=[
+                    "QTF heavy-atom rebuilt structure from optimized ensemble model",
+                    "Coordinates rigidly aligned to reference for RMSD/visualization",
+                ],
+                include_hydrogens=False,
+            )
 
         # Save best-K intermediate snapshots if available
         snapshots = res.get("best_snapshots", [])
         if snapshots:
-            snap_dir = os.path.join(job_output_dir, "raw_models", "snapshots", f"model_{rank}")
+            snap_dir = os.path.join(job_output_dir, "raw_models", "snapshots", replica_stem)
             os.makedirs(snap_dir, exist_ok=True)
             for si, snap in enumerate(snapshots, start=1):
                 snap_coords = snap["coords"]
@@ -229,7 +333,7 @@ def main(argv=None):
                     include_hydrogens=False,
                 )
                 if true_rmsd_coords is not None:
-                    snap_rmsd, snap_rmsd_meta = utils.rmsd_between_structures(
+                    snap_coords, snap_rmsd, snap_rmsd_meta, _ = utils.align_structure_to_reference(
                         snap_coords,
                         snap_labels,
                         true_rmsd_coords,
@@ -245,6 +349,18 @@ def main(argv=None):
                         n_atoms=0,
                         n_residues=0,
                     )
+                if true_rmsd_coords is not None:
+                    folder.save_pdb(
+                        snap_coords,
+                        snap_labels,
+                        filename=snap_pdb,
+                        energy=snap["energy"],
+                        remarks=[
+                            f"Best snapshot #{si} during optimisation (E={snap['energy']:.4f})",
+                            "Coordinates rigidly aligned to reference for RMSD/visualization",
+                        ],
+                        include_hydrogens=False,
+                    )
                 snap_gromacs_status = "not_run"
                 snap_gromacs_potential_kj_mol = np.nan
                 snap_gromacs_potential_kcal_mol = np.nan
@@ -259,7 +375,7 @@ def main(argv=None):
                         job_output_dir,
                         "gromacs_minimized_models",
                         "snapshots",
-                        f"model_{rank}",
+                        replica_stem,
                         f"snapshot_{si}",
                     )
                     snap_gromacs_result = qtf_gromacs.minimize_pdb_with_gromacs(
@@ -284,13 +400,24 @@ def main(argv=None):
                     if snap_gromacs_minimized_full_pdb_path and os.path.isfile(snap_gromacs_minimized_full_pdb_path):
                         gromacs_coords, gromacs_labels = qtf_gromacs.parse_pdb_atoms(snap_gromacs_minimized_full_pdb_path)
                         if true_rmsd_coords is not None:
-                            snap_gromacs_rmsd, _ = utils.rmsd_between_structures(
+                            gromacs_coords, snap_gromacs_rmsd, _snap_gromacs_meta, _ = utils.align_structure_to_reference(
                                 gromacs_coords,
                                 gromacs_labels,
                                 true_rmsd_coords,
                                 true_rmsd_labels,
                                 args.rmsd_mode,
                                 args.rmsd_residue_scope,
+                            )
+                            folder.save_pdb(
+                                gromacs_coords,
+                                gromacs_labels,
+                                filename=snap_gromacs_minimized_full_pdb_path,
+                                energy=snap_gromacs_potential_kcal_mol,
+                                remarks=[
+                                    f"GROMACS-minimized snapshot #{si}",
+                                    "Coordinates rigidly aligned to reference for RMSD/visualization",
+                                ],
+                                include_hydrogens=True,
                             )
                     if snap_gromacs_status == "ok" and os.path.exists(snap_pdb):
                         os.remove(snap_pdb)
@@ -322,28 +449,10 @@ def main(argv=None):
                     "replica_final_rmsd_to_reference_A": float(raw_rmsd) if not np.isnan(raw_rmsd) else np.nan,
                 })
 
-        if true_rmsd_coords is not None:
-            raw_rmsd, raw_rmsd_meta = utils.rmsd_between_structures(
-                coords,
-                labels,
-                true_rmsd_coords,
-                true_rmsd_labels,
-                args.rmsd_mode,
-                args.rmsd_residue_scope,
-            )
-        else:
-            raw_rmsd = np.nan
-            raw_rmsd_meta = utils.rmsd_selection_metadata(
-                args.rmsd_mode,
-                args.rmsd_residue_scope,
-                n_atoms=0,
-                n_residues=0,
-            )
-
         gromacs_result = utils.gromacs_postprocess_structure(
             enabled=bool(args.gromacs_minimize),
             full_pdb_path=full_pdb_path,
-            gromacs_dir=os.path.join(job_output_dir, "gromacs_minimized_models", f"model_{rank}"),
+            gromacs_dir=os.path.join(job_output_dir, "gromacs_minimized_models", replica_stem),
             forcefield=args.gromacs_forcefield,
             water=args.gromacs_water,
             nsteps=args.gromacs_nsteps,
@@ -364,6 +473,38 @@ def main(argv=None):
         local_clash_metrics = gromacs_result["local_clash_metrics"]
         ring_penetration_metrics = gromacs_result["ring_penetration_metrics"]
         gromacs_info = gromacs_result["gromacs_info"]
+        final_rmsd = np.nan
+        final_rmsd_meta = None
+        if true_rmsd_coords is not None:
+            coords, final_rmsd, final_rmsd_meta, _ = utils.align_structure_to_reference(
+                coords,
+                labels,
+                true_rmsd_coords,
+                true_rmsd_labels,
+                args.rmsd_mode,
+                args.rmsd_residue_scope,
+            )
+            pred_ca = qtf_gromacs.ca_coords(coords, labels)
+            sidechain_centroids = folder.compute_sidechain_centroids(coords, labels)
+            nonlocal_clash_metrics = nonlocal_heavy_clash_metrics(coords, labels)
+            local_clash_metrics = adjacent_heavy_clash_metrics(coords, labels)
+            ring_penetration_metrics = qtf_gromacs.ring_penetration_metrics(coords, labels)
+            final_aligned_path = str(gromacs_info.get("gromacs_minimized_full_pdb_path") or full_pdb_path)
+            if final_aligned_path and os.path.isfile(final_aligned_path):
+                folder.save_pdb(
+                    coords,
+                    labels,
+                    filename=final_aligned_path,
+                    energy=res["energy"],
+                    remarks=[
+                        "QTF final ensemble structure",
+                        "Coordinates rigidly aligned to reference for RMSD/visualization",
+                    ],
+                    include_hydrogens=bool(
+                        gromacs_info.get("gromacs_status") == "ok"
+                        and gromacs_info.get("gromacs_minimized_full_pdb_path")
+                    ),
+                )
         p_metrics = utils.calculate_physics_metrics(pred_ca)
         p_e2e = p_metrics["end_to_end"]
         p_rg = p_metrics["radius_of_gyration"]
@@ -374,14 +515,8 @@ def main(argv=None):
             t_metrics = utils.calculate_physics_metrics(true_ca_n)
             t_e2e = t_metrics["end_to_end"]
             t_rg = t_metrics["radius_of_gyration"]
-            rmsd, rmsd_meta = utils.rmsd_between_structures(
-                coords,
-                labels,
-                true_rmsd_coords,
-                true_rmsd_labels,
-                args.rmsd_mode,
-                args.rmsd_residue_scope,
-            )
+            rmsd = final_rmsd
+            rmsd_meta = final_rmsd_meta
             gromacs_rmsd = (
                 rmsd
                 if bool(args.gromacs_minimize) and gromacs_info.get("gromacs_status") == "ok"
@@ -454,9 +589,32 @@ def main(argv=None):
 
     ensemble_csv_path = os.path.join(job_output_dir, "ensemble_ranked.csv")
     ensemble_json_path = os.path.join(job_output_dir, "ensemble_ranked.json")
+    ensemble_pdb_path = os.path.join(job_output_dir, "ensemble_ranked.pdb")
     df_models.to_csv(ensemble_csv_path, index=False)
-
     df_models.to_json(ensemble_json_path, orient="records", indent=4)
+    _write_ranked_multimodel_pdb(
+        df_models,
+        ensemble_pdb_path,
+        path_columns=["gromacs_minimized_full_pdb_path", "rebuilt_full_pdb_path"],
+        energy_column="energy",
+        rmsd_column="rmsd_to_reference_A",
+        remark_factory=lambda row, file_rank, energy_rank, rmsd_rank, pdb_path: [
+            (
+                f"QTF_SOURCE replica=replica_{int(row['energy_rank'])} "
+                f"ensemble_id={int(row['ensemble_id'])}"
+            ),
+            f"QTF_RANK file_rank={file_rank} energy_rank={energy_rank} rmsd_rank={rmsd_rank}",
+            (
+                f"QTF_SCORE energy={_format_score_value(row.get('energy'))} "
+                f"gromacs_potential_kj_mol={_format_score_value(row.get('gromacs_potential_kj_mol'))} "
+                f"gromacs_potential_kcal_mol={_format_score_value(row.get('gromacs_potential_kcal_mol'))} "
+                f"rmsd_A={_format_score_value(row.get('rmsd_to_reference_A'))} "
+                f"raw_rmsd_A={_format_score_value(row.get('raw_rmsd_to_reference_A'))} "
+                f"gromacs_rmsd_A={_format_score_value(row.get('gromacs_rmsd_to_reference_A'))}"
+            ),
+            f"QTF_PDB_SOURCE {pdb_path}",
+        ],
+    )
 
     if snapshot_rows:
         df_snapshots = pd.DataFrame(snapshot_rows)
@@ -470,8 +628,36 @@ def main(argv=None):
         df_snapshots["snapshot_global_rank"] = np.arange(1, len(df_snapshots) + 1)
         snapshot_csv_path = os.path.join(job_output_dir, "snapshot_ranked.csv")
         snapshot_json_path = os.path.join(job_output_dir, "snapshot_ranked.json")
+        snapshot_pdb_path = os.path.join(job_output_dir, "snapshot_ranked.pdb")
         df_snapshots.to_csv(snapshot_csv_path, index=False)
         df_snapshots.to_json(snapshot_json_path, orient="records", indent=4)
+        _write_ranked_multimodel_pdb(
+            df_snapshots,
+            snapshot_pdb_path,
+            path_columns=["snapshot_gromacs_minimized_full_pdb_path", "snapshot_pdb_path"],
+            energy_column="snapshot_energy",
+            rmsd_column="snapshot_effective_rmsd_to_reference_A",
+            remark_factory=lambda row, file_rank, energy_rank, rmsd_rank, pdb_path: [
+                (
+                    f"QTF_SOURCE replica=replica_{int(row['ensemble_rank'])} "
+                    f"ensemble_id={int(row['ensemble_id'])} "
+                    f"snapshot_rank_within_replica={int(row['snapshot_rank_within_replica'])}"
+                ),
+                (
+                    f"QTF_RANK file_rank={file_rank} energy_rank={energy_rank} "
+                    f"rmsd_rank={rmsd_rank} snapshot_global_rank={int(row['snapshot_global_rank'])}"
+                ),
+                (
+                    f"QTF_SCORE energy={_format_score_value(row.get('snapshot_energy'))} "
+                    f"gromacs_potential_kj_mol={_format_score_value(row.get('snapshot_gromacs_potential_kj_mol'))} "
+                    f"gromacs_potential_kcal_mol={_format_score_value(row.get('snapshot_gromacs_potential_kcal_mol'))} "
+                    f"effective_rmsd_A={_format_score_value(row.get('snapshot_effective_rmsd_to_reference_A'))} "
+                    f"raw_rmsd_A={_format_score_value(row.get('snapshot_rmsd_to_reference_A'))} "
+                    f"gromacs_rmsd_A={_format_score_value(row.get('snapshot_gromacs_rmsd_to_reference_A'))}"
+                ),
+                f"QTF_PDB_SOURCE {pdb_path}",
+            ],
+        )
 
     best_row = df_models.sort_values("energy").iloc[0]
     p_e2e = float(best_row["pred_e2e_A"])
@@ -512,6 +698,7 @@ def main(argv=None):
         "Top K": int(top_k) if top_k is not None else None,
         "Top Frac": float(top_frac) if top_frac is not None else None,
         "Snapshot Sort By": snapshot_sort_by,
+        "Snapshot Energy Gap": args.snapshot_energy_gap,
         "Snapshot GROMACS Enabled": bool(args.gromacs_minimize),
         "Output Dir": job_output_dir,
     }
