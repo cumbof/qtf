@@ -55,6 +55,13 @@ def _build_parser() -> argparse.ArgumentParser:
     fold.add_argument("--run-index", dest="run_index", type=int, default=None)
     fold.add_argument("--seed", type=int, default=None)
     fold.add_argument("--seed-mode", choices=["random", "derived"], default=None)
+    fold.add_argument(
+        "--seed-offset",
+        dest="seed_offset",
+        type=int,
+        default=0,
+        help="Offset added to deterministic replica seeds; useful for SLURM arrays with --n-runs 1.",
+    )
     fold.add_argument("--shot-seed", type=int, default=None)
     fold.add_argument(
         "--initial-params",
@@ -391,6 +398,7 @@ def _qtf_argv(args, recipe: dict) -> list[str]:
     scalar_flags = [
         ("--seed", args.seed),
         ("--seed-mode", args.seed_mode),
+        ("--seed-offset", args.seed_offset),
         ("--shot-seed", args.shot_seed),
         ("--initial-params", args.initial_params),
         ("--initial-params-select", args.initial_params_select if args.initial_params else None),

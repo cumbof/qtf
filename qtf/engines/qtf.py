@@ -9859,6 +9859,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Seed policy when --seed is omitted: random/unseeded or sequence+replica derived.",
     )
     parser.add_argument(
+        "--seed-offset",
+        dest="seed_offset",
+        type=int,
+        default=0,
+        help=(
+            "Offset added to deterministic derived seeds. Use this for SLURM arrays "
+            "where every array task runs a single replica."
+        ),
+    )
+    parser.add_argument(
         "--shot-seed",
         type=int,
         default=None,
@@ -10035,7 +10045,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     selective_chi_map = _parse_selective_chi_map(parser, args.selective_chi)
     strat = "random"
     base_seed = int(__import__("hashlib").sha256(args.predict.encode()).hexdigest(), 16) % (2**32)
-    derived_seed = (base_seed + args.replica_id) % SEED_MODULUS
+    derived_seed = (base_seed + int(args.seed_offset) + args.replica_id) % SEED_MODULUS
     if args.maxiter <= 0:
         parser.error("--maxiter must be > 0.")
     if args.top_k_snapshots < 0:
@@ -10046,6 +10056,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parser.error("--snapshot-sort-by rmsd requires --reference-structure when --top-k-snapshots is > 0.")
     if args.seed is not None and args.seed < 0:
         parser.error("--seed must be a non-negative integer.")
+    if args.seed_offset < 0:
+        parser.error("--seed-offset must be a non-negative integer.")
     if args.shot_seed is not None and args.shot_seed < 0:
         parser.error("--shot-seed must be a non-negative integer.")
     shots = _resolve_shot_settings(args, parser)
@@ -10194,6 +10206,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if ibm_auth_metadata["ibm_url_provided"]:
         print("  IBM URL        : provided")
     print(f"  Derived seed   : {derived_seed}")
+    print(f"  Seed offset    : {args.seed_offset}")
     print(f"  Seed mode      : {args.seed_mode}")
     print(f"  Run seed       : {_format_seed(run_seed)} ({seed_source})")
     print(f"  Shot seed      : {_format_seed(resolved_shot_seed)} ({shot_seed_source})")
@@ -11304,6 +11317,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "run_seed": run_seed,
         "seed_source": seed_source,
         "seed_mode": args.seed_mode,
+        "seed_offset": int(args.seed_offset),
         "initial_params": args.initial_params,
         "initial_params_select": args.initial_params_select,
         "stop_on_phase_error": bool(args.stop_on_phase_error),

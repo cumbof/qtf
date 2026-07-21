@@ -619,8 +619,11 @@ Seeds are derived deterministically from the protein sequence using SHA-256:
 
 ```python
 base_seed     = int(sha256(sequence.encode("utf-8")).hexdigest(), 16) % 2**32
-replica_seed  = base_seed + i       # i = 0, 1, …, n_runs − 1
+replica_seed  = base_seed + seed_offset + i       # i = 0, 1, …, n_runs − 1
 ```
+
+For SLURM arrays where every task runs a single replica, pass the array task ID
+as `--seed-offset` so each job gets a distinct deterministic scouting seed.
 
 This ensures that:
 1. Every run on the same sequence always explores the **same set of starting points** (reproducibility).

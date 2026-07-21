@@ -1911,6 +1911,22 @@ def test_fold_cli_passes_initial_params_options_to_engine(tmp_path):
     assert argv[argv.index("--initial-params-select") + 1] == "best_energy"
 
 
+def test_fold_cli_passes_seed_offset_to_engine():
+    from qtf.cli import _build_parser, _qtf_argv
+    from qtf.recipes import resolve_recipe
+
+    args = _build_parser().parse_args([
+        "fold",
+        "qtf-main-snapshot-equivalent",
+        "--sequence",
+        "GA",
+        "--seed-offset",
+        "17",
+    ])
+    argv = _qtf_argv(args, resolve_recipe("qtf-main-snapshot-equivalent"))
+    assert argv[argv.index("--seed-offset") + 1] == "17"
+
+
 def test_engine_parser_accepts_snapshot_options():
     import qtf.engines.qtf as qtf_engine
 
@@ -1946,6 +1962,20 @@ def test_engine_parser_accepts_initial_params_options(tmp_path):
     ])
     assert args.initial_params == str(tmp_path)
     assert args.initial_params_select == "best_rmsd"
+
+
+def test_engine_parser_accepts_seed_offset():
+    import qtf.engines.qtf as qtf_engine
+
+    args = qtf_engine._build_parser().parse_args([
+        "--predict",
+        "GA",
+        "--replica-id",
+        "0",
+        "--seed-offset",
+        "17",
+    ])
+    assert args.seed_offset == 17
 
 
 def test_engine_initial_params_select_best_energy_prefers_lowest_raw_energy(tmp_path):
