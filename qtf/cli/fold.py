@@ -180,6 +180,13 @@ def main(argv=None):
         choices=['energy', 'rmsd'],
         help='sort exported snapshot pool by energy or by RMSD to the reference structure',
     )
+    parser.add_argument(
+        '--seed', default=None, type=int,
+        help='optional integer base seed for replica initialisation; overrides the '
+             'default sequence-derived seed so multiple runs of the same sequence '
+             '(e.g. a SLURM array) can produce independent trajectories. Replica i '
+             'uses base_seed + i.',
+    )
 
     args = parser.parse_args(argv)
     if args.gromacs_minimize is None:
@@ -220,7 +227,8 @@ def main(argv=None):
     manager = EnsembleFoldingManager(folder)
     manager.run_ensemble(n_runs=ensemble_size, max_iter=args.maxiter,
                          top_k_snapshots=args.top_k_snapshots,
-                         snapshot_energy_gap=args.snapshot_energy_gap)
+                         snapshot_energy_gap=args.snapshot_energy_gap,
+                         base_seed=args.seed)
 
     ranked_results = manager.get_results(ranked=True)
     selected_results = manager.select_top(top_k=top_k, top_frac=top_frac)
@@ -700,6 +708,8 @@ def main(argv=None):
         "Snapshot Sort By": snapshot_sort_by,
         "Snapshot Energy Gap": args.snapshot_energy_gap,
         "Snapshot GROMACS Enabled": bool(args.gromacs_minimize),
+        "Random Seed": (int(manager._base_seed) if getattr(manager, "_base_seed", None) is not None else None),
+        "Seed Source": ("user" if args.seed is not None else "sequence"),
         "Output Dir": job_output_dir,
     }
 

@@ -130,6 +130,52 @@ def test_run_ensemble_result_keys(folder_ga, zero_structure):
         assert key in result, f"Key '{key}' missing from result dict"
 
 
+def test_run_ensemble_base_seed_override(folder_ga, zero_structure):
+    """Explicit base_seed overrides the sequence-derived seed and is used
+    as the base for per-replica seeds."""
+    coords, labels, bonds = zero_structure
+    tracker = LandscapeTracker()
+    fake_params = np.zeros(folder_ga.n_params)
+    fake_result = (coords, labels, bonds, tracker, fake_params, -5.0, [])
+
+    with patch.object(folder_ga, "fold", return_value=fake_result):
+        with patch.object(folder_ga, "get_smart_initialization",
+                          return_value=fake_params) as mock_init:
+            manager = EnsembleFoldingManager(folder_ga)
+            manager.run_ensemble(n_runs=2, max_workers=1, base_seed=42)
+
+    assert manager._base_seed == 42
+    seeds = [r["seed"] for r in manager.results]
+    assert seeds == [42, 43]
+    # get_smart_initialization must receive the overridden seed, not the
+    # sequence-derived one.
+    init_seeds = [call.kwargs["seed"] for call in mock_init.call_args_list]
+    assert init_seeds == [42, 43]
+
+
+def test_run_ensemble_default_seed_is_sequence_derived(folder_ga, zero_structure):
+    """When no base_seed is passed, the historical sequence-derived seed
+    is used."""
+    import hashlib
+
+    coords, labels, bonds = zero_structure
+    tracker = LandscapeTracker()
+    fake_params = np.zeros(folder_ga.n_params)
+    fake_result = (coords, labels, bonds, tracker, fake_params, -5.0, [])
+
+    expected = int(
+        hashlib.sha256(folder_ga.sequence.encode()).hexdigest(), 16
+    ) % (2 ** 32)
+
+    with patch.object(folder_ga, "fold", return_value=fake_result):
+        with patch.object(folder_ga, "get_smart_initialization", return_value=fake_params):
+            manager = EnsembleFoldingManager(folder_ga)
+            manager.run_ensemble(n_runs=1, max_workers=1)
+
+    assert manager._base_seed == expected
+    assert manager.results[0]["seed"] == expected
+
+
 def test_run_ensemble_stores_energy(folder_ga, zero_structure):
     coords, labels, bonds = zero_structure
     tracker = LandscapeTracker()

@@ -100,6 +100,7 @@ class EnsembleFoldingManager:
         self.results: list[dict] = []
         self._last_error: Exception | None = None
         self._checkpoint_path: str | None = None
+        self._base_seed: int | None = None
 
     @property
     def last_error(self) -> Exception | None:
@@ -120,6 +121,7 @@ class EnsembleFoldingManager:
         max_workers: int = 1,
         top_k_snapshots: int = 0,
         snapshot_energy_gap: float = 0.0,
+        base_seed: int | None = None,
     ) -> None:
         """Run *n_runs* independent folding trajectories in parallel.
 
@@ -162,16 +164,31 @@ class EnsembleFoldingManager:
             Minimum raw objective-energy spacing between saved best snapshots.
             Candidates closer than this to an already retained snapshot replace
             that snapshot only when they have lower energy.
+        base_seed:
+            Optional integer used as the deterministic base seed for replica
+            initialisation.  Replica ``i`` uses ``base_seed + i``.  When
+            ``None`` (the default) the base seed is derived from a SHA-256
+            hash of the protein sequence, preserving the historical
+            per-sequence reproducibility.  Provide an explicit value to run
+            statistically independent replicas of the same sequence (for
+            example, from a SLURM array where each task passes a different
+            seed).
         """
         logger.info("Starting ensemble run: %d trajectories", n_runs)
         self.results = []
         self._last_error = None
         self._checkpoint_path = checkpoint_path
 
-        # Deterministic base seed derived from protein sequence
-        base_seed = int(
-            hashlib.sha256(self.folder.sequence.encode()).hexdigest(), 16
-        ) % (2 ** 32)
+        # Deterministic base seed: user-supplied when given, otherwise
+        # derived from the protein sequence so results are reproducible
+        # per sequence.
+        if base_seed is None:
+            base_seed = int(
+                hashlib.sha256(self.folder.sequence.encode()).hexdigest(), 16
+            ) % (2 ** 32)
+        else:
+            base_seed = int(base_seed) % (2 ** 32)
+        self._base_seed = base_seed
 
         # Build task list — each replica uses a unique deterministic seed
         tasks: list[tuple[int, int]] = []

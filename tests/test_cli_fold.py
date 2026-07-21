@@ -44,9 +44,11 @@ class _FakeManager:
             }
         ]
 
-    def run_ensemble(self, n_runs, max_iter, top_k_snapshots=0, snapshot_energy_gap=0.0):
+    def run_ensemble(self, n_runs, max_iter, top_k_snapshots=0, snapshot_energy_gap=0.0, base_seed=None):
         self.top_k_snapshots = top_k_snapshots
         self.snapshot_energy_gap = snapshot_energy_gap
+        self.base_seed = base_seed
+        self._base_seed = base_seed if base_seed is not None else 0
 
     def get_results(self, ranked=True):
         return self.results
