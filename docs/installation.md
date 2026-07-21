@@ -35,6 +35,13 @@ cd QTF
 pip install -e .
 ```
 
+For development workflows that use reference alignment, RMSD reporting, PDB parsing,
+and plotting helpers, install the workflow extra as well:
+
+```bash
+pip install -e ".[dev,workflows]"
+```
+
 ---
 
 ## Optional extras
@@ -43,7 +50,7 @@ pip install -e .
 |-------|-----------------------|----------|
 | `[dev]` | `pytest`, `pytest-cov`, `ruff`, `mypy` | Development, linting, testing |
 | `[notebook]` | `jupyter`, `nbformat` | Running `QTF.ipynb` |
-| `[workflows]` | `matplotlib`, `mdtraj`, `biopython`, `openmm` | Energy backends, PDB I/O, minimisation |
+| `[workflows]` | `matplotlib`, `mdtraj`, `biopython` | RMSD/reference workflows, PDB I/O, reports, and post-run analysis |
 | `[gpu]` | `numba`, `qiskit-aer-gpu` | GPU-accelerated classical & quantum simulation (Linux x86_64) |
 | `[docs]` | `mkdocs`, `mkdocs-material`, `mkdocstrings[python]` | Building this documentation site |
 
@@ -51,6 +58,13 @@ Install any combination with:
 
 ```bash
 pip install -e ".[dev,workflows]"
+```
+
+OpenMM is intentionally not included in QTF's pip extras. Install it from
+conda-forge when using `energy_backend="openmm"`:
+
+```bash
+conda install -c conda-forge openmm
 ```
 
 ---

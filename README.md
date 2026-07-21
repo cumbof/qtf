@@ -131,7 +131,8 @@ qtf/
    ├── bench.py                qtf-bench: beam-search benchmark
    ├── eval.py                 qtf-eval: score experimental structures
    ├── grid_search.py          qtf-grid-search: parameter grid sweep
-   └── relax.py                qtf-relax: GROMACS relaxation
+   ├── relax.py                qtf-relax: GROMACS relaxation
+   └── make_vmd_trajectory.py  qtf-make-vmd-trajectory: VMD-safe trajectories
 ```
 
 ---
@@ -153,7 +154,7 @@ Optional extras:
 |-------|-------------|----------|
 | `[dev]` | `pytest`, `pytest-cov`, `ruff`, `mypy` | Development, linting, testing |
 | `[notebook]` | `jupyter`, `nbformat` | Running `QTF.ipynb` |
-| `[workflows]` | `matplotlib`, `mdtraj`, `biopython` | Energy backends, PDB I/O, minimisation |
+| `[workflows]` | `matplotlib`, `mdtraj`, `biopython` | RMSD/reference workflows, PDB I/O, reports, and post-run analysis |
 | `[gpu]` | `numba`, `qiskit-aer-gpu` | GPU-accelerated classical & quantum simulation (Linux x86_64) |
 | `[docs]` | `mkdocs`, `mkdocs-material`, `mkdocstrings[python]` | Building this documentation site
 
@@ -166,7 +167,7 @@ Optional extras:
 > pip install pyrosetta --find-links https://west.rosettacommons.org/pyrosetta/quarterly/release
 > ```
 >
-> **OpenMM** (`energy_backend="openmm"`) must be installed via `conda`, not `pip`, to ensure that its C++ backend is compiled correctly for your platform:
+> **OpenMM** (`energy_backend="openmm"`) is intentionally not included in QTF's pip extras. Install it via `conda`, not `pip`, to ensure that its C++ backend is compiled correctly for your platform:
 > ```bash
 > conda install -c conda-forge openmm
 > ```
@@ -189,7 +190,7 @@ pip install qtf
 ```bash
 git clone https://github.com/cumbof/qtf.git
 cd QTF
-pip install -e ".[dev]"
+pip install -e ".[dev,workflows]"
 ```
 
 **Minimum Python version:** 3.9
@@ -198,7 +199,7 @@ pip install -e ".[dev]"
 
 ## CLI
 
-Six command-line tools are installed automatically with `pip install qtf`:
+Seven command-line tools are installed automatically with `pip install qtf`:
 
 ### `qtf-run` — Unified dispatcher
 
@@ -210,6 +211,7 @@ qtf-run bench --sequence YYDPETGTWY --beam_width 1000
 qtf-run eval --name 5AWL --pdb_path 5AWL.pdb --out_csv scores.csv
 qtf-run grid-search --panel_csv protein_panel.csv --outsubdir run1 --window_deg 30
 qtf-run relax --input_pdb structure.pdb --forcefield amber99sb-ildn
+qtf-run vmd-trajectory --input snapshot_ranked.pdb --output snapshot_ranked_vmd.pdb
 ```
 
 | Subcommand | Delegates to |
@@ -219,6 +221,13 @@ qtf-run relax --input_pdb structure.pdb --forcefield amber99sb-ildn
 | `eval` | `qtf-eval` |
 | `grid-search` | `qtf-grid-search` |
 | `relax` | `qtf-relax` |
+| `vmd-trajectory` | `qtf-make-vmd-trajectory` |
+
+The VMD trajectory postprocessor is available as a focused command:
+
+```bash
+qtf-make-vmd-trajectory --input snapshot_ranked.pdb --output snapshot_ranked_vmd.pdb
+```
 
 ### `qtf-fold` — Quantum folding prediction
 
@@ -238,11 +247,16 @@ qtf-fold --predict YYDPETGTWY --ensemble_size 5
 | `--top_k N` | `1` | Save and compare the N lowest-energy models |
 | `--top_frac F` | None | Save top fraction F of models (overrides `--top_k`) |
 | `--top_k_snapshots N` | `0` | Save the N lowest-energy intermediate structures encountered during optimisation; when `--gromacs_minimize 1`, exported snapshots are also GROMACS-minimized (0 = disabled) |
+| `--snapshot_energy_gap F` | `0.25` | Minimum raw objective-energy spacing between retained snapshots within a replica; `0` disables spacing |
+| `--snapshot_sort_by` | `energy` | Rank exported snapshots by `energy` or, with a reference, effective `rmsd` |
 | `--energy_backend` | `custom` | `custom` \| `rosetta` \| `openmm` |
+| `--omega_mode` | `window` | `window` maps omega into the 170–190° trans band; `free` uses a full-range omega DOF; `fixed` removes omega DOFs |
+| `--gromacs_minimize` | `1` | GROMACS-minimize saved final models and snapshots when available |
+| `--gromacs_rerank` | `1` | Rerank final saved models by GROMACS potential energy when minimization succeeds |
 | `--mode` | `predict_and_compare` | `predict_and_compare` \| `predict_only` |
 
 Outputs written to `<output_root>/<SEQUENCE>_<FF>_<TIMESTAMP>/`:
-per-model PDBs, `ensemble_ranked.csv`/`.json`, `summary_results.csv`/`.json`.
+per-replica PDBs, `ensemble_ranked.csv`/`.json`/`.pdb`, `snapshot_ranked.csv`/`.json`/`.pdb` when snapshots are enabled, and `summary_results.csv`/`.json`.
 
 ### `qtf-bench` — Beam-search benchmark
 
