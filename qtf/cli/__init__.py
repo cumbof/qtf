@@ -16,6 +16,7 @@ _PASSTHROUGH_COMMANDS = {
     "eval": "qtf.cli.eval",
     "grid-search": "qtf.cli.grid_search",
     "relax": "qtf.cli.relax",
+    "vmd-trajectory": "qtf.cli.make_vmd_trajectory",
 }
 
 
@@ -159,6 +160,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ("eval", "Score or evaluate structures."),
         ("grid-search", "Run a parameter grid-search workflow."),
         ("relax", "Run GROMACS relaxation through QTF utilities."),
+        ("vmd-trajectory", "Create a VMD-compatible multi-model PDB."),
     ]:
         passthrough = sub.add_parser(command, help=help_text)
         passthrough.add_argument("args", nargs=argparse.REMAINDER)

@@ -127,7 +127,8 @@ qtf/
    └── gromacs.py              GROMACS minimisation bridge (optional)
 
  cli/
-   └── __init__.py             qtf fold: canonical recipe-driven folding command
+   ├── __init__.py             qtf: canonical recipe-driven folding command
+   └── make_vmd_trajectory.py  qtf vmd-trajectory: VMD-safe trajectories
 ```
 
 ---
@@ -149,7 +150,7 @@ Optional extras:
 |-------|-------------|----------|
 | `[dev]` | `pytest`, `pytest-cov`, `ruff`, `mypy` | Development, linting, testing |
 | `[notebook]` | `jupyter`, `nbformat` | Running `QTF.ipynb` |
-| `[workflows]` | `matplotlib`, `mdtraj`, `biopython`, `openmm` | Energy backends, PDB I/O, minimisation |
+| `[workflows]` | `matplotlib`, `mdtraj`, `biopython` | RMSD/reference workflows, PDB I/O, reports, and post-run analysis |
 | `[gpu]` | `numba`, `qiskit-aer-gpu` | GPU-accelerated classical & quantum simulation (Linux x86_64) |
 | `[docs]` | `mkdocs`, `mkdocs-material`, `mkdocstrings[python]` | Building this documentation site
 
@@ -158,7 +159,7 @@ Optional extras:
 > QTF's default `custom` energy backend works out of the box — no additional dependencies required.
 >
 > - External physics engines are configured in fold recipes through PHEAT scorer/evaluator options.
-> - **OpenMM** is optional and should be installed via conda-forge when using OpenMM-backed PHEAT evaluators:
+> - **OpenMM** is intentionally not included in QTF's pip extras. Install it via conda-forge when using OpenMM-backed PHEAT evaluators:
 >   ```bash
 >   conda install -c conda-forge openmm
 >   ```
@@ -179,7 +180,7 @@ pip install qtf
 ```bash
 git clone https://github.com/cumbof/QTF.git
 cd QTF
-pip install -e ".[dev]"
+pip install -e ".[dev,workflows]"
 ```
 
 **Minimum Python version:** 3.9
@@ -213,6 +214,12 @@ qtf fold --show-recipe qtf-main-equivalent
 `qtf fold` runs named YAML recipes. The built-in main-equivalent recipe uses
 PHEAT geometry/scoring through the native `pheat-coarse-protein-folding-v1` scorer and reports
 RMSD only when a reference structure is provided.
+
+### `qtf vmd-trajectory` — VMD-compatible multi-model PDBs
+
+```bash
+qtf vmd-trajectory --input snapshot_ranked.pdb --output snapshot_ranked_vmd.pdb
+```
 
 ### External validation
 
