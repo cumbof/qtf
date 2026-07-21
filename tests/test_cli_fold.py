@@ -58,10 +58,12 @@ class _FakeManager:
         top_k_snapshots=0,
         snapshot_energy_gap=0.0,
         initial_params_list=None,
+        seed_offset=0,
     ):
         self.top_k_snapshots = top_k_snapshots
         self.snapshot_energy_gap = snapshot_energy_gap
         self.initial_params_list = initial_params_list
+        self.seed_offset = seed_offset
 
     def get_results(self, ranked=True):
         return self.results

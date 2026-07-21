@@ -125,6 +125,7 @@ class EnsembleFoldingManager:
         top_k_snapshots: int = 0,
         snapshot_energy_gap: float = 0.0,
         initial_params_list: list[np.ndarray] | None = None,
+        seed_offset: int = 0,
     ) -> None:
         """Run *n_runs* independent folding trajectories in parallel.
 
@@ -171,6 +172,10 @@ class EnsembleFoldingManager:
             Optional warm-start parameter vectors. When provided, replica *i*
             starts from ``initial_params_list[i]`` and skips scouting. Replicas
             without a corresponding entry still use deterministic scouting.
+        seed_offset:
+            Integer offset added to deterministic per-replica seeds. This is
+            useful for SLURM arrays where each task runs ``n_runs=1`` but still
+            needs a distinct starting seed.
         """
         logger.info("Starting ensemble run: %d trajectories", n_runs)
         self.results = []
@@ -185,7 +190,7 @@ class EnsembleFoldingManager:
         # Build task list — each replica uses a unique deterministic seed
         tasks: list[tuple[int, int]] = []
         for i in range(n_runs):
-            replica_seed = base_seed + i
+            replica_seed = base_seed + int(seed_offset) + i
             tasks.append((i, replica_seed))
 
         # Extract folder kwargs so each worker can build its own folder

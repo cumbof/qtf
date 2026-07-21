@@ -1,5 +1,6 @@
 """Tests for EnsembleFoldingManager."""
 
+import hashlib
 from unittest.mock import patch
 
 import numpy as np
@@ -162,6 +163,22 @@ def test_run_ensemble_uses_warm_start_params_without_scouting(folder_ga, zero_st
     mock_scout.assert_not_called()
     assert np.allclose(mock_fold.call_args.kwargs["initial_params"], warm_params)
     assert manager.results[0]["type"] == "warm_start"
+
+
+def test_run_ensemble_seed_offset_shifts_replica_seed(folder_ga, zero_structure):
+    coords, labels, bonds = zero_structure
+    tracker = LandscapeTracker()
+    fake_params = np.zeros(folder_ga.n_params)
+    fake_result = (coords, labels, bonds, tracker, fake_params, 0.0, [])
+    base_seed = int(hashlib.sha256(folder_ga.sequence.encode()).hexdigest(), 16) % (2 ** 32)
+
+    with patch.object(folder_ga, "fold", return_value=fake_result):
+        with patch.object(folder_ga, "get_smart_initialization", return_value=fake_params) as mock_scout:
+            manager = EnsembleFoldingManager(folder_ga)
+            manager.run_ensemble(n_runs=1, max_workers=1, seed_offset=17)
+
+    assert mock_scout.call_args.kwargs["seed"] == base_seed + 17
+    assert manager.results[0]["seed"] == base_seed + 17
 
 
 def test_run_ensemble_resets_results_each_call(folder_ga, zero_structure):

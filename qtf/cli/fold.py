@@ -379,6 +379,8 @@ def main(argv=None):
     parser.add_argument('--mode', default="predict_and_compare", choices=["predict_and_compare", "predict_only"],
                         help='which mode to run script in')
     parser.add_argument('--ensemble_size', default=3, type=int, help='ensemble size')
+    parser.add_argument('--seed_offset', default=0, type=int,
+                        help='offset added to deterministic replica seeds; useful for SLURM arrays with ensemble_size=1')
     parser.add_argument('--top_k', default=1, type=int,
                         help='how many lowest-energy ensemble models to compare/save (default 1)')
     parser.add_argument('--top_frac', default=None, type=float,
@@ -511,6 +513,7 @@ def main(argv=None):
         "max_iter": args.maxiter,
         "top_k_snapshots": args.top_k_snapshots,
         "snapshot_energy_gap": args.snapshot_energy_gap,
+        "seed_offset": args.seed_offset,
     }
     if initial_params_list is not None:
         run_kwargs["initial_params_list"] = initial_params_list
@@ -977,6 +980,7 @@ def main(argv=None):
         "RMSD Status": ("GOOD" if (not np.isnan(rmsd_best) and rmsd_best < 2.0) else "BAD") if args.mode=="predict_and_compare" else None,
         "Runtime (minutes)": float(runtime),
         "Ensemble Size": int(ensemble_size),
+        "Seed Offset": int(args.seed_offset),
         "Sequence": sequence,
         "mode": args.mode,
         "Reference Structure": ((reference_pdb_path or reference_structure_pdb_id) if (reference_pdb_path or reference_structure_pdb_id) is not None and args.mode != "predict_only" else None),

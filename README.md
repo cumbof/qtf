@@ -239,6 +239,7 @@ qtf-fold --predict YYDPETGTWY --ensemble_size 5
 |------|---------|-------------|
 | `--predict SEQ` | required | Target amino acid sequence |
 | `--ensemble_size N` | `3` | Number of independent replicas |
+| `--seed_offset N` | `0` | Offset added to deterministic replica seeds; use SLURM array task IDs for many single-replica jobs |
 | `--maxiter N` | `2000` | Max optimiser iterations per stage |
 | `--reference_structure PDB_ID` | None | RCSB PDB ID for RMSD comparison |
 | `--reference_pdb PATH` | None | Local PDB file for RMSD comparison |
