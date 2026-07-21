@@ -9,6 +9,7 @@ models may be QTF-native or provided by PHEAT.
 from __future__ import annotations
 
 import argparse
+import csv
 import copy
 import html
 import importlib.metadata as importlib_metadata
@@ -779,6 +780,269 @@ def _rank_by_numeric_value(items: Sequence[Mapping[str, Any]], key: str) -> dict
         ranks[item_key] = previous_rank
         previous_value = value
     return ranks
+
+
+def _single_parameter_vector_from_file(path: Path, expected_size: Optional[int] = None) -> np.ndarray:
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        key = "params" if "params" in payload else ("circuit_parameters" if "circuit_parameters" in payload else None)
+        if key is None:
+            key = "parameters" if "parameters" in payload else None
+        if key is None:
+            raise ValueError(f"parameter JSON does not contain params/circuit_parameters: {path}")
+        vector = np.asarray(payload[key], dtype=float)
+    elif suffix == ".npz":
+        with np.load(path) as payload:
+            key = "params" if "params" in payload.files else payload.files[0]
+            vector = np.asarray(payload[key], dtype=float)
+    elif suffix == ".npy":
+        vector = np.asarray(np.load(path), dtype=float)
+    else:
+        raise ValueError(f"unsupported initial parameter file type: {path}")
+    vector = vector.reshape(-1)
+    if expected_size is not None and vector.size != expected_size:
+        raise ValueError(
+            f"initial parameter vector has length {vector.size}, expected {expected_size}: {path}"
+        )
+    return vector
+
+
+def _find_parameter_manifest(path: Path) -> Path:
+    if path.is_file():
+        if path.name == "circuit_parameters.json":
+            return path
+        raise ValueError(f"not a circuit-parameter manifest: {path}")
+    direct = path / "circuit_parameters.json"
+    nested = path / "circuit_parameters" / "circuit_parameters.json"
+    if direct.is_file():
+        return direct
+    if nested.is_file():
+        return nested
+    raise FileNotFoundError(f"circuit parameter manifest not found under: {path}")
+
+
+def _manifest_job_dir(manifest_path: Path) -> Path:
+    return manifest_path.parent.parent if manifest_path.parent.name == "circuit_parameters" else manifest_path.parent
+
+
+def _manifest_entries(manifest_path: Path) -> list[dict[str, Any]]:
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    entries = payload.get("replicas") or payload.get("parameters") or []
+    if not isinstance(entries, list):
+        raise ValueError(f"circuit parameter manifest has invalid entries: {manifest_path}")
+    return [dict(entry) for entry in entries]
+
+
+def _entry_parameter_path(entry: Mapping[str, Any], manifest_path: Path) -> Optional[Path]:
+    for key in ("npz_path", "json_path", "path"):
+        raw = entry.get(key)
+        if not raw:
+            continue
+        candidate = Path(str(raw))
+        if not candidate.is_absolute():
+            candidate = manifest_path.parent / candidate
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _float_or_none(value) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = float(value)
+    except Exception:
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _previous_run_result_records(job_dir: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    csv_path = job_dir / "ensemble_ranked.csv"
+    if csv_path.is_file():
+        with csv_path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                records.append(dict(row))
+    for result_path in sorted(job_dir.glob("replica_*_result.json")):
+        try:
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        replica_id = payload.get("replica_id")
+        record = {
+            "replica_id": replica_id,
+            "energy": payload.get("energy", payload.get("objective_total")),
+            "rmsd_to_reference_A": payload.get("rmsd_to_reference_A", payload.get("rmsd_to_reference")),
+            "circuit_params_npz_path": payload.get("circuit_params_npz_path"),
+            "circuit_params_json_path": payload.get("circuit_params_json_path"),
+            "result_path": str(result_path),
+        }
+        if record["circuit_params_npz_path"] is None and replica_id is not None:
+            record["circuit_params_npz_path"] = str(
+                job_dir / "circuit_parameters" / f"replica_{int(replica_id) + 1}_params.npz"
+            )
+        records.append(record)
+    return records
+
+
+def _entry_replica_id(entry: Mapping[str, Any]) -> Optional[int]:
+    raw = entry.get("replica_id", entry.get("id"))
+    if raw in (None, ""):
+        return None
+    try:
+        return int(raw)
+    except Exception:
+        return None
+
+
+def _select_parameter_file_from_previous_run(path: Path, select: str, replica_id: int) -> Path:
+    manifest_path = _find_parameter_manifest(path)
+    job_dir = _manifest_job_dir(manifest_path)
+    entries = _manifest_entries(manifest_path)
+    if not entries:
+        raise ValueError(f"no saved parameter vectors in manifest: {manifest_path}")
+    if select == "first":
+        sorted_entries = sorted(entries, key=lambda item: _entry_replica_id(item) or 0)
+        index = min(max(replica_id, 0), len(sorted_entries) - 1)
+        selected_path = _entry_parameter_path(sorted_entries[index], manifest_path)
+        if selected_path is None:
+            raise FileNotFoundError(f"saved parameter file not found for manifest entry {index}: {manifest_path}")
+        return selected_path
+
+    metric_key = "energy" if select == "best_energy" else "rmsd_to_reference_A"
+    candidates: list[tuple[float, int, Path]] = []
+    records = _previous_run_result_records(job_dir)
+    entry_by_replica = {
+        replica: entry
+        for entry in entries
+        for replica in [_entry_replica_id(entry)]
+        if replica is not None
+    }
+    for index, record in enumerate(records):
+        raw_metric = record.get(metric_key)
+        if raw_metric in (None, "") and metric_key == "rmsd_to_reference_A":
+            raw_metric = record.get("rmsd_to_reference")
+        metric = _float_or_none(raw_metric)
+        if metric is None:
+            continue
+        param_path = None
+        for key in ("circuit_params_npz_path", "circuit_params_json_path", "npz_path", "json_path"):
+            raw = record.get(key)
+            if not raw:
+                continue
+            candidate = Path(str(raw))
+            if not candidate.is_absolute():
+                candidate = job_dir / candidate
+            if candidate.is_file():
+                param_path = candidate
+                break
+        if param_path is None:
+            try:
+                replica = int(record.get("replica_id"))
+            except Exception:
+                replica = -1
+            entry = entry_by_replica.get(replica)
+            if entry is not None:
+                param_path = _entry_parameter_path(entry, manifest_path)
+        if param_path is not None:
+            candidates.append((metric, index, param_path))
+    if not candidates:
+        raise ValueError(f"--initial-params-select {select!r} found no usable {metric_key} records in {job_dir}")
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    return candidates[0][2]
+
+
+def _load_initial_parameter_vector(
+    raw_path: Optional[str],
+    *,
+    expected_size: int,
+    replica_id: int,
+    select: str,
+) -> Optional[np.ndarray]:
+    if not raw_path:
+        return None
+    path = Path(raw_path).expanduser().resolve()
+    if path.is_file() and path.name != "circuit_parameters.json":
+        return _single_parameter_vector_from_file(path, expected_size)
+    selected_path = _select_parameter_file_from_previous_run(path, select, replica_id)
+    return _single_parameter_vector_from_file(selected_path, expected_size)
+
+
+def _write_circuit_parameter_artifacts(
+    outdir: Path,
+    *,
+    args,
+    folder,
+    params: np.ndarray,
+    energy: float,
+    rmsd: Optional[float],
+    result_path: Path,
+) -> dict[str, str]:
+    params_dir = outdir / "circuit_parameters"
+    params_dir.mkdir(parents=True, exist_ok=True)
+    replica_number = int(args.replica_id) + 1
+    json_path = params_dir / f"replica_{replica_number}_params.json"
+    npz_path = params_dir / f"replica_{replica_number}_params.npz"
+    manifest_path = params_dir / "circuit_parameters.json"
+    vector = np.asarray(params, dtype=float).reshape(-1)
+    payload = {
+        "format": "qtf.circuit_parameters.v1",
+        "replica_id": int(args.replica_id),
+        "replica": replica_number,
+        "run_label": getattr(args, "run_label", None),
+        "sequence": args.predict,
+        "recipe": getattr(args, "phase_preset", None),
+        "n_params": int(folder.n_params),
+        "params": vector.tolist(),
+        "energy": float(energy),
+        "rmsd_to_reference_A": None if rmsd is None else float(rmsd),
+    }
+    _write_json(json_path, payload)
+    np.savez_compressed(
+        npz_path,
+        params=vector,
+        replica_id=np.asarray([int(args.replica_id)], dtype=int),
+        energy=np.asarray([float(energy)], dtype=float),
+    )
+    manifest = {
+        "format": "qtf.circuit_parameters.v1",
+        "sequence": args.predict,
+        "recipe": getattr(args, "phase_preset", None),
+        "n_params": int(folder.n_params),
+        "replicas": [],
+    }
+    if manifest_path.is_file():
+        try:
+            existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(existing, dict):
+                manifest.update({key: existing.get(key, value) for key, value in manifest.items()})
+                manifest["replicas"] = list(existing.get("replicas") or [])
+        except Exception:
+            pass
+    entry = {
+        "replica_id": int(args.replica_id),
+        "replica": replica_number,
+        "run_label": getattr(args, "run_label", None),
+        "energy": float(energy),
+        "rmsd_to_reference_A": None if rmsd is None else float(rmsd),
+        "json_path": json_path.name,
+        "npz_path": npz_path.name,
+        "result_path": str(result_path),
+    }
+    manifest["replicas"] = [
+        item for item in manifest.get("replicas", [])
+        if _entry_replica_id(item) != int(args.replica_id)
+    ]
+    manifest["replicas"].append(entry)
+    manifest["replicas"].sort(key=lambda item: int(item.get("replica_id", item.get("id", 0))))
+    _write_json(manifest_path, manifest)
+    return {
+        "json_path": str(json_path),
+        "npz_path": str(npz_path),
+        "manifest_path": str(manifest_path),
+    }
 
 
 def _report_structure_domain(value: Optional[str]) -> str:
@@ -9601,6 +9865,23 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Seed for shot-based sampling; defaults to the run seed.",
     )
     parser.add_argument(
+        "--initial-params",
+        default=None,
+        help=(
+            "Warm-start from saved circuit parameters: a previous output directory, "
+            "circuit_parameters directory/manifest, or a single JSON/NPZ/NPY vector file."
+        ),
+    )
+    parser.add_argument(
+        "--initial-params-select",
+        choices=["first", "best_energy", "best_rmsd"],
+        default="first",
+        help=(
+            "Selection mode when --initial-params points at a previous multi-replica run. "
+            "best_energy uses raw QTF/backend objective energy, not GROMACS energy."
+        ),
+    )
+    parser.add_argument(
         "--optimizer-angle-mode",
         choices=OPTIMIZER_ANGLE_MODES,
         default="auto",
@@ -10224,36 +10505,63 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "shots are not used for optimization readout."
         )
 
-    workflow_progress.start("Scouting initialization")
-    with timings.section(
-        "scouting_initialization",
-        label="Scouting initialization",
-        metadata={
-            "attempts": phase_schedule.scouting.attempts,
-            "seed": _format_seed(run_seed),
-            "score_model": phase_schedule.scouting.score_model,
-            "backend": phase_schedule.scouting.backend,
-            "shots": phase_schedule.scouting.shots,
-            "transpile": _transpile_config_dict(phase_schedule.scouting.transpile),
-            "score_options": dict(phase_schedule.scouting.score_options),
-        },
-    ):
-        scouting_backend = _backend_from_registry(
-            workflow_backend_registry,
-            phase_schedule.scouting.backend,
-            args.hw_backend,
+    if args.initial_params:
+        workflow_progress.start("Warm-start initialization")
+        with timings.section(
+            "warm_start_initialization",
+            label="Warm-start initialization",
+            metadata={
+                "initial_params": args.initial_params,
+                "initial_params_select": args.initial_params_select,
+                "replica_id": args.replica_id,
+            },
+        ):
+            try:
+                start_params = _load_initial_parameter_vector(
+                    args.initial_params,
+                    expected_size=folder.n_params,
+                    replica_id=args.replica_id,
+                    select=args.initial_params_select,
+                )
+            except Exception as exc:
+                parser.error(f"--initial-params failed: {exc}")
+        timings.skip(
+            "scouting_initialization",
+            label="Scouting initialization",
+            metadata={"skipped": True, "reason": "warm_start"},
         )
-        folder.active_score_model = phase_schedule.scouting.score_model
-        folder.active_score_options = dict(phase_schedule.scouting.score_options)
-        folder.optimizer_backend = scouting_backend
-        folder.optimizer_angle_mode = folder._angle_mode_for_backend(scouting_backend)
-        folder.optimizer_shots = phase_schedule.scouting.shots
-        folder.transpile_optimization_level = phase_schedule.scouting.transpile.optimization_level
-        folder.transpile_seed = phase_schedule.scouting.transpile.seed
-        start_params = folder.get_smart_initialization(
-            n_attempts=phase_schedule.scouting.attempts,
-            seed=run_seed,
-        )
+        strat = "warm_start"
+    else:
+        workflow_progress.start("Scouting initialization")
+        with timings.section(
+            "scouting_initialization",
+            label="Scouting initialization",
+            metadata={
+                "attempts": phase_schedule.scouting.attempts,
+                "seed": _format_seed(run_seed),
+                "score_model": phase_schedule.scouting.score_model,
+                "backend": phase_schedule.scouting.backend,
+                "shots": phase_schedule.scouting.shots,
+                "transpile": _transpile_config_dict(phase_schedule.scouting.transpile),
+                "score_options": dict(phase_schedule.scouting.score_options),
+            },
+        ):
+            scouting_backend = _backend_from_registry(
+                workflow_backend_registry,
+                phase_schedule.scouting.backend,
+                args.hw_backend,
+            )
+            folder.active_score_model = phase_schedule.scouting.score_model
+            folder.active_score_options = dict(phase_schedule.scouting.score_options)
+            folder.optimizer_backend = scouting_backend
+            folder.optimizer_angle_mode = folder._angle_mode_for_backend(scouting_backend)
+            folder.optimizer_shots = phase_schedule.scouting.shots
+            folder.transpile_optimization_level = phase_schedule.scouting.transpile.optimization_level
+            folder.transpile_seed = phase_schedule.scouting.transpile.seed
+            start_params = folder.get_smart_initialization(
+                n_attempts=phase_schedule.scouting.attempts,
+                seed=run_seed,
+            )
     print(f"{_console_prefix(args.replica_id)} Init strategy: {strat}, seed: {_format_seed(run_seed)}")
 
     try:
@@ -10959,6 +11267,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if snapshot_ranked_pdb_path is not None:
         print(f"{_console_prefix(args.replica_id)} Ranked snapshot PDB: {snapshot_ranked_pdb_path}")
 
+    circuit_parameter_artifacts = _write_circuit_parameter_artifacts(
+        outdir,
+        args=args,
+        folder=folder,
+        params=opt_params,
+        energy=final_energy,
+        rmsd=rmsd,
+        result_path=result_path,
+    )
+
     backend_display = None if hw_backend is None else _backend_display_name(hw_backend)
     rmsd_angle_mode = getattr(folder, "rmsd_angle_mode", "statevector" if hw_backend is None else "sampler")
     primary_angle_mode = getattr(folder, "primary_angle_mode", rmsd_angle_mode)
@@ -10986,6 +11304,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "run_seed": run_seed,
         "seed_source": seed_source,
         "seed_mode": args.seed_mode,
+        "initial_params": args.initial_params,
+        "initial_params_select": args.initial_params_select,
         "stop_on_phase_error": bool(args.stop_on_phase_error),
         "init_type": strat,
         "sequence": args.predict,
@@ -11088,6 +11408,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "n_qubits": folder.n_qubits,
         "reps": folder.reps,
         "n_params": folder.n_params,
+        "circuit_params_json_path": circuit_parameter_artifacts["json_path"],
+        "circuit_params_npz_path": circuit_parameter_artifacts["npz_path"],
+        "circuit_parameters_path": circuit_parameter_artifacts["manifest_path"],
         "rmsd_to_reference": rmsd,
         "reference_available": pheat_reference is not None and reference_aligned_pdb_path is not None,
         "rmsd_mode": "pheat_structure_metrics" if pheat_reference is not None else None,

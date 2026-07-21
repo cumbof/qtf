@@ -215,6 +215,27 @@ qtf fold --show-recipe qtf-main-equivalent
 PHEAT geometry/scoring through the native `pheat-coarse-protein-folding-v1` scorer and reports
 RMSD only when a reference structure is provided.
 
+Completed fold runs also save final circuit parameters under
+`<outdir>/circuit_parameters/` as per-replica JSON/NPZ files plus a
+`circuit_parameters.json` manifest. These files can warm-start later simulator
+or hardware runs:
+
+```bash
+qtf fold qtf-main-equivalent \
+  --sequence YYDPETGTWY \
+  --reference-structure pdb/5AWL.pdb \
+  --initial-params outputs/example_fold \
+  --initial-params-select best_energy \
+  --outdir outputs/warm_start
+```
+
+`--initial-params` can point at a previous output directory,
+`circuit_parameters/`, `circuit_parameters.json`, or a single JSON/NPZ/NPY
+vector file. `--initial-params-select best_energy` selects the lowest raw
+QTF/backend objective energy from the previous ensemble, not the GROMACS
+post-minimization energy. `best_rmsd` selects the lowest previous reference
+RMSD when available; `first` maps replica N to the saved replica N vector.
+
 ### `qtf vmd-trajectory` — VMD-compatible multi-model PDBs
 
 ```bash

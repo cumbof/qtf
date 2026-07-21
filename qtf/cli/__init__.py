@@ -56,6 +56,25 @@ def _build_parser() -> argparse.ArgumentParser:
     fold.add_argument("--seed", type=int, default=None)
     fold.add_argument("--seed-mode", choices=["random", "derived"], default=None)
     fold.add_argument("--shot-seed", type=int, default=None)
+    fold.add_argument(
+        "--initial-params",
+        dest="initial_params",
+        default=None,
+        help=(
+            "Warm-start from saved circuit parameters: a previous output directory, "
+            "circuit_parameters directory/manifest, or a single JSON/NPZ/NPY vector file."
+        ),
+    )
+    fold.add_argument(
+        "--initial-params-select",
+        dest="initial_params_select",
+        choices=["first", "best_energy", "best_rmsd"],
+        default="first",
+        help=(
+            "Selection mode when --initial-params points at a previous multi-replica run. "
+            "best_energy uses raw QTF/backend objective energy, not GROMACS energy."
+        ),
+    )
     fold.add_argument("--max-iter", dest="max_iter", type=int, default=None)
     fold.add_argument("--scout-attempts", dest="scout_attempts", type=int, default=None)
     fold.add_argument("--top-k-snapshots", dest="top_k_snapshots", type=int, default=None)
@@ -373,6 +392,8 @@ def _qtf_argv(args, recipe: dict) -> list[str]:
         ("--seed", args.seed),
         ("--seed-mode", args.seed_mode),
         ("--shot-seed", args.shot_seed),
+        ("--initial-params", args.initial_params),
+        ("--initial-params-select", args.initial_params_select if args.initial_params else None),
         (
             "--basis-circuit-batching",
             args.basis_circuit_batching

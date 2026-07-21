@@ -1892,6 +1892,25 @@ def test_fold_cli_passes_snapshot_options_to_engine():
     assert argv[argv.index("--snapshot-sort-by") + 1] == "rmsd"
 
 
+def test_fold_cli_passes_initial_params_options_to_engine(tmp_path):
+    from qtf.cli import _build_parser, _qtf_argv
+    from qtf.recipes import resolve_recipe
+
+    args = _build_parser().parse_args([
+        "fold",
+        "qtf-main-snapshot-equivalent",
+        "--sequence",
+        "GA",
+        "--initial-params",
+        str(tmp_path),
+        "--initial-params-select",
+        "best_energy",
+    ])
+    argv = _qtf_argv(args, resolve_recipe("qtf-main-snapshot-equivalent"))
+    assert argv[argv.index("--initial-params") + 1] == str(tmp_path)
+    assert argv[argv.index("--initial-params-select") + 1] == "best_energy"
+
+
 def test_engine_parser_accepts_snapshot_options():
     import qtf.engines.qtf as qtf_engine
 
@@ -1910,6 +1929,62 @@ def test_engine_parser_accepts_snapshot_options():
     assert args.top_k_snapshots == 7
     assert args.snapshot_energy_gap == 0.1
     assert args.snapshot_sort_by == "energy"
+
+
+def test_engine_parser_accepts_initial_params_options(tmp_path):
+    import qtf.engines.qtf as qtf_engine
+
+    args = qtf_engine._build_parser().parse_args([
+        "--predict",
+        "GA",
+        "--replica-id",
+        "0",
+        "--initial-params",
+        str(tmp_path),
+        "--initial-params-select",
+        "best_rmsd",
+    ])
+    assert args.initial_params == str(tmp_path)
+    assert args.initial_params_select == "best_rmsd"
+
+
+def test_engine_initial_params_select_best_energy_prefers_lowest_raw_energy(tmp_path):
+    import numpy as np
+    import qtf.engines.qtf as qtf_engine
+
+    params_dir = tmp_path / "circuit_parameters"
+    params_dir.mkdir()
+    np.savez(params_dir / "replica_1_params.npz", params=np.asarray([1.0, 1.1]))
+    np.savez(params_dir / "replica_2_params.npz", params=np.asarray([2.0, 2.2]))
+    (params_dir / "circuit_parameters.json").write_text(
+        json.dumps(
+            {
+                "format": "qtf.circuit_parameters.v1",
+                "replicas": [
+                    {"replica_id": 0, "npz_path": "replica_1_params.npz"},
+                    {"replica_id": 1, "npz_path": "replica_2_params.npz"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "replica_0_result.json").write_text(
+        json.dumps({"replica_id": 0, "energy": 8.0, "rmsd_to_reference": 1.0}),
+        encoding="utf-8",
+    )
+    (tmp_path / "replica_1_result.json").write_text(
+        json.dumps({"replica_id": 1, "energy": 2.0, "rmsd_to_reference": 3.0}),
+        encoding="utf-8",
+    )
+
+    vector = qtf_engine._load_initial_parameter_vector(
+        str(tmp_path),
+        expected_size=2,
+        replica_id=0,
+        select="best_energy",
+    )
+
+    assert np.allclose(vector, [2.0, 2.2])
 
 
 def test_fold_cli_passes_length_encoding_options_from_recipe():
