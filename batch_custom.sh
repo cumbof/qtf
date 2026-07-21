@@ -18,7 +18,10 @@
 # This script launches 400 qtf.cli.fold invocations as a SLURM job array
 # (at most 50 concurrent). Each array task uses ensemble_size=1 / top_k=1
 # and writes to its own output subdirectory (task_<SLURM_ARRAY_TASK_ID>)
-# so the tasks do not clobber each other.
+# so the tasks do not clobber each other.  Each task also passes a unique
+# --seed derived from SLURM_ARRAY_TASK_ID so the 400 replicas explore
+# independent starting points rather than duplicating a single
+# sequence-derived seed.
 
 set -euo pipefail
 
@@ -45,4 +48,5 @@ srun python -m qtf.cli.fold \
     --top_k_snapshots     100 \
     --snapshot_energy_gap 0.1 \
     --snapshot_sort_by    rmsd \
+    --seed                "${SLURM_ARRAY_TASK_ID}" \
     --output_root         "$OUTPUT_BASE/task_${SLURM_ARRAY_TASK_ID}"
