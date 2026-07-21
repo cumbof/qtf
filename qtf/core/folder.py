@@ -546,6 +546,7 @@ class QuantumBiophysicsFolder:
         self._last_rosetta_ca = None
         self.openmm_forcefield = "amber14-all.xml"
         self.openmm_platform = "CPU"
+        self.openmm_cpu_threads = int(os.environ.get("QTF_OPENMM_CPU_THREADS", "1"))
         self.openmm_do_minimize = False
         self.openmm_max_iterations = 200
         self.openmm_tolerance = 10.0
@@ -1102,18 +1103,25 @@ class QuantumBiophysicsFolder:
                         platform = _mm.Platform.getPlatformByName(platform_name)
                     except Exception:
                         platform = _mm.Platform.getPlatform(0)
-                    context = _mm.Context(system, integrator, platform)
-                    context.setPositions(modeller.positions)
+                    platform_properties = {}
+                    if platform_name.upper() == "CPU" and int(self.openmm_cpu_threads) > 0:
+                        platform_properties["Threads"] = str(int(self.openmm_cpu_threads))
+                    context = None
+                    try:
+                        context = _mm.Context(system, integrator, platform, platform_properties)
+                        context.setPositions(modeller.positions)
 
-                    if self.openmm_do_minimize:
-                        _mm.LocalEnergyMinimizer.minimize(
-                            context,
-                            tolerance=float(self.openmm_tolerance) * _unit.kilojoule_per_mole / _unit.nanometer,
-                            maxIterations=int(self.openmm_max_iterations),
-                        )
+                        if self.openmm_do_minimize:
+                            _mm.LocalEnergyMinimizer.minimize(
+                                context,
+                                tolerance=float(self.openmm_tolerance) * _unit.kilojoule_per_mole / _unit.nanometer,
+                                maxIterations=int(self.openmm_max_iterations),
+                            )
 
-                    state = context.getState(getEnergy=True, getPositions=True)
-                    potential_kj = float(state.getPotentialEnergy().value_in_unit(_unit.kilojoule_per_mole))
+                        state = context.getState(getEnergy=True, getPositions=True)
+                        potential_kj = float(state.getPotentialEnergy().value_in_unit(_unit.kilojoule_per_mole))
+                    finally:
+                        del context
                     result["openmm_status"] = "ok"
                     result["openmm_potential_kj_mol"] = potential_kj
                     result["openmm_potential_kcal_mol"] = float(potential_kj / 4.184)
@@ -1133,6 +1141,7 @@ class QuantumBiophysicsFolder:
                     terms["openmm_error"] = 0.0
                     terms["openmm_forcefield_hash"] = float(abs(hash(self.openmm_forcefield)) % 1000000)
                     terms["openmm_platform_hash"] = float(abs(hash(platform_name)) % 1000000)
+                    terms["openmm_cpu_threads"] = float(self.openmm_cpu_threads)
                     terms["openmm_max_iterations"] = float(self.openmm_max_iterations)
                     terms["openmm_tolerance"] = float(self.openmm_tolerance)
                     terms["openmm_ph"] = float(self.openmm_ph)
@@ -1161,6 +1170,7 @@ class QuantumBiophysicsFolder:
             terms["openmm_error"] = 1.0
             terms["openmm_forcefield_hash"] = float(abs(hash(self.openmm_forcefield)) % 1000000)
             terms["openmm_platform_hash"] = float(abs(hash(self.openmm_platform)) % 1000000)
+            terms["openmm_cpu_threads"] = float(self.openmm_cpu_threads)
             terms["openmm_max_iterations"] = float(self.openmm_max_iterations)
             terms["openmm_tolerance"] = float(self.openmm_tolerance)
             terms["openmm_ph"] = float(self.openmm_ph)

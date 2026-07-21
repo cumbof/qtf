@@ -205,6 +205,24 @@ def main(argv=None):
     os.makedirs(job_output_dir, exist_ok=True)
     print(f"Writing outputs to: {job_output_dir}")
 
+    true_rmsd_coords = None
+    true_rmsd_labels = None
+    true_ca = None
+    if args.mode == "predict_and_compare":
+        reference_source = reference_pdb_path or reference_structure_pdb_id
+        if not reference_source:
+            raise ValueError("--reference_structure or --reference_pdb is required in predict_and_compare mode")
+        true_rmsd_coords, true_rmsd_labels, ref_rmsd_meta = utils.load_reference_rmsd_coords(
+            reference_source,
+            args.rmsd_mode,
+            average_backbone=average_reference_backbone_mode,
+        )
+        true_ca, _, _ = utils.load_reference_rmsd_coords(
+            reference_source,
+            "ca",
+            average_backbone=average_reference_backbone_mode,
+        )
+
     print(f"--- FOLDING SEQUENCE: {sequence} ---")
     folder = utils.make_folder(
         sequence=sequence,
@@ -229,24 +247,6 @@ def main(argv=None):
         raise RuntimeError("Ensemble produced no results.")
     if not selected_results:
         raise RuntimeError("Selection produced no results (check --top_k/--top_frac).")
-
-    true_rmsd_coords = None
-    true_rmsd_labels = None
-    true_ca = None
-    if args.mode == "predict_and_compare":
-        reference_source = reference_pdb_path or reference_structure_pdb_id
-        if not reference_source:
-            raise ValueError("--reference_structure or --reference_pdb is required in predict_and_compare mode")
-        true_rmsd_coords, true_rmsd_labels, ref_rmsd_meta = utils.load_reference_rmsd_coords(
-            reference_source,
-            args.rmsd_mode,
-            average_backbone=average_reference_backbone_mode,
-        )
-        true_ca, _, _ = utils.load_reference_rmsd_coords(
-            reference_source,
-            "ca",
-            average_backbone=average_reference_backbone_mode,
-        )
 
     model_rows = []
     snapshot_rows = []
