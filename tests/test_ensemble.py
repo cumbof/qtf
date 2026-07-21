@@ -144,6 +144,26 @@ def test_run_ensemble_stores_energy(folder_ga, zero_structure):
     assert manager.results[0]["energy"] == pytest.approx(99.5)
 
 
+def test_run_ensemble_uses_warm_start_params_without_scouting(folder_ga, zero_structure):
+    coords, labels, bonds = zero_structure
+    tracker = LandscapeTracker()
+    warm_params = np.ones(folder_ga.n_params)
+    fake_result = (coords, labels, bonds, tracker, warm_params, -4.0, [])
+
+    with patch.object(folder_ga, "fold", return_value=fake_result) as mock_fold:
+        with patch.object(folder_ga, "get_smart_initialization") as mock_scout:
+            manager = EnsembleFoldingManager(folder_ga)
+            manager.run_ensemble(
+                n_runs=1,
+                max_workers=1,
+                initial_params_list=[warm_params],
+            )
+
+    mock_scout.assert_not_called()
+    assert np.allclose(mock_fold.call_args.kwargs["initial_params"], warm_params)
+    assert manager.results[0]["type"] == "warm_start"
+
+
 def test_run_ensemble_resets_results_each_call(folder_ga, zero_structure):
     """Calling run_ensemble twice should replace, not append, results."""
     coords, labels, bonds = zero_structure

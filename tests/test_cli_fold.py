@@ -9,6 +9,10 @@ from qtf.core.folder import QuantumBiophysicsFolder
 
 class _FakeFolder:
     static_labels = [(0, "CA", "C"), (0, "CB", "C")]
+    chi_mode = "all"
+    n_params = 2
+    n_qubits = 1
+    ansatz = object()
 
     def compute_sidechain_centroids(self, coords, labels):
         return np.asarray([[0.5, 0.0, 0.0]], dtype=float)
@@ -32,21 +36,32 @@ class _FakeManager:
         self.results = [
             {
                 "id": 0,
+                "seed": 123,
                 "type": "fake",
                 "energy": -1.0,
                 "coords": coords,
                 "labels": labels,
                 "bonds": [],
+                "params": np.asarray([0.1, 0.2], dtype=float),
                 "best_snapshots": [
                     {"energy": -2.0, "coords": coords, "labels": labels, "bonds": []},
                     {"energy": -1.5, "coords": coords, "labels": labels, "bonds": []},
                 ],
             }
         ]
+        self.initial_params_list = None
 
-    def run_ensemble(self, n_runs, max_iter, top_k_snapshots=0, snapshot_energy_gap=0.0):
+    def run_ensemble(
+        self,
+        n_runs,
+        max_iter,
+        top_k_snapshots=0,
+        snapshot_energy_gap=0.0,
+        initial_params_list=None,
+    ):
         self.top_k_snapshots = top_k_snapshots
         self.snapshot_energy_gap = snapshot_energy_gap
+        self.initial_params_list = initial_params_list
 
     def get_results(self, ranked=True):
         return self.results
@@ -515,3 +530,297 @@ def test_snapshot_rmsd_sort_uses_effective_gromacs_rmsd_when_available(monkeypat
     assert "snapshot_rank_within_replica=2" in snapshot_text.split("ENDMDL")[0]
     assert "QTF_RANK file_rank=1 energy_rank=2 rmsd_rank=1" in snapshot_text
     assert "gromacs_potential_kj_mol=-10" in snapshot_text
+
+
+def test_fold_writes_circuit_parameter_artifacts(monkeypatch, tmp_path):
+    _patch_fast_fold(monkeypatch)
+
+    def fake_gromacs_postprocess_structure(enabled, full_pdb_path, gromacs_dir, coords, labels, ca_coords, sidechain_centroid_fn, **kwargs):
+        return {
+            "coords": coords,
+            "labels": labels,
+            "ca_coords": ca_coords,
+            "sidechain_centroids": sidechain_centroid_fn(coords, labels),
+            "nonlocal_clash_metrics": {},
+            "local_clash_metrics": {},
+            "ring_penetration_metrics": {},
+            "gromacs_info": {"gromacs_status": "not_run"},
+        }
+
+    monkeypatch.setattr(fold_cli.utils, "gromacs_postprocess_structure", fake_gromacs_postprocess_structure)
+
+    fold_cli.main(
+        [
+            "--predict",
+            "GA",
+            "--mode",
+            "predict_only",
+            "--ensemble_size",
+            "1",
+            "--maxiter",
+            "1",
+            "--top_k",
+            "1",
+            "--top_k_snapshots",
+            "0",
+            "--gromacs_minimize",
+            "0",
+            "--output_root",
+            str(tmp_path),
+        ]
+    )
+
+    run_dir = next(path for path in tmp_path.iterdir() if path.is_dir())
+    params_dir = run_dir / "circuit_parameters"
+    manifest_path = params_dir / "circuit_parameters.json"
+    json_path = params_dir / "replica_1_params.json"
+    npz_path = params_dir / "replica_1_params.npz"
+    assert manifest_path.exists()
+    assert json_path.exists()
+    assert npz_path.exists()
+
+    import json as _json
+    manifest = _json.loads(manifest_path.read_text())
+    payload = _json.loads(json_path.read_text())
+    assert manifest["format"] == "qtf.circuit_parameters.v1"
+    assert manifest["replicas"][0]["json_path"] == "replica_1_params.json"
+    assert payload["params"] == [0.1, 0.2]
+
+    ensemble = pd.read_csv(run_dir / "ensemble_ranked.csv")
+    assert os.path.exists(ensemble.loc[0, "circuit_params_json_path"])
+    assert os.path.exists(ensemble.loc[0, "circuit_params_npz_path"])
+
+
+def test_fold_accepts_saved_circuit_parameter_manifest_as_warm_start(monkeypatch, tmp_path):
+    _patch_fast_fold(monkeypatch)
+    captured_managers = []
+
+    class CapturingManager(_FakeManager):
+        def __init__(self, folder):
+            super().__init__(folder)
+            captured_managers.append(self)
+
+    def fake_gromacs_postprocess_structure(enabled, full_pdb_path, gromacs_dir, coords, labels, ca_coords, sidechain_centroid_fn, **kwargs):
+        return {
+            "coords": coords,
+            "labels": labels,
+            "ca_coords": ca_coords,
+            "sidechain_centroids": sidechain_centroid_fn(coords, labels),
+            "nonlocal_clash_metrics": {},
+            "local_clash_metrics": {},
+            "ring_penetration_metrics": {},
+            "gromacs_info": {"gromacs_status": "not_run"},
+        }
+
+    monkeypatch.setattr(fold_cli, "EnsembleFoldingManager", CapturingManager)
+    monkeypatch.setattr(fold_cli.utils, "gromacs_postprocess_structure", fake_gromacs_postprocess_structure)
+
+    params_dir = tmp_path / "previous" / "circuit_parameters"
+    params_dir.mkdir(parents=True)
+    params_json = params_dir / "replica_1_params.json"
+    params_json.write_text(
+        (
+            "{"
+            '"format": "qtf.circuit_parameters.v1", '
+            '"n_params": 2, '
+            '"params": [0.3, 0.4]'
+            "}"
+        ),
+        encoding="utf-8",
+    )
+    (params_dir / "circuit_parameters.json").write_text(
+        (
+            "{"
+            '"format": "qtf.circuit_parameters.v1", '
+            '"replicas": [{"ensemble_id": 0, "json_path": "replica_1_params.json"}]'
+            "}"
+        ),
+        encoding="utf-8",
+    )
+
+    fold_cli.main(
+        [
+            "--predict",
+            "GA",
+            "--mode",
+            "predict_only",
+            "--ensemble_size",
+            "1",
+            "--maxiter",
+            "1",
+            "--top_k",
+            "1",
+            "--top_k_snapshots",
+            "0",
+            "--gromacs_minimize",
+            "0",
+            "--initial_params",
+            str(params_dir / "circuit_parameters.json"),
+            "--output_root",
+            str(tmp_path / "new"),
+        ]
+    )
+
+    assert len(captured_managers) == 1
+    assert captured_managers[0].initial_params_list is not None
+    assert np.allclose(captured_managers[0].initial_params_list[0], [0.3, 0.4])
+
+
+def test_fold_initial_params_select_best_energy_uses_lowest_raw_energy(monkeypatch, tmp_path):
+    _patch_fast_fold(monkeypatch)
+    captured_managers = []
+
+    class CapturingManager(_FakeManager):
+        def __init__(self, folder):
+            super().__init__(folder)
+            captured_managers.append(self)
+
+    monkeypatch.setattr(fold_cli, "EnsembleFoldingManager", CapturingManager)
+    monkeypatch.setattr(
+        fold_cli.utils,
+        "gromacs_postprocess_structure",
+        lambda enabled, full_pdb_path, gromacs_dir, coords, labels, ca_coords, sidechain_centroid_fn, **kwargs: {
+            "coords": coords,
+            "labels": labels,
+            "ca_coords": ca_coords,
+            "sidechain_centroids": sidechain_centroid_fn(coords, labels),
+            "nonlocal_clash_metrics": {},
+            "local_clash_metrics": {},
+            "ring_penetration_metrics": {},
+            "gromacs_info": {"gromacs_status": "not_run"},
+        },
+    )
+
+    previous = tmp_path / "previous"
+    params_dir = previous / "circuit_parameters"
+    params_dir.mkdir(parents=True)
+    np.savez_compressed(params_dir / "replica_1_params.npz", params=np.asarray([1.0, 1.1]))
+    np.savez_compressed(params_dir / "replica_2_params.npz", params=np.asarray([2.0, 2.2]))
+    np.savez_compressed(params_dir / "replica_3_params.npz", params=np.asarray([3.0, 3.3]))
+    pd.DataFrame(
+        [
+            {
+                "ensemble_id": 0,
+                "energy": -1.0,
+                "rmsd_to_reference_A": 1.0,
+                "gromacs_potential_kcal_mol": -999.0,
+                "circuit_params_npz_path": str(params_dir / "replica_1_params.npz"),
+            },
+            {
+                "ensemble_id": 1,
+                "energy": -5.0,
+                "rmsd_to_reference_A": 5.0,
+                "gromacs_potential_kcal_mol": -10.0,
+                "circuit_params_npz_path": str(params_dir / "replica_2_params.npz"),
+            },
+            {
+                "ensemble_id": 2,
+                "energy": -3.0,
+                "rmsd_to_reference_A": 0.5,
+                "gromacs_potential_kcal_mol": -20.0,
+                "circuit_params_npz_path": str(params_dir / "replica_3_params.npz"),
+            },
+        ]
+    ).to_csv(previous / "ensemble_ranked.csv", index=False)
+
+    fold_cli.main(
+        [
+            "--predict",
+            "GA",
+            "--mode",
+            "predict_only",
+            "--ensemble_size",
+            "1",
+            "--maxiter",
+            "1",
+            "--top_k",
+            "1",
+            "--top_k_snapshots",
+            "0",
+            "--gromacs_minimize",
+            "0",
+            "--initial_params",
+            str(previous),
+            "--initial_params_select",
+            "best_energy",
+            "--output_root",
+            str(tmp_path / "new"),
+        ]
+    )
+
+    assert np.allclose(captured_managers[0].initial_params_list[0], [2.0, 2.2])
+
+
+def test_fold_initial_params_select_best_rmsd_uses_lowest_rmsd(monkeypatch, tmp_path):
+    _patch_fast_fold(monkeypatch)
+    captured_managers = []
+
+    class CapturingManager(_FakeManager):
+        def __init__(self, folder):
+            super().__init__(folder)
+            captured_managers.append(self)
+
+    monkeypatch.setattr(fold_cli, "EnsembleFoldingManager", CapturingManager)
+    monkeypatch.setattr(
+        fold_cli.utils,
+        "gromacs_postprocess_structure",
+        lambda enabled, full_pdb_path, gromacs_dir, coords, labels, ca_coords, sidechain_centroid_fn, **kwargs: {
+            "coords": coords,
+            "labels": labels,
+            "ca_coords": ca_coords,
+            "sidechain_centroids": sidechain_centroid_fn(coords, labels),
+            "nonlocal_clash_metrics": {},
+            "local_clash_metrics": {},
+            "ring_penetration_metrics": {},
+            "gromacs_info": {"gromacs_status": "not_run"},
+        },
+    )
+
+    previous = tmp_path / "previous"
+    params_dir = previous / "circuit_parameters"
+    params_dir.mkdir(parents=True)
+    np.savez_compressed(params_dir / "replica_1_params.npz", params=np.asarray([1.0, 1.1]))
+    np.savez_compressed(params_dir / "replica_2_params.npz", params=np.asarray([2.0, 2.2]))
+    pd.DataFrame(
+        [
+            {
+                "ensemble_id": 0,
+                "energy": -100.0,
+                "rmsd_to_reference_A": 9.0,
+                "circuit_params_npz_path": str(params_dir / "replica_1_params.npz"),
+            },
+            {
+                "ensemble_id": 1,
+                "energy": -1.0,
+                "rmsd_to_reference_A": 1.2,
+                "circuit_params_npz_path": str(params_dir / "replica_2_params.npz"),
+            },
+        ]
+    ).to_csv(previous / "ensemble_ranked.csv", index=False)
+
+    fold_cli.main(
+        [
+            "--predict",
+            "GA",
+            "--mode",
+            "predict_only",
+            "--ensemble_size",
+            "1",
+            "--maxiter",
+            "1",
+            "--top_k",
+            "1",
+            "--top_k_snapshots",
+            "0",
+            "--gromacs_minimize",
+            "0",
+            "--initial_params",
+            str(previous),
+            "--initial_params_select",
+            "best_rmsd",
+            "--output_root",
+            str(tmp_path / "new"),
+        ]
+    )
+
+    assert np.allclose(captured_managers[0].initial_params_list[0], [2.0, 2.2])

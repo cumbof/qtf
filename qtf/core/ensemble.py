@@ -42,6 +42,7 @@ def _run_one_replica(
     n_runs: int,
     top_k_snapshots: int = 0,
     snapshot_energy_gap: float = 0.0,
+    initial_params: np.ndarray | None = None,
 ) -> dict:
     """Execute a single folding replica in a subprocess.
 
@@ -50,9 +51,12 @@ def _run_one_replica(
     """
     folder = QuantumBiophysicsFolder(**folder_kwargs)
 
-    start_params = folder.get_smart_initialization(
-        n_attempts=scout_attempts, seed=replica_seed
-    )
+    if initial_params is None:
+        start_params = folder.get_smart_initialization(
+            n_attempts=scout_attempts, seed=replica_seed
+        )
+    else:
+        start_params = np.asarray(initial_params, dtype=float)
 
     coords, labels, bonds, tracker, final_params, final_energy, best_snapshots = folder.fold(
         max_iter=max_iter,
@@ -67,7 +71,7 @@ def _run_one_replica(
     return {
         "id": index,
         "seed": replica_seed,
-        "type": "random",
+        "type": "warm_start" if initial_params is not None else "random",
         "energy": final_energy,
         "energy_terms": energy_terms,
         "coords": coords,
@@ -120,6 +124,7 @@ class EnsembleFoldingManager:
         max_workers: int = 1,
         top_k_snapshots: int = 0,
         snapshot_energy_gap: float = 0.0,
+        initial_params_list: list[np.ndarray] | None = None,
     ) -> None:
         """Run *n_runs* independent folding trajectories in parallel.
 
@@ -162,6 +167,10 @@ class EnsembleFoldingManager:
             Minimum raw objective-energy spacing between saved best snapshots.
             Candidates closer than this to an already retained snapshot replace
             that snapshot only when they have lower energy.
+        initial_params_list:
+            Optional warm-start parameter vectors. When provided, replica *i*
+            starts from ``initial_params_list[i]`` and skips scouting. Replicas
+            without a corresponding entry still use deterministic scouting.
         """
         logger.info("Starting ensemble run: %d trajectories", n_runs)
         self.results = []
@@ -203,12 +212,14 @@ class EnsembleFoldingManager:
                 tasks, folder_kwargs, max_iter, scout_attempts, n_runs,
                 top_k_snapshots=top_k_snapshots,
                 snapshot_energy_gap=snapshot_energy_gap,
+                initial_params_list=initial_params_list,
             )
         else:
             self._run_parallel(
                 tasks, folder_kwargs, max_iter, scout_attempts, n_runs, n_workers,
                 top_k_snapshots=top_k_snapshots,
                 snapshot_energy_gap=snapshot_energy_gap,
+                initial_params_list=initial_params_list,
             )
 
         # Restore deterministic insertion order (by replica id)
@@ -227,6 +238,7 @@ class EnsembleFoldingManager:
         n_runs: int,
         top_k_snapshots: int = 0,
         snapshot_energy_gap: float = 0.0,
+        initial_params_list: list[np.ndarray] | None = None,
     ) -> None:
         """Run replicas in-process using ``self.folder`` (no subprocess).
 
@@ -243,9 +255,12 @@ class EnsembleFoldingManager:
             self.folder.last_energy_terms = {}
 
             try:
-                start_params = self.folder.get_smart_initialization(
-                    n_attempts=scout_attempts, seed=replica_seed,
-                )
+                if initial_params_list is not None and i < len(initial_params_list):
+                    start_params = np.asarray(initial_params_list[i], dtype=float)
+                else:
+                    start_params = self.folder.get_smart_initialization(
+                        n_attempts=scout_attempts, seed=replica_seed,
+                    )
 
                 coords, labels, bonds, tracker, final_params, final_energy, best_snapshots = (
                     self.folder.fold(
@@ -279,7 +294,11 @@ class EnsembleFoldingManager:
                 {
                     "id": i,
                     "seed": replica_seed,
-                    "type": "random",
+                    "type": (
+                        "warm_start"
+                        if initial_params_list is not None and i < len(initial_params_list)
+                        else "random"
+                    ),
                     "energy": final_energy,
                     "energy_terms": energy_terms,
                     "coords": coords,
@@ -306,6 +325,7 @@ class EnsembleFoldingManager:
         n_workers: int,
         top_k_snapshots: int = 0,
         snapshot_energy_gap: float = 0.0,
+        initial_params_list: list[np.ndarray] | None = None,
     ) -> None:
         """Distribute replicas across *n_workers* subprocesses."""
         from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -324,6 +344,11 @@ class EnsembleFoldingManager:
                     n_runs,
                     top_k_snapshots,
                     snapshot_energy_gap,
+                    (
+                        np.asarray(initial_params_list[i], dtype=float)
+                        if initial_params_list is not None and i < len(initial_params_list)
+                        else None
+                    ),
                 )
                 fut_to_idx[fut] = i
 

@@ -253,10 +253,12 @@ qtf-fold --predict YYDPETGTWY --ensemble_size 5
 | `--omega_mode` | `window` | `window` maps omega into the 170–190° trans band; `free` uses a full-range omega DOF; `fixed` removes omega DOFs |
 | `--gromacs_minimize` | `1` | GROMACS-minimize saved final models and snapshots when available |
 | `--gromacs_rerank` | `1` | Rerank final saved models by GROMACS potential energy when minimization succeeds |
+| `--initial_params PATH` | None | Warm-start replicas from saved circuit parameters: a previous job directory, `circuit_parameters/`, `circuit_parameters.json`, or a single parameter JSON/NPZ/NPY file |
+| `--initial_params_select` | `first` | For previous multi-replica runs, choose `first`, `best_energy` (lowest raw QTF/backend `energy`), or `best_rmsd` (`rmsd_to_reference_A`) |
 | `--mode` | `predict_and_compare` | `predict_and_compare` \| `predict_only` |
 
 Outputs written to `<output_root>/<SEQUENCE>_<FF>_<TIMESTAMP>/`:
-per-replica PDBs, `ensemble_ranked.csv`/`.json`/`.pdb`, `snapshot_ranked.csv`/`.json`/`.pdb` when snapshots are enabled, and `summary_results.csv`/`.json`.
+per-replica PDBs, `ensemble_ranked.csv`/`.json`/`.pdb`, `snapshot_ranked.csv`/`.json`/`.pdb` when snapshots are enabled, `summary_results.csv`/`.json`, and `circuit_parameters/` JSON/NPZ files for each completed replica.
 
 ### `qtf-bench` — Beam-search benchmark
 

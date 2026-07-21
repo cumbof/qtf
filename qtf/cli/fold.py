@@ -59,6 +59,244 @@ def _first_existing_pdb_path(row, columns):
     return None
 
 
+def _single_parameter_vector_from_file(path, expected_size=None):
+    path = os.path.abspath(path)
+    if path.endswith(".npy"):
+        params = np.load(path)
+    elif path.endswith(".npz"):
+        payload = np.load(path)
+        key = "params" if "params" in payload else ("circuit_parameters" if "circuit_parameters" in payload else None)
+        if key is None:
+            keys = list(payload.keys())
+            if not keys:
+                raise ValueError(f"no arrays found in parameter file: {path}")
+            key = keys[0]
+        params = payload[key]
+    else:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if isinstance(payload, dict):
+            for key in ("params", "circuit_parameters", "parameters"):
+                if key in payload:
+                    params = payload[key]
+                    break
+            else:
+                raise ValueError(f"no parameter vector found in JSON file: {path}")
+        else:
+            params = payload
+    params = np.asarray(params, dtype=float).reshape(-1)
+    if expected_size is not None and params.size != int(expected_size):
+        raise ValueError(
+            f"parameter vector in {path} has length {params.size}, expected {int(expected_size)}"
+        )
+    return params
+
+
+def _find_parameter_manifest(path):
+    path = os.path.abspath(path)
+    if os.path.isdir(path):
+        manifest = os.path.join(path, "circuit_parameters.json")
+        nested_manifest = os.path.join(path, "circuit_parameters", "circuit_parameters.json")
+        if os.path.isfile(manifest):
+            return manifest
+        elif os.path.isfile(nested_manifest):
+            return nested_manifest
+    return path
+
+
+def _manifest_job_dir(manifest_path):
+    params_dir = os.path.dirname(os.path.abspath(manifest_path))
+    if os.path.basename(params_dir) == "circuit_parameters":
+        return os.path.dirname(params_dir)
+    return params_dir
+
+
+def _selected_parameter_file_from_previous_run(path, select):
+    path = os.path.abspath(path)
+    if os.path.isdir(path) and os.path.isfile(os.path.join(path, "ensemble_ranked.csv")):
+        job_dir = path
+    else:
+        manifest_path = _find_parameter_manifest(path)
+        job_dir = _manifest_job_dir(manifest_path)
+    ensemble_csv_path = os.path.join(job_dir, "ensemble_ranked.csv")
+    if not os.path.isfile(ensemble_csv_path):
+        raise FileNotFoundError(
+            f"--initial_params_select {select!r} requires ensemble_ranked.csv next to the saved parameters: "
+            f"{ensemble_csv_path}"
+        )
+
+    df = pd.read_csv(ensemble_csv_path)
+    if df.empty:
+        raise ValueError(f"ensemble ranking is empty: {ensemble_csv_path}")
+    if select == "best_energy":
+        if "energy" not in df.columns:
+            raise ValueError(f"ensemble ranking lacks required 'energy' column: {ensemble_csv_path}")
+        idx = pd.to_numeric(df["energy"], errors="coerce").idxmin()
+    elif select == "best_rmsd":
+        if "rmsd_to_reference_A" not in df.columns:
+            raise ValueError(f"ensemble ranking lacks required 'rmsd_to_reference_A' column: {ensemble_csv_path}")
+        rmsd = pd.to_numeric(df["rmsd_to_reference_A"], errors="coerce")
+        if not rmsd.notna().any():
+            raise ValueError(f"ensemble ranking has no finite RMSD values: {ensemble_csv_path}")
+        idx = rmsd.idxmin()
+    else:
+        raise ValueError(f"unsupported initial parameter selection mode: {select}")
+
+    row = df.loc[idx]
+    for column in ("circuit_params_npz_path", "circuit_params_json_path"):
+        candidate = row.get(column, "")
+        if isinstance(candidate, str) and candidate:
+            if not os.path.isabs(candidate):
+                candidate = os.path.join(job_dir, candidate)
+            if os.path.isfile(candidate):
+                return candidate
+
+    if "ensemble_id" in row:
+        replica_number = int(row["ensemble_id"]) + 1
+        candidate = os.path.join(job_dir, "circuit_parameters", f"replica_{replica_number}_params.npz")
+        if os.path.isfile(candidate):
+            return candidate
+        candidate = os.path.join(job_dir, "circuit_parameters", f"replica_{replica_number}_params.json")
+        if os.path.isfile(candidate):
+            return candidate
+
+    raise FileNotFoundError(f"could not resolve saved circuit parameters from selected row in {ensemble_csv_path}")
+
+
+def _load_initial_parameter_vectors(path, *, expected_size, n_runs, select="first"):
+    path = os.path.abspath(path)
+    if select != "first":
+        selected_path = _selected_parameter_file_from_previous_run(path, select)
+        vector = _single_parameter_vector_from_file(selected_path, expected_size)
+        return _expand_warm_start_vectors([vector], n_runs)
+
+    if os.path.isdir(path):
+        manifest = os.path.join(path, "circuit_parameters.json")
+        nested_manifest = os.path.join(path, "circuit_parameters", "circuit_parameters.json")
+        if os.path.isfile(manifest):
+            path = manifest
+        elif os.path.isfile(nested_manifest):
+            path = nested_manifest
+        else:
+            files = sorted(
+                os.path.join(path, name)
+                for name in os.listdir(path)
+                if name.endswith("_params.json") or name.endswith("_params.npz")
+            )
+            if not files:
+                raise FileNotFoundError(f"no parameter files found in directory: {path}")
+            vectors = [_single_parameter_vector_from_file(file_path, expected_size) for file_path in files]
+            return _expand_warm_start_vectors(vectors, n_runs)
+
+    if path.endswith(".json"):
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if isinstance(payload, dict) and "replicas" in payload:
+            vectors = []
+            base_dir = os.path.dirname(path)
+            for replica in payload.get("replicas") or []:
+                if not isinstance(replica, dict):
+                    continue
+                for key in ("params", "circuit_parameters", "parameters"):
+                    if key in replica:
+                        vectors.append(np.asarray(replica[key], dtype=float).reshape(-1))
+                        break
+                else:
+                    file_path = replica.get("npz_path") or replica.get("json_path")
+                    if isinstance(file_path, str) and file_path:
+                        if not os.path.isabs(file_path):
+                            file_path = os.path.join(base_dir, file_path)
+                        vectors.append(_single_parameter_vector_from_file(file_path, expected_size))
+            if not vectors:
+                raise ValueError(f"no replica parameter vectors found in manifest: {path}")
+            for vector in vectors:
+                if vector.size != int(expected_size):
+                    raise ValueError(
+                        f"parameter vector in {path} has length {vector.size}, expected {int(expected_size)}"
+                    )
+            return _expand_warm_start_vectors(vectors, n_runs)
+
+    vector = _single_parameter_vector_from_file(path, expected_size)
+    return _expand_warm_start_vectors([vector], n_runs)
+
+
+def _expand_warm_start_vectors(vectors, n_runs):
+    if len(vectors) == 1:
+        return [vectors[0].copy() for _ in range(n_runs)]
+    if len(vectors) < n_runs:
+        raise ValueError(
+            f"only {len(vectors)} warm-start vector(s) were provided for {n_runs} replica(s)"
+        )
+    return [np.asarray(vectors[i], dtype=float).reshape(-1).copy() for i in range(n_runs)]
+
+
+def _write_circuit_parameter_artifacts(job_output_dir, *, sequence, args, folder, results):
+    params_dir = os.path.join(job_output_dir, "circuit_parameters")
+    os.makedirs(params_dir, exist_ok=True)
+    manifest = {
+        "format": "qtf.circuit_parameters.v1",
+        "sequence": sequence,
+        "energy_backend": args.energy_backend,
+        "omega_mode": args.omega_mode,
+        "chi_mode": folder.chi_mode,
+        "n_qubits": int(folder.n_qubits),
+        "n_params": int(folder.n_params),
+        "ansatz": type(folder.ansatz).__name__,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "replicas": [],
+    }
+    for res in sorted(results, key=lambda item: int(item["id"])):
+        replica_number = int(res["id"]) + 1
+        params = np.asarray(res["params"], dtype=float).reshape(-1)
+        if params.size != int(folder.n_params):
+            raise ValueError(
+                f"replica {replica_number} parameter vector has length {params.size}, expected {folder.n_params}"
+            )
+        stem = f"replica_{replica_number}_params"
+        json_path = os.path.join(params_dir, f"{stem}.json")
+        npz_path = os.path.join(params_dir, f"{stem}.npz")
+        payload = {
+            "format": "qtf.circuit_parameters.v1",
+            "sequence": sequence,
+            "energy_backend": args.energy_backend,
+            "omega_mode": args.omega_mode,
+            "chi_mode": folder.chi_mode,
+            "ensemble_id": int(res["id"]),
+            "replica": replica_number,
+            "seed": int(res["seed"]),
+            "energy": float(res["energy"]),
+            "n_qubits": int(folder.n_qubits),
+            "n_params": int(folder.n_params),
+            "ansatz": type(folder.ansatz).__name__,
+            "params": params.tolist(),
+        }
+        with open(json_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+        np.savez_compressed(
+            npz_path,
+            params=params,
+            ensemble_id=int(res["id"]),
+            replica=replica_number,
+            seed=int(res["seed"]),
+            energy=float(res["energy"]),
+        )
+        manifest["replicas"].append(
+            {
+                "ensemble_id": int(res["id"]),
+                "replica": replica_number,
+                "seed": int(res["seed"]),
+                "energy": float(res["energy"]),
+                "n_params": int(params.size),
+                "json_path": os.path.relpath(json_path, params_dir),
+                "npz_path": os.path.relpath(npz_path, params_dir),
+            }
+        )
+    manifest_path = os.path.join(params_dir, "circuit_parameters.json")
+    with open(manifest_path, "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=2)
+    return manifest_path
+
+
 def _write_ranked_multimodel_pdb(
     df,
     output_path,
@@ -180,6 +418,24 @@ def main(argv=None):
         choices=['energy', 'rmsd'],
         help='sort exported snapshot pool by energy or by RMSD to the reference structure',
     )
+    parser.add_argument(
+        '--initial_params',
+        default=None,
+        help=(
+            'warm-start circuit parameters from a saved QTF parameter JSON/NPZ/NPY file, '
+            'a circuit_parameters.json manifest, or a circuit_parameters directory'
+        ),
+    )
+    parser.add_argument(
+        '--initial_params_select',
+        default='first',
+        choices=['first', 'best_energy', 'best_rmsd'],
+        help=(
+            'selection mode when --initial_params points at a previous multi-replica run: '
+            'first=replica order, best_energy=lowest raw QTF/backend energy in ensemble_ranked.csv, '
+            'best_rmsd=lowest rmsd_to_reference_A in ensemble_ranked.csv'
+        ),
+    )
 
     args = parser.parse_args(argv)
     if args.gromacs_minimize is None:
@@ -235,12 +491,48 @@ def main(argv=None):
         omega_mode=args.omega_mode,
     )
 
+    initial_params_list = None
+    if args.initial_params:
+        initial_params_list = _load_initial_parameter_vectors(
+            args.initial_params,
+            expected_size=folder.n_params,
+            n_runs=ensemble_size,
+            select=args.initial_params_select,
+        )
+        print(
+            "Loaded warm-start circuit parameters "
+            f"for {len(initial_params_list)} replica(s): {args.initial_params} "
+            f"(select={args.initial_params_select})"
+        )
+
     manager = EnsembleFoldingManager(folder)
-    manager.run_ensemble(n_runs=ensemble_size, max_iter=args.maxiter,
-                         top_k_snapshots=args.top_k_snapshots,
-                         snapshot_energy_gap=args.snapshot_energy_gap)
+    run_kwargs = {
+        "n_runs": ensemble_size,
+        "max_iter": args.maxiter,
+        "top_k_snapshots": args.top_k_snapshots,
+        "snapshot_energy_gap": args.snapshot_energy_gap,
+    }
+    if initial_params_list is not None:
+        run_kwargs["initial_params_list"] = initial_params_list
+    manager.run_ensemble(**run_kwargs)
 
     ranked_results = manager.get_results(ranked=True)
+    parameter_manifest_path = _write_circuit_parameter_artifacts(
+        job_output_dir,
+        sequence=sequence,
+        args=args,
+        folder=folder,
+        results=manager.get_results(ranked=False),
+    )
+    with open(parameter_manifest_path, "r", encoding="utf-8") as handle:
+        parameter_manifest = json.load(handle)
+    parameter_artifacts_by_id = {
+        int(entry["ensemble_id"]): {
+            "json_path": os.path.join(os.path.dirname(parameter_manifest_path), entry["json_path"]),
+            "npz_path": os.path.join(os.path.dirname(parameter_manifest_path), entry["npz_path"]),
+        }
+        for entry in parameter_manifest["replicas"]
+    }
     selected_results = manager.select_top(top_k=top_k, top_frac=top_frac)
 
     if not ranked_results:
@@ -540,6 +832,8 @@ def main(argv=None):
             "init_type": str(res["type"]),
             "energy_rank": int(rank),
             "energy": float(res["energy"]),
+            "circuit_params_json_path": parameter_artifacts_by_id.get(int(res["id"]), {}).get("json_path", ""),
+            "circuit_params_npz_path": parameter_artifacts_by_id.get(int(res["id"]), {}).get("npz_path", ""),
             "rmsd_to_reference_A": rmsd,
             "raw_rmsd_to_reference_A": raw_rmsd,
             "gromacs_rmsd_to_reference_A": gromacs_rmsd,
@@ -700,6 +994,9 @@ def main(argv=None):
         "Snapshot Sort By": snapshot_sort_by,
         "Snapshot Energy Gap": args.snapshot_energy_gap,
         "Snapshot GROMACS Enabled": bool(args.gromacs_minimize),
+        "Initial Params": args.initial_params,
+        "Initial Params Select": args.initial_params_select,
+        "Circuit Parameters": parameter_manifest_path,
         "Output Dir": job_output_dir,
     }
 
