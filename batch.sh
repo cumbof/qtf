@@ -25,6 +25,7 @@
 set -euo pipefail
 
 #source "$HOME/miniforge3/etc/profile.d/conda.sh"
+source ~/miniforge3/bin/activate
 conda activate qtf
 
 
@@ -49,7 +50,7 @@ srun python -m qtf.cli.fold \
     --gromacs_minimize    1 \
     --gromacs_rerank      1 \
     --top_k               1 \
-    --top_k_snapshots     2000  \
+    --top_k_snapshots     5000  \
     --snapshot_energy_gap 0.1 \
     --snapshot_sort_by    rmsd \
     --output_root         "$OUTPUT_BASE/task_${SLURM_ARRAY_TASK_ID}"
