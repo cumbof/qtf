@@ -163,7 +163,15 @@ Optional extras:
 >   ```bash
 >   conda install -c conda-forge openmm
 >   ```
-> - **GROMACS** (used by PHEAT external validation recipes and `gromacs_postprocess_structure()`) must be installed at the system level. See the [GROMACS download page](https://www.gromacs.org/downloads) for platform-specific instructions.
+> - **GROMACS** (used by PHEAT external validation recipes and `gromacs_postprocess_structure()`) must be available as `gmx` or `gmx_mpi`. It can be installed system-wide on `PATH`, or inside the active conda environment:
+>   ```bash
+>   conda install -c conda-forge gromacs
+>   ```
+>   Verify the environment before submitting long jobs:
+>   ```bash
+>   which gmx
+>   gmx --version
+>   ```
 
 ---
 
