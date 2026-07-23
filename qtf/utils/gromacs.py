@@ -293,6 +293,18 @@ def parse_gromacs_log_stats(log_path: Path) -> Dict[str, object]:
     }
 
 
+def compact_successful_minimization_dir(workdir: Path, keep_paths: List[Path]) -> None:
+    """Keep only compact audit artifacts after a successful minimization."""
+    keep = {path.resolve() for path in keep_paths if path.exists()}
+    for path in workdir.iterdir():
+        if path.resolve() in keep:
+            continue
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+
+
 def minimize_pdb_with_gromacs(
     pdb_path: str,
     outdir: str,
@@ -414,4 +426,5 @@ def minimize_pdb_with_gromacs(
     result["gromacs_message"] = ""
     result["gromacs_minimized_full_pdb_path"] = str(minimized_pdb)
     result.update(parse_gromacs_log_stats(log_path))
+    compact_successful_minimization_dir(workdir, keep_paths=[minimized_pdb, log_path])
     return result
