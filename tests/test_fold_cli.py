@@ -1927,6 +1927,22 @@ def test_fold_cli_passes_seed_offset_to_engine():
     assert argv[argv.index("--seed-offset") + 1] == "17"
 
 
+def test_fold_cli_passes_replica_count_to_engine():
+    from qtf.cli import _build_parser, _qtf_argv
+    from qtf.recipes import resolve_recipe
+
+    args = _build_parser().parse_args([
+        "fold",
+        "qtf-main-snapshot-equivalent",
+        "--sequence",
+        "GA",
+        "--n-runs",
+        "5",
+    ])
+    argv = _qtf_argv(args, resolve_recipe("qtf-main-snapshot-equivalent"))
+    assert argv[argv.index("--replica-count") + 1] == "5"
+
+
 def test_engine_parser_accepts_snapshot_options():
     import qtf.engines.qtf as qtf_engine
 
@@ -1978,6 +1994,20 @@ def test_engine_parser_accepts_seed_offset():
     assert args.seed_offset == 17
 
 
+def test_engine_parser_accepts_replica_count():
+    import qtf.engines.qtf as qtf_engine
+
+    args = qtf_engine._build_parser().parse_args([
+        "--predict",
+        "GA",
+        "--replica-id",
+        "2",
+        "--replica-count",
+        "5",
+    ])
+    assert args.replica_count == 5
+
+
 def test_engine_initial_params_select_best_energy_prefers_lowest_raw_energy(tmp_path):
     import numpy as np
     import qtf.engines.qtf as qtf_engine
@@ -2003,6 +2033,49 @@ def test_engine_initial_params_select_best_energy_prefers_lowest_raw_energy(tmp_
         encoding="utf-8",
     )
     (tmp_path / "replica_1_result.json").write_text(
+        json.dumps({"replica_id": 1, "energy": 2.0, "rmsd_to_reference": 3.0}),
+        encoding="utf-8",
+    )
+
+    vector = qtf_engine._load_initial_parameter_vector(
+        str(tmp_path),
+        expected_size=2,
+        replica_id=0,
+        select="best_energy",
+    )
+
+    assert np.allclose(vector, [2.0, 2.2])
+
+
+def test_engine_initial_params_select_reads_primary_output_result_dirs(tmp_path):
+    import numpy as np
+    import qtf.engines.qtf as qtf_engine
+
+    params_dir = tmp_path / "circuit_parameters"
+    params_dir.mkdir()
+    np.savez(params_dir / "replica_1_params.npz", params=np.asarray([1.0, 1.1]))
+    np.savez(params_dir / "replica_2_params.npz", params=np.asarray([2.0, 2.2]))
+    (params_dir / "circuit_parameters.json").write_text(
+        json.dumps(
+            {
+                "format": "qtf.circuit_parameters.v1",
+                "replicas": [
+                    {"replica_id": 0, "npz_path": "replica_1_params.npz"},
+                    {"replica_id": 1, "npz_path": "replica_2_params.npz"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    replica_1_dir = tmp_path / "replica_0_primary_outputs"
+    replica_2_dir = tmp_path / "replica_1_primary_outputs"
+    replica_1_dir.mkdir()
+    replica_2_dir.mkdir()
+    (replica_1_dir / "replica_0_result.json").write_text(
+        json.dumps({"replica_id": 0, "energy": 8.0, "rmsd_to_reference": 1.0}),
+        encoding="utf-8",
+    )
+    (replica_2_dir / "replica_1_result.json").write_text(
         json.dumps({"replica_id": 1, "energy": 2.0, "rmsd_to_reference": 3.0}),
         encoding="utf-8",
     )

@@ -298,11 +298,14 @@ def _qtf_argv(args, recipe: dict) -> list[str]:
     report = recipe.get("report") or {}
     if not args.sequence:
         raise SystemExit("qtf fold recipes require --sequence.")
+    replica_count = int(args.n_runs or 1)
     argv = [
         "--predict",
         args.sequence,
         "--replica-id",
         str(args.run_index if args.run_index is not None else 0),
+        "--replica-count",
+        str(replica_count if replica_count > 0 else 1),
         "--recipe",
         recipe["name"],
     ]

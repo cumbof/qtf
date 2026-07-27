@@ -865,7 +865,9 @@ def _previous_run_result_records(job_dir: Path) -> list[dict[str, Any]]:
             reader = csv.DictReader(handle)
             for row in reader:
                 records.append(dict(row))
-    for result_path in sorted(job_dir.glob("replica_*_result.json")):
+    result_paths = list(job_dir.glob("replica_*_result.json"))
+    result_paths.extend(job_dir.glob("replica_*_primary_outputs/replica_*_result.json"))
+    for result_path in sorted(set(result_paths)):
         try:
             payload = json.loads(result_path.read_text(encoding="utf-8"))
         except Exception:
@@ -7781,6 +7783,8 @@ def _run_optimization_phases(
     snapshot_sort_by: str = "energy",
     outdir: Optional[Path] = None,
     prefix: Optional[str] = None,
+    replica_id: int = 0,
+    replica_count: int = 1,
     status_writer: Optional[RunStatusWriter] = None,
 ):
     if workflow_progress is not None:
@@ -8981,14 +8985,21 @@ def _run_optimization_phases(
             last_status_eval = 0
             last_status_time = time.time()
             last_console_heartbeat_time = time.time()
+            last_console_heartbeat_eval = 0
+            phase_eval_budget = int(phase.maxiter or max_iter)
+            heartbeat_eval_interval = max(
+                50,
+                min(200, phase_eval_budget // 2 if phase_eval_budget > 0 else 50),
+            )
             periodic_rerank_intervals = _periodic_reranking_intervals()
             periodic_rerank_fired: set[tuple[int, int]] = set()
 
             def _phase_objective(params):
-                nonlocal phase_best_objective, last_status_eval, last_status_time, last_console_heartbeat_time
+                nonlocal phase_best_objective, last_status_eval, last_status_time, last_console_heartbeat_time, last_console_heartbeat_eval
                 value = folder.energy_function(params)
                 latest_objective = float(value)
                 phase_evaluations = int(folder.tracker.current_iter) - phase_start_iter
+                improved = False
                 if periodic_rerank_intervals and phase_evaluations > 0:
                     latest_candidate = next(
                         (
@@ -9017,6 +9028,7 @@ def _run_optimization_phases(
                     phase_best_objective is None or latest_objective < phase_best_objective
                 ):
                     phase_best_objective = latest_objective
+                    improved = True
                 if status_writer is not None:
                     now = time.time()
                     status_due = (
@@ -9024,7 +9036,12 @@ def _run_optimization_phases(
                         or phase_evaluations - last_status_eval >= STATUS_EVAL_INTERVAL
                         or now - last_status_time >= STATUS_UPDATE_INTERVAL_S
                     )
-                    console_due = now - last_console_heartbeat_time >= STATUS_CONSOLE_HEARTBEAT_INTERVAL_S
+                    console_due = (
+                        phase_evaluations <= 1
+                        or improved
+                        or phase_evaluations - last_console_heartbeat_eval >= heartbeat_eval_interval
+                        or now - last_console_heartbeat_time >= STATUS_CONSOLE_HEARTBEAT_INTERVAL_S
+                    )
                     if console_due:
                         latest_text = "nan" if not math.isfinite(latest_objective) else f"{latest_objective:.4f}"
                         best_text = (
@@ -9033,11 +9050,12 @@ def _run_optimization_phases(
                             else f"{phase_best_objective:.4f}"
                         )
                         print(
-                            " > Phase Progress: "
-                            f"eval={phase_evaluations}, latest={latest_text}, best={best_text}, "
+                            f"  Replica {int(replica_id) + 1}/{int(replica_count)} Stage {phase_index} progress: "
+                            f"eval={phase_evaluations} current={latest_text} best={best_text} "
                             f"elapsed={_format_elapsed(time.perf_counter() - phase_wall_start)}"
                         )
                         last_console_heartbeat_time = now
+                        last_console_heartbeat_eval = phase_evaluations
                     if status_due or console_due:
                         last_status_eval = phase_evaluations
                         last_status_time = now
@@ -9704,6 +9722,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--forcefield", default="protein-coarse-charge-v1")
     parser.add_argument("--replica-id", dest="replica_id", type=int, required=True)
+    parser.add_argument("--replica-count", dest="replica_count", type=int, default=1)
     parser.add_argument(
         "--run-label",
         default=None,
@@ -10009,12 +10028,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
+    primary_output_dir = outdir / f"{prefix}_primary_outputs"
+    primary_output_dir.mkdir(parents=True, exist_ok=True)
     console_capture = io.StringIO()
     sys.stdout = TeeStream(sys.stdout, console_capture)
     sys.stderr = TeeStream(sys.stderr, console_capture)
-    console_log_path = outdir / f"{prefix}_console.log"
-    status_path = outdir / f"{prefix}_status.json"
-    software_versions_path = outdir / f"{prefix}_software_versions.json"
+    console_log_path = primary_output_dir / f"{prefix}_console.log"
+    status_path = primary_output_dir / f"{prefix}_status.json"
+    software_versions_path = primary_output_dir / f"{prefix}_software_versions.json"
     command_line = _command_line(argv, args.report_command_line)
 
     def _flush_console_log() -> None:
@@ -10058,6 +10079,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parser.error("--seed must be a non-negative integer.")
     if args.seed_offset < 0:
         parser.error("--seed-offset must be a non-negative integer.")
+    if args.replica_count < 1:
+        parser.error("--replica-count must be >= 1.")
     if args.shot_seed is not None and args.shot_seed < 0:
         parser.error("--shot-seed must be a non-negative integer.")
     shots = _resolve_shot_settings(args, parser)
@@ -10095,8 +10118,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         status="starting",
         recipe=phase_schedule.preset,
         output_directory=str(outdir),
-        result_path=str(outdir / f"{prefix}_result.json"),
-        tracker_path=str(outdir / f"{prefix}_tracker.json"),
+        result_path=str(primary_output_dir / f"{prefix}_result.json"),
+        tracker_path=str(primary_output_dir / f"{prefix}_tracker.json"),
         force=True,
         flush_console=True,
     )
@@ -10608,8 +10631,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             top_k_snapshots=args.top_k_snapshots,
             snapshot_energy_gap=args.snapshot_energy_gap,
             snapshot_sort_by=args.snapshot_sort_by,
-            outdir=outdir,
+            outdir=primary_output_dir,
             prefix=prefix,
+            replica_id=args.replica_id,
+            replica_count=args.replica_count,
             status_writer=status_writer,
         )
     except PhaseOptimizationError as exc:
@@ -10645,13 +10670,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         max_chi=output_max_chi,
     )
 
-    pdb_path = outdir / f"{prefix}.pdb"
-    ca_pdb_path = outdir / f"{prefix}_ca.pdb"
-    heavy_json_path = outdir / f"{prefix}_heavy.json"
-    residue_geometry_path = outdir / f"{prefix}_residue_geometry.json"
-    score_path = outdir / f"{prefix}_score.json"
-    tracker_path = outdir / f"{prefix}_tracker.json"
-    result_path = outdir / f"{prefix}_result.json"
+    pdb_path = primary_output_dir / f"{prefix}.pdb"
+    ca_pdb_path = primary_output_dir / f"{prefix}_ca.pdb"
+    heavy_json_path = primary_output_dir / f"{prefix}_heavy.json"
+    residue_geometry_path = primary_output_dir / f"{prefix}_residue_geometry.json"
+    score_path = primary_output_dir / f"{prefix}_score.json"
+    tracker_path = primary_output_dir / f"{prefix}_tracker.json"
+    result_path = primary_output_dir / f"{prefix}_result.json"
     reference_pdb_path = None
     reference_residue_geometry_path = None
     reference_metric_residue_geometry_path = None
@@ -10701,9 +10726,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         _write_json(score_path, final_score)
 
         if pheat_reference is not None:
-            reference_pdb_path = outdir / f"{prefix}_reference_pheat.pdb"
-            reference_residue_geometry_path = outdir / f"{prefix}_reference_residue_geometry.json"
-            reference_metric_residue_geometry_path = outdir / f"{prefix}_reference_metric_residue_geometry.json"
+            reference_pdb_path = primary_output_dir / f"{prefix}_reference_pheat.pdb"
+            reference_residue_geometry_path = primary_output_dir / f"{prefix}_reference_residue_geometry.json"
+            reference_metric_residue_geometry_path = primary_output_dir / f"{prefix}_reference_metric_residue_geometry.json"
             _reference_report_structure, reference_report_coverage = _write_report_pdb(
                 pheat_reference.structure,
                 reference_pdb_path,
@@ -10741,7 +10766,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             raw_pdb_path = None
             gromacs_payload: dict[str, Any] = {}
             if payload.get("snapshot_status") == "ok" and structure is not None:
-                raw_pdb_path = outdir / f"{_snapshot_file_stem(prefix, payload)}.pdb"
+                raw_pdb_path = primary_output_dir / f"{_snapshot_file_stem(prefix, payload)}.pdb"
                 report_structure, report_coverage = _write_report_pdb(
                     structure,
                     raw_pdb_path,
@@ -10752,7 +10777,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 payload["report_structure_domain"] = report_structure_domain
                 payload["report_domain_coverage"] = report_coverage
                 if payload.get("role") == "top_snapshot" and top_snapshot_gromacs_evaluator is not None:
-                    gromacs_dir = outdir / "gromacs_minimized_models" / "snapshots" / _snapshot_file_stem(prefix, payload)
+                    gromacs_dir = (
+                        primary_output_dir
+                        / "gromacs_minimized_models"
+                        / "snapshots"
+                        / _snapshot_file_stem(prefix, payload)
+                    )
                     forcefield, water, nsteps, emtol, maxwarn = _gromacs_minimize_settings(
                         top_snapshot_gromacs_evaluator
                     )
@@ -10957,7 +10987,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 structure_snapshot_payloads=structure_snapshot_payloads,
                 snapshot_structures=snapshot_structures,
                 reranking_results=reranking_results,
-                outdir=outdir,
+                outdir=primary_output_dir,
                 prefix=prefix,
             )
             for item in validation_results:
@@ -11003,7 +11033,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ),
     )
     landscape_path = None
-    interactive_landscape_path = outdir / f"{prefix}_landscape_interactive.html"
+    interactive_landscape_path = primary_output_dir / f"{prefix}_landscape_interactive.html"
     timings.skip("landscape_plot", label="Landscape plot")
 
     timings.start("interactive_landscape_plot")
@@ -11113,15 +11143,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         software_versions_path,
     )
 
-    report_path = outdir / f"{prefix}_report.html"
+    report_path = primary_output_dir / f"{prefix}_report.html"
     folded_aligned_pdb_path = pdb_path
     ranked_pdb_alignment_atom_set = _pdb_alignment_atom_set(metric_atom_sets, rmsd_alignment_atom_set)
     timings.start("report_generation")
     try:
         try:
             if pheat_reference is not None:
-                reference_aligned_pdb_path = outdir / f"{prefix}_reference_pheat_aligned.pdb"
-                folded_aligned_pdb_path = outdir / f"{prefix}_folded_aligned.pdb"
+                reference_aligned_pdb_path = primary_output_dir / f"{prefix}_reference_pheat_aligned.pdb"
+                folded_aligned_pdb_path = primary_output_dir / f"{prefix}_folded_aligned.pdb"
                 aligned_reference, aligned_folded, _aligned_atom_count = _aligned_pheat_structures(
                     pheat_reference.metric_structure,
                     final_structure,
@@ -11146,7 +11176,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     structure = snapshot_structures.get(key)
                     if structure is None:
                         continue
-                    aligned_snapshot_path = outdir / f"{_snapshot_file_stem(prefix, snapshot)}_aligned.pdb"
+                    aligned_snapshot_path = primary_output_dir / f"{_snapshot_file_stem(prefix, snapshot)}_aligned.pdb"
                     _snapshot_reference, aligned_snapshot, aligned_atom_count = _aligned_pheat_structures(
                         pheat_reference.metric_structure,
                         structure,
@@ -11162,7 +11192,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     snapshot["aligned_matched_heavy_atoms"] = aligned_atom_count
                     snapshot["aligned_atom_count"] = len(aligned_snapshot_report.atoms)
                     snapshot["aligned_report_domain_coverage"] = aligned_snapshot_coverage
-            molstar_dir, molstar_error = _copy_molstar_assets(outdir)
+            molstar_dir, molstar_error = _copy_molstar_assets(primary_output_dir)
             molstar_vendor_path = molstar_dir
         except Exception as exc:
             report_error = str(exc)
@@ -11193,7 +11223,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         primary_gromacs_kcal = None
 
     ensemble_ranked_pdb_path = _write_ranked_multimodel_pdb(
-        outdir / "ensemble_ranked.pdb",
+        primary_output_dir / "ensemble_ranked.pdb",
         [
             {
                 "pdb_path": str(folded_aligned_pdb_path or pdb_path),
@@ -11272,7 +11302,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             }
         )
     snapshot_ranked_pdb_path = _write_ranked_multimodel_pdb(
-        outdir / "snapshot_ranked.pdb",
+        primary_output_dir / "snapshot_ranked.pdb",
         snapshot_ranked_entries,
     )
     if ensemble_ranked_pdb_path is not None:
@@ -11426,6 +11456,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "circuit_params_npz_path": circuit_parameter_artifacts["npz_path"],
         "circuit_parameters_path": circuit_parameter_artifacts["manifest_path"],
         "rmsd_to_reference": rmsd,
+        "rmsd_to_reference_A": rmsd,
         "reference_available": pheat_reference is not None and reference_aligned_pdb_path is not None,
         "rmsd_mode": "pheat_structure_metrics" if pheat_reference is not None else None,
         "rmsd_reference_source": str(pheat_reference.source_path) if pheat_reference is not None else None,
@@ -11451,6 +11482,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "timings": timing_payload,
         "execution": dict(execution_context),
         "command_line": command_line,
+        "primary_output_dir": str(primary_output_dir),
         "console_output_path": str(console_log_path),
         "software_versions": software_versions_summary,
         "software_provenance": software_versions_summary,
