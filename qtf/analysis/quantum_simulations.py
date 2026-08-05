@@ -58,6 +58,7 @@ SNAPSHOT_CORR_FEATURE_LABELS = {
 SNAPSHOT_SAMPLE_COLOR = "#999999"
 NATIVE_SNAPSHOT_COLOR = "#E69F00"
 FINAL_MODEL_COLOR = "#0072B2"
+SUMMARY_SNAPSHOT_COLOR = "#009E73"
 NATIVE_FINAL_COLOR = "#CC79A7"
 THRESHOLD_COLOR = "#D55E00"
 RUN_TS_RE = re.compile(r"_(custom|openmm|rosetta)_(\d{8}_\d{6})$")
@@ -149,6 +150,18 @@ SNAPSHOT_USECOLS = [
     "snapshot_gromacs_final_max_force",
     "snapshot_gromacs_converged_fmax_lt_100",
     "snapshot_gromacs_minimized_full_pdb_path",
+    "snapshot_raw_e2e_A",
+    "snapshot_raw_rg_A",
+    "snapshot_raw_n_ca",
+    "snapshot_gromacs_e2e_A",
+    "snapshot_gromacs_rg_A",
+    "snapshot_gromacs_n_ca",
+    "snapshot_effective_e2e_A",
+    "snapshot_effective_rg_A",
+    "snapshot_effective_n_ca",
+    "snapshot_e2e_A",
+    "snapshot_rg_A",
+    "snapshot_n_ca",
     "snapshot_pdb_path",
     "snapshot_raw_pdb_retained",
     "replica_final_energy",
@@ -656,6 +669,138 @@ def build_backend_summary(final_df: pd.DataFrame, final_vs_best: pd.DataFrame, s
     return pd.DataFrame(rows).sort_values(["protein", "backend"]).reset_index(drop=True) if rows else pd.DataFrame()
 
 
+def _snapshot_metric_column(df: pd.DataFrame, metric: str) -> str | None:
+    for col in (f"snapshot_effective_{metric}_A", f"snapshot_{metric}_A"):
+        if col in df.columns:
+            return col
+    return None
+
+
+def build_snapshot_physics_summary(outdir: Path) -> pd.DataFrame:
+    manifest_path = outdir / "selected_run_manifest.csv"
+    if not manifest_path.exists():
+        return pd.DataFrame()
+    manifest = pd.read_csv(manifest_path)
+    if "status" in manifest.columns:
+        manifest = manifest.loc[manifest["status"].fillna("") == "selected"]
+
+    rows: list[dict] = []
+    for _, run in manifest.iterrows():
+        snapshot_csv = str(run.get("snapshot_ranked_csv", "") or "")
+        if not snapshot_csv:
+            continue
+        source_path = Path(snapshot_csv)
+        usecols = [
+            "snapshot_effective_e2e_A", "snapshot_effective_rg_A", "snapshot_effective_n_ca",
+            "snapshot_e2e_A", "snapshot_rg_A", "snapshot_n_ca",
+        ]
+        df = pd.read_csv(source_path, usecols=lambda c: c in set(usecols))
+        if _snapshot_metric_column(df, "e2e") is None or _snapshot_metric_column(df, "rg") is None:
+            continue
+        if df.empty:
+            continue
+        row = {
+            "protein": run.get("protein"),
+            "backend": run.get("backend"),
+            "task": run.get("task"),
+            "task_id": run.get("task_id"),
+            "selected_run": run.get("selected_run"),
+            "snapshot_ranked_csv": snapshot_csv,
+            "n_snapshot_physics": int(len(df)),
+        }
+        for prefix in ("e2e", "rg"):
+            metric_col = _snapshot_metric_column(df, prefix)
+            values = _as_numeric(df.get(metric_col, pd.Series(dtype=float))).dropna() if metric_col else pd.Series(dtype=float)
+            row[f"snapshot_{prefix}_n"] = int(len(values))
+            row[f"snapshot_{prefix}_mean_A"] = float(values.mean()) if not values.empty else np.nan
+            row[f"snapshot_{prefix}_median_A"] = float(values.median()) if not values.empty else np.nan
+            row[f"snapshot_{prefix}_q25_A"] = float(values.quantile(0.25)) if not values.empty else np.nan
+            row[f"snapshot_{prefix}_q75_A"] = float(values.quantile(0.75)) if not values.empty else np.nan
+        rows.append(row)
+
+    task_summary = pd.DataFrame(rows)
+    if task_summary.empty:
+        return task_summary
+
+    grouped_rows: list[dict] = []
+    for (protein, backend), g in task_summary.groupby(["protein", "backend"], dropna=False):
+        grouped = {
+            "protein": protein,
+            "backend": backend,
+            "n_snapshot_physics_tasks": int(len(g)),
+            "n_snapshot_physics": int(g["n_snapshot_physics"].sum()),
+        }
+        for metric in ("e2e", "rg"):
+            expanded = []
+            # Re-read the compact source metric columns once per group so group medians are weighted
+            # by snapshots, not by tasks.
+            for path in g["snapshot_ranked_csv"].dropna().astype(str):
+                vals_df = pd.read_csv(
+                    Path(path),
+                    usecols=lambda c, m=metric: c in {f"snapshot_effective_{m}_A", f"snapshot_{m}_A"},
+                )
+                metric_col = _snapshot_metric_column(vals_df, metric)
+                if metric_col is None:
+                    continue
+                vals = _as_numeric(vals_df[metric_col]).dropna()
+                if not vals.empty:
+                    expanded.append(vals)
+            values = pd.concat(expanded, ignore_index=True) if expanded else pd.Series(dtype=float)
+            grouped[f"snapshot_{metric}_mean_A"] = float(values.mean()) if not values.empty else np.nan
+            grouped[f"snapshot_{metric}_median_A"] = float(values.median()) if not values.empty else np.nan
+            grouped[f"snapshot_{metric}_q25_A"] = float(values.quantile(0.25)) if not values.empty else np.nan
+            grouped[f"snapshot_{metric}_q75_A"] = float(values.quantile(0.75)) if not values.empty else np.nan
+        grouped_rows.append(grouped)
+    return pd.DataFrame(grouped_rows).sort_values(["protein", "backend"]).reset_index(drop=True)
+
+
+def add_physics_to_backend_summary(
+    backend_summary: pd.DataFrame,
+    final_df: pd.DataFrame,
+    snapshot_physics_summary: pd.DataFrame,
+) -> pd.DataFrame:
+    if backend_summary.empty:
+        return backend_summary
+    out = backend_summary.copy()
+    physics_prefixes = ("final_e2e_", "final_rg_", "ref_e2e_", "ref_rg_", "snapshot_e2e_", "snapshot_rg_")
+    physics_exact = {"n_snapshot_physics"}
+    drop_cols = [
+        c for c in out.columns
+        if c in physics_exact
+        or c.startswith(physics_prefixes)
+        or any(c.startswith(prefix) and (c.endswith("_x") or c.endswith("_y")) for prefix in physics_prefixes)
+        or c in {"n_snapshot_physics_x", "n_snapshot_physics_y"}
+    ]
+    if drop_cols:
+        out = out.drop(columns=drop_cols)
+    final_rows = []
+    for (protein, backend), g in final_df.groupby(["protein", "backend"], dropna=False):
+        row = {"protein": protein, "backend": backend}
+        for source, col in (
+            ("final_e2e", "pred_e2e_A"),
+            ("final_rg", "pred_rg_A"),
+            ("ref_e2e", "ref_e2e_A"),
+            ("ref_rg", "ref_rg_A"),
+        ):
+            vals = _as_numeric(g.get(col, pd.Series(dtype=float))).dropna()
+            row[f"{source}_mean_A"] = float(vals.mean()) if not vals.empty else np.nan
+            row[f"{source}_median_A"] = float(vals.median()) if not vals.empty else np.nan
+            row[f"{source}_q25_A"] = float(vals.quantile(0.25)) if not vals.empty else np.nan
+            row[f"{source}_q75_A"] = float(vals.quantile(0.75)) if not vals.empty else np.nan
+        final_rows.append(row)
+    final_summary = pd.DataFrame(final_rows)
+    if not final_summary.empty:
+        out = out.merge(final_summary, on=["protein", "backend"], how="left")
+    if not snapshot_physics_summary.empty:
+        keep = [
+            "protein", "backend", "n_snapshot_physics",
+            "snapshot_e2e_mean_A", "snapshot_e2e_median_A", "snapshot_e2e_q25_A", "snapshot_e2e_q75_A",
+            "snapshot_rg_mean_A", "snapshot_rg_median_A", "snapshot_rg_q25_A", "snapshot_rg_q75_A",
+        ]
+        out = out.merge(snapshot_physics_summary[[c for c in keep if c in snapshot_physics_summary.columns]], on=["protein", "backend"], how="left")
+    return out
+
+
 def compute_term_correlations(final_df: pd.DataFrame, snapshot_sample: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     final_rows: list[dict] = []
     for (protein, backend), g in final_df.groupby(["protein", "backend"], dropna=False):
@@ -753,6 +898,7 @@ def make_panel_plots(
     backend_summary: pd.DataFrame,
     term_corr: pd.DataFrame,
     snapshot_corr: pd.DataFrame,
+    physics_summary: pd.DataFrame,
     *,
     native_threshold: float,
 ) -> None:
@@ -945,6 +1091,213 @@ def make_panel_plots(
         fig.savefig(plots_dir / "panel_final_term_spearman.png", dpi=240)
         plt.close(fig)
 
+    physics_plot_df = backend_summary if not backend_summary.empty else pd.DataFrame()
+    if proteins and backends and not physics_summary.empty and not physics_plot_df.empty:
+        for metric, title, ylabel in (
+            ("e2e", "End-to-end distance", "End-to-end distance (Å)"),
+            ("rg", "Radius of gyration", "Radius of gyration (Å)"),
+        ):
+            required_cols = {
+                f"ref_{metric}_median_A",
+                f"final_{metric}_median_A",
+                f"final_{metric}_q25_A",
+                f"final_{metric}_q75_A",
+                f"snapshot_{metric}_median_A",
+                f"snapshot_{metric}_q25_A",
+                f"snapshot_{metric}_q75_A",
+            }
+            if not required_cols.issubset(physics_plot_df.columns):
+                continue
+            fig, axes = plt.subplots(1, len(proteins), figsize=(6.4 * len(proteins), 5.0), squeeze=False)
+            for c, protein in enumerate(proteins):
+                ax = axes[0][c]
+                _label_panel(ax, c)
+                g = physics_plot_df.loc[physics_plot_df["protein"] == protein].copy()
+                g["backend"] = pd.Categorical(g["backend"], categories=backends, ordered=True)
+                g = g.sort_values("backend")
+                labels = [BACKEND_LABELS.get(str(b), str(b)).split()[0] for b in g["backend"].astype(str)]
+                x = np.arange(len(labels))
+                width = 0.24
+                ref = _as_numeric(g[f"ref_{metric}_median_A"])
+                final = _as_numeric(g[f"final_{metric}_median_A"])
+                snap = _as_numeric(g[f"snapshot_{metric}_median_A"])
+                final_err = np.vstack([
+                    (final - _as_numeric(g[f"final_{metric}_q25_A"])).clip(lower=0),
+                    (_as_numeric(g[f"final_{metric}_q75_A"]) - final).clip(lower=0),
+                ])
+                snap_err = np.vstack([
+                    (snap - _as_numeric(g[f"snapshot_{metric}_q25_A"])).clip(lower=0),
+                    (_as_numeric(g[f"snapshot_{metric}_q75_A"]) - snap).clip(lower=0),
+                ])
+                ax.bar(x - width, ref, width, color="#999999", label="experimental")
+                ax.bar(x, final, width, yerr=final_err, capsize=3, color=FINAL_MODEL_COLOR, label="final replicas")
+                ax.bar(x + width, snap, width, yerr=snap_err, capsize=3, color=SUMMARY_SNAPSHOT_COLOR, label="snapshots")
+                ax.set_xticks(x)
+                ax.set_xticklabels(labels)
+                ax.set_title(protein)
+                if c == 0:
+                    ax.set_ylabel(ylabel)
+                ax.legend(fontsize=8)
+            fig.suptitle(f"{title}: experimental, final models, and saved snapshots")
+            fig.tight_layout()
+            fig.savefig(plots_dir / f"panel_{metric}_summary_bars.png", dpi=240)
+            fig.savefig(plots_dir / f"panel_{metric}_summary_bars.pdf")
+            plt.close(fig)
+
+        rmsd_summary_path = outdir / "all_snapshot_vs_final_rmsd_summary.csv"
+        if rmsd_summary_path.exists():
+            rmsd_summary = pd.read_csv(rmsd_summary_path)
+        else:
+            rmsd_summary = pd.DataFrame()
+        if not rmsd_summary.empty:
+            fig, axes = plt.subplots(3, len(proteins), figsize=(6.4 * len(proteins), 12.0), squeeze=False)
+            metric_specs = [
+                ("rmsd", "RMSD to reference (Å)"),
+                ("rg", "Radius of gyration (Å)"),
+                ("e2e", "End-to-end distance (Å)"),
+            ]
+            for r, (metric, ylabel) in enumerate(metric_specs):
+                for c, protein in enumerate(proteins):
+                    ax = axes[r][c]
+                    _label_panel(ax, r * len(proteins) + c)
+                    if metric == "rmsd":
+                        g = rmsd_summary.loc[rmsd_summary["protein"].astype(str) == protein].copy()
+                        g["backend"] = pd.Categorical(g["backend"], categories=backends, ordered=True)
+                        g = g.sort_values(["backend", "model_class"])
+                        labels = [BACKEND_LABELS.get(str(b), str(b)).split()[0] for b in backends]
+                        x = np.arange(len(labels))
+                        width = 0.34
+                        for offset, model_class, color, label in (
+                            (-width / 2, "Final models", FINAL_MODEL_COLOR, "final replicas"),
+                            (width / 2, "All snapshots", SUMMARY_SNAPSHOT_COLOR, "snapshots"),
+                        ):
+                            rows = (
+                                g.loc[g["model_class"] == model_class]
+                                .set_index("backend")
+                                .reindex(backends)
+                                .reset_index()
+                            )
+                            vals = _as_numeric(rows["median_rmsd_A"])
+                            err = np.vstack([
+                                (vals - _as_numeric(rows["q1_rmsd_A"])).clip(lower=0),
+                                (_as_numeric(rows["q3_rmsd_A"]) - vals).clip(lower=0),
+                            ])
+                            ax.bar(x + offset, vals, width, yerr=err, capsize=3, color=color, label=label)
+                    else:
+                        g = physics_plot_df.loc[physics_plot_df["protein"].astype(str) == protein].copy()
+                        g["backend"] = pd.Categorical(g["backend"], categories=backends, ordered=True)
+                        g = g.sort_values("backend")
+                        labels = [BACKEND_LABELS.get(str(b), str(b)).split()[0] for b in g["backend"].astype(str)]
+                        x = np.arange(len(labels))
+                        width = 0.24
+                        ref = _as_numeric(g[f"ref_{metric}_median_A"])
+                        final = _as_numeric(g[f"final_{metric}_median_A"])
+                        snap = _as_numeric(g[f"snapshot_{metric}_median_A"])
+                        final_err = np.vstack([
+                            (final - _as_numeric(g[f"final_{metric}_q25_A"])).clip(lower=0),
+                            (_as_numeric(g[f"final_{metric}_q75_A"]) - final).clip(lower=0),
+                        ])
+                        snap_err = np.vstack([
+                            (snap - _as_numeric(g[f"snapshot_{metric}_q25_A"])).clip(lower=0),
+                            (_as_numeric(g[f"snapshot_{metric}_q75_A"]) - snap).clip(lower=0),
+                        ])
+                        ax.bar(x - width, ref, width, color="#999999", label="experimental")
+                        ax.bar(x, final, width, yerr=final_err, capsize=3, color=FINAL_MODEL_COLOR, label="final replicas")
+                        ax.bar(x + width, snap, width, yerr=snap_err, capsize=3, color=SUMMARY_SNAPSHOT_COLOR, label="snapshots")
+                    ax.set_xticks(x)
+                    ax.set_xticklabels(labels)
+                    if r == 0:
+                        ax.set_title(protein)
+                    if c == 0:
+                        ax.set_ylabel(ylabel)
+                    if r == 0:
+                        ax.axhline(native_threshold, color=THRESHOLD_COLOR, linestyle="--", linewidth=1)
+            handles, labels = axes[1][0].get_legend_handles_labels()
+            fig.legend(handles, labels, loc="lower center", ncol=3, fontsize=10)
+            fig.suptitle("Final replicas and saved snapshots: RMSD, radius of gyration, and end-to-end distance", y=0.995)
+            fig.tight_layout(rect=(0, 0.035, 1, 0.975))
+            fig.savefig(plots_dir / "panel_snapshot_final_rmsd_rg_e2e_bars.png", dpi=240)
+            fig.savefig(plots_dir / "panel_snapshot_final_rmsd_rg_e2e_bars.pdf")
+            plt.close(fig)
+
+
+def write_native_like_summary_table(outdir: Path, backend_summary: pd.DataFrame) -> None:
+    if backend_summary.empty:
+        return
+    plt = _require_matplotlib()
+    plots_dir = outdir / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for protein in [p for p in PANEL_PROTEINS if p in set(backend_summary["protein"].astype(str))]:
+        g0 = backend_summary.loc[backend_summary["protein"].astype(str) == protein].copy()
+        g0["final_rank"] = _as_numeric(g0["final_median_rmsd_A"]).rank(method="min")
+        g0["snapshot_rank"] = _as_numeric(g0["snapshot_median_best_rmsd_A"]).rank(method="min")
+        g0["backend"] = pd.Categorical(g0["backend"], categories=PANEL_BACKENDS, ordered=True)
+        g0 = g0.sort_values("backend")
+        for _, row in g0.iterrows():
+            rows.append({
+                "Protein": protein,
+                "Energy function": BACKEND_LABELS.get(str(row["backend"]), str(row["backend"])),
+                "Median final RMSD (Å)": row.get("final_median_rmsd_A", np.nan),
+                "Best final RMSD (Å)": row.get("final_best_rmsd_A", np.nan),
+                "Median top-snapshot RMSD (Å)": row.get("snapshot_median_best_rmsd_A", np.nan),
+                "Best snapshot RMSD (Å)": row.get("snapshot_best_rmsd_A", np.nan),
+                "Experimental E2E (Å)": row.get("ref_e2e_median_A", np.nan),
+                "Final E2E median (Å)": row.get("final_e2e_median_A", np.nan),
+                "Snapshot E2E median (Å)": row.get("snapshot_e2e_median_A", np.nan),
+                "Experimental Rg (Å)": row.get("ref_rg_median_A", np.nan),
+                "Final Rg median (Å)": row.get("final_rg_median_A", np.nan),
+                "Snapshot Rg median (Å)": row.get("snapshot_rg_median_A", np.nan),
+                "Final RMSD rank": int(row["final_rank"]) if pd.notna(row.get("final_rank")) else np.nan,
+                "Snapshot RMSD rank": int(row["snapshot_rank"]) if pd.notna(row.get("snapshot_rank")) else np.nan,
+            })
+    table_df = pd.DataFrame(rows)
+    if table_df.empty:
+        return
+    table_df.to_csv(outdir / "energy_function_native_like_summary_table.csv", index=False)
+
+    display = table_df.copy()
+    numeric_cols = [c for c in display.columns if c not in {"Protein", "Energy function", "Final RMSD rank", "Snapshot RMSD rank"}]
+    for col in numeric_cols:
+        display[col] = _as_numeric(display[col]).map(lambda x: f"{x:.3f}" if pd.notna(x) else "")
+    for col in ("Final RMSD rank", "Snapshot RMSD rank"):
+        display[col] = display[col].map(lambda x: str(int(x)) if pd.notna(x) else "")
+    display["Energy function"] = display["Energy function"].astype(str).str.replace(" Energy Function", "", regex=False)
+
+    column_labels = [
+        "Protein", "Energy\nfunction", "Median\nfinal\nRMSD", "Best\nfinal\nRMSD",
+        "Median\ntop-snapshot\nRMSD", "Best\nsnapshot\nRMSD",
+        "Exp.\nE2E", "Final\nE2E\nmedian", "Snapshot\nE2E\nmedian",
+        "Exp.\nRg", "Final\nRg\nmedian", "Snapshot\nRg\nmedian",
+        "Final\nRMSD\nrank", "Snapshot\nRMSD\nrank",
+    ]
+    col_widths = [0.055, 0.095, 0.075, 0.07, 0.09, 0.075, 0.065, 0.075, 0.09, 0.06, 0.075, 0.09, 0.07, 0.075]
+    fig, ax = plt.subplots(figsize=(22.0, 4.2))
+    ax.axis("off")
+    table = ax.table(
+        cellText=display.values,
+        colLabels=column_labels,
+        loc="center",
+        cellLoc="center",
+        colLoc="center",
+        colWidths=col_widths,
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(8.5)
+    table.scale(1.0, 1.75)
+    for (row, col), cell in table.get_celld().items():
+        cell.set_edgecolor("#D0D0D0")
+        cell.get_text().set_wrap(True)
+        if row == 0:
+            cell.set_facecolor("#EAEAEA")
+            cell.set_text_props(weight="bold")
+        elif row % 2 == 0:
+            cell.set_facecolor("#F7F7F7")
+    fig.tight_layout()
+    fig.savefig(plots_dir / "table_energy_function_native_like_summary.png", dpi=240, bbox_inches="tight", pad_inches=0.08)
+    fig.savefig(plots_dir / "table_energy_function_native_like_summary.pdf", bbox_inches="tight", pad_inches=0.08)
+    plt.close(fig)
+
 
 def make_plots(
     outdir: Path,
@@ -954,6 +1307,7 @@ def make_plots(
     backend_summary: pd.DataFrame,
     term_corr: pd.DataFrame,
     snapshot_corr: pd.DataFrame,
+    physics_summary: pd.DataFrame,
     *,
     native_threshold: float,
 ) -> None:
@@ -1104,6 +1458,7 @@ def make_plots(
         backend_summary,
         term_corr,
         snapshot_corr,
+        physics_summary,
         native_threshold=native_threshold,
     )
 
@@ -1115,6 +1470,13 @@ def regenerate_plots_from_existing(outdir: Path, *, native_threshold: float) -> 
     backend_summary = pd.read_csv(outdir / "backend_summary.csv") if (outdir / "backend_summary.csv").exists() else pd.DataFrame()
     term_corr = pd.read_csv(outdir / "term_correlations_final.csv") if (outdir / "term_correlations_final.csv").exists() else pd.DataFrame()
     snapshot_corr = pd.read_csv(outdir / "snapshot_energy_correlations.csv") if (outdir / "snapshot_energy_correlations.csv").exists() else pd.DataFrame()
+    physics_summary_path = outdir / "snapshot_physics_summary.csv"
+    physics_summary = pd.read_csv(physics_summary_path) if physics_summary_path.exists() else build_snapshot_physics_summary(outdir)
+    if not physics_summary.empty:
+        physics_summary.to_csv(physics_summary_path, index=False)
+    backend_summary = add_physics_to_backend_summary(backend_summary, final_df, physics_summary)
+    backend_summary.to_csv(outdir / "backend_summary.csv", index=False)
+    write_native_like_summary_table(outdir, backend_summary)
     make_plots(
         outdir,
         final_df,
@@ -1123,6 +1485,7 @@ def regenerate_plots_from_existing(outdir: Path, *, native_threshold: float) -> 
         backend_summary,
         term_corr,
         snapshot_corr,
+        physics_summary,
         native_threshold=native_threshold,
     )
     info = {
@@ -1182,7 +1545,12 @@ def run_analysis(
         final_vs_best = build_final_vs_best(final_df, best_snapshots)
         final_vs_best.to_csv(outdir / "final_vs_best_snapshot.csv", index=False)
 
+    snapshot_physics_summary = build_snapshot_physics_summary(outdir)
+    if not snapshot_physics_summary.empty:
+        snapshot_physics_summary.to_csv(outdir / "snapshot_physics_summary.csv", index=False)
+
     backend_summary = build_backend_summary(final_df, final_vs_best, snapshot_summary)
+    backend_summary = add_physics_to_backend_summary(backend_summary, final_df, snapshot_physics_summary)
     backend_summary.to_csv(outdir / "backend_summary.csv", index=False)
 
     term_corr, snapshot_corr = compute_term_correlations(final_df, snapshot_sample)
@@ -1197,8 +1565,10 @@ def run_analysis(
         backend_summary,
         term_corr,
         snapshot_corr,
+        snapshot_physics_summary,
         native_threshold=native_threshold,
     )
+    write_native_like_summary_table(outdir, backend_summary)
 
     info = {
         "root": str(root),

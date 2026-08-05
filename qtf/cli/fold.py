@@ -664,6 +664,17 @@ def main(argv=None):
                 snap_gromacs_converged_fmax_lt_100 = False
                 snap_gromacs_minimized_full_pdb_path = ""
                 snap_raw_pdb_retained = True
+                snap_raw_ca = qtf_gromacs.ca_coords(snap_coords, snap_labels)
+                if len(snap_raw_ca) >= 2:
+                    snap_raw_physics = utils.calculate_physics_metrics(snap_raw_ca)
+                    snap_raw_e2e = float(snap_raw_physics["end_to_end"])
+                    snap_raw_rg = float(snap_raw_physics["radius_of_gyration"])
+                else:
+                    snap_raw_e2e = np.nan
+                    snap_raw_rg = np.nan
+                snap_gromacs_e2e = np.nan
+                snap_gromacs_rg = np.nan
+                snap_gromacs_n_ca = 0
                 run_snapshot_gromacs = bool(args.gromacs_minimize)
                 if run_snapshot_gromacs:
                     snap_gromacs_dir = os.path.join(
@@ -714,10 +725,21 @@ def main(argv=None):
                                 ],
                                 include_hydrogens=True,
                             )
+                        snap_metric_coords = gromacs_coords
+                        snap_metric_labels = gromacs_labels
+                        snap_gromacs_ca = qtf_gromacs.ca_coords(snap_metric_coords, snap_metric_labels)
+                        snap_gromacs_n_ca = int(len(snap_gromacs_ca))
+                        if len(snap_gromacs_ca) >= 2:
+                            snap_gromacs_physics = utils.calculate_physics_metrics(snap_gromacs_ca)
+                            snap_gromacs_e2e = float(snap_gromacs_physics["end_to_end"])
+                            snap_gromacs_rg = float(snap_gromacs_physics["radius_of_gyration"])
                     if snap_gromacs_status == "ok" and os.path.exists(snap_pdb):
                         os.remove(snap_pdb)
                 snap_raw_pdb_retained = os.path.exists(snap_pdb)
                 snap_effective_rmsd = snap_gromacs_rmsd if not np.isnan(snap_gromacs_rmsd) else snap_rmsd
+                snap_effective_e2e = snap_gromacs_e2e if not np.isnan(snap_gromacs_e2e) else snap_raw_e2e
+                snap_effective_rg = snap_gromacs_rg if not np.isnan(snap_gromacs_rg) else snap_raw_rg
+                snap_effective_n_ca = snap_gromacs_n_ca if snap_gromacs_n_ca else int(len(snap_raw_ca))
                 snapshot_rows.append({
                     "ensemble_id": int(res["id"]),
                     "ensemble_rank": int(rank),
@@ -735,6 +757,18 @@ def main(argv=None):
                     "snapshot_gromacs_final_max_force": snap_gromacs_final_max_force,
                     "snapshot_gromacs_converged_fmax_lt_100": snap_gromacs_converged_fmax_lt_100,
                     "snapshot_gromacs_minimized_full_pdb_path": snap_gromacs_minimized_full_pdb_path,
+                    "snapshot_raw_e2e_A": snap_raw_e2e,
+                    "snapshot_raw_rg_A": snap_raw_rg,
+                    "snapshot_raw_n_ca": int(len(snap_raw_ca)),
+                    "snapshot_gromacs_e2e_A": snap_gromacs_e2e,
+                    "snapshot_gromacs_rg_A": snap_gromacs_rg,
+                    "snapshot_gromacs_n_ca": snap_gromacs_n_ca,
+                    "snapshot_effective_e2e_A": snap_effective_e2e,
+                    "snapshot_effective_rg_A": snap_effective_rg,
+                    "snapshot_effective_n_ca": snap_effective_n_ca,
+                    "snapshot_e2e_A": snap_effective_e2e,
+                    "snapshot_rg_A": snap_effective_rg,
+                    "snapshot_n_ca": snap_effective_n_ca,
                     "rmsd_mode": args.rmsd_mode,
                     "rmsd_residue_scope": args.rmsd_residue_scope,
                     **snap_rmsd_meta,
