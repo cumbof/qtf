@@ -425,6 +425,20 @@ def minimize_pdb_with_gromacs(
     result["gromacs_status"] = "ok"
     result["gromacs_message"] = ""
     result["gromacs_minimized_full_pdb_path"] = str(minimized_pdb)
-    result.update(parse_gromacs_log_stats(log_path))
+    command_stats = parse_gromacs_log_stats(log_path)
+    mdrun_stats = parse_gromacs_log_stats(workdir / "em.log")
+    result.update(
+        {
+            "gromacs_converged_fmax_lt_100": bool(
+                command_stats["gromacs_converged_fmax_lt_100"]
+                or mdrun_stats["gromacs_converged_fmax_lt_100"]
+            ),
+            "gromacs_final_max_force": (
+                mdrun_stats["gromacs_final_max_force"]
+                if np.isfinite(mdrun_stats["gromacs_final_max_force"])
+                else command_stats["gromacs_final_max_force"]
+            ),
+        }
+    )
     compact_successful_minimization_dir(workdir, keep_paths=[minimized_pdb, log_path])
     return result

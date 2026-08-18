@@ -35,8 +35,8 @@ recipes:
       score_model: pheat-coarse-protein-folding-v1
       score_options:
         charge_profile: protein-coarse-charge-v1
-        hydrophobic_gamma: 5.0
-        end_to_end_weight: 5.0
+        hydrophobic_gamma: 2.5
+        end_to_end_weight: 1.5
     scouting:
       description: Generate collapsed starting candidates using a stronger hydrophobic/end-to-end bias.
       score_model: pheat-coarse-protein-folding-v1
@@ -46,7 +46,7 @@ recipes:
       score_options:
         charge_profile: protein-coarse-charge-v1
         hydrophobic_gamma: 15.0
-        end_to_end_weight: 50.0
+        end_to_end_weight: 8.0
     phases:
       - name: collapse
         label: Mechanical collapse
@@ -60,7 +60,7 @@ recipes:
         score_options:
           charge_profile: protein-coarse-charge-v1
           hydrophobic_gamma: 15.0
-          end_to_end_weight: 50.0
+          end_to_end_weight: 8.0
         options:
           rhobeg: 1.0
       - name: refine
@@ -76,7 +76,7 @@ recipes:
         score_options:
           charge_profile: protein-coarse-charge-v1
           hydrophobic_gamma: 15.0
-          end_to_end_weight: 50.0
+          end_to_end_weight: 8.0
         options:
           disp: false
       - name: relax
@@ -91,8 +91,8 @@ recipes:
         tol: 1.0e-6
         score_options:
           charge_profile: protein-coarse-charge-v1
-          hydrophobic_gamma: 5.0
-          end_to_end_weight: 5.0
+          hydrophobic_gamma: 2.5
+          end_to_end_weight: 1.5
         options:
           disp: false
     readouts: []
@@ -133,10 +133,10 @@ recipes:
       score_model: pheat-coarse-protein-folding-v1
       score_options:
         charge_profile: protein-coarse-charge-v1
-        hydrophobic_gamma: 5.0
+        hydrophobic_gamma: 2.5
         hydrophobic_burial_denominator: 35.0
         hydrophobic_burial_scale: 0.7
-        end_to_end_weight: 5.0
+        end_to_end_weight: 1.5
         use_end_to_end_constraint: true
         end_to_end_scale: 1.0
     evaluators:
@@ -148,15 +148,15 @@ recipes:
           domain: protein-heavy
           prepare: auto
           gromacs_forcefield: amber99sb-ildn
-          gromacs_water: none
+          gromacs_water: tip3p
           gromacs_run_mode: minimize-rerun
           gromacs_preflight: warn
           gromacs_metrics: true
           external_timeout_seconds: 600
           prep_cache_mode: readwrite
           gromacs_run_settings:
-            minimize_steps: 500
-            emtol: 1000.0
+            minimize_steps: 5000
+            emtol: 100.0
             cutoff_nm: 1.0
             mdrun_flags:
               - -ntmpi
@@ -189,7 +189,7 @@ recipes:
         hydrophobic_gamma: 15.0
         hydrophobic_burial_denominator: 35.0
         hydrophobic_burial_scale: 0.7
-        end_to_end_weight: 50.0
+        end_to_end_weight: 8.0
         use_end_to_end_constraint: true
         end_to_end_scale: 1.0
     phases:
@@ -207,7 +207,7 @@ recipes:
           hydrophobic_gamma: 15.0
           hydrophobic_burial_denominator: 35.0
           hydrophobic_burial_scale: 0.7
-          end_to_end_weight: 50.0
+          end_to_end_weight: 8.0
           use_end_to_end_constraint: true
           end_to_end_scale: 1.0
         options:
@@ -226,7 +226,7 @@ recipes:
           hydrophobic_gamma: 15.0
           hydrophobic_burial_denominator: 35.0
           hydrophobic_burial_scale: 0.7
-          end_to_end_weight: 50.0
+          end_to_end_weight: 8.0
           use_end_to_end_constraint: true
           end_to_end_scale: 1.0
         options:
@@ -242,10 +242,10 @@ recipes:
         maxiter: null
         score_options:
           charge_profile: protein-coarse-charge-v1
-          hydrophobic_gamma: 5.0
+          hydrophobic_gamma: 2.5
           hydrophobic_burial_denominator: 35.0
           hydrophobic_burial_scale: 0.7
-          end_to_end_weight: 5.0
+          end_to_end_weight: 1.5
           use_end_to_end_constraint: true
           end_to_end_scale: 1.0
         options:

@@ -11597,6 +11597,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         },
     )
     _write_json(result_path, result)
+    try:
+        from qtf.analysis.aggregate_results import aggregate_job_outputs
+
+        aggregate_job_outputs(outdir)
+    except Exception as exc:
+        print(f"{_console_prefix(args.replica_id)} Job-level result aggregation failed: {exc}")
     status_writer.update(
         status="completed",
         stage="complete",

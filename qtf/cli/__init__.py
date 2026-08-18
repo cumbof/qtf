@@ -17,6 +17,7 @@ _PASSTHROUGH_COMMANDS = {
     "grid-search": "qtf.cli.grid_search",
     "relax": "qtf.cli.relax",
     "vmd-trajectory": "qtf.cli.make_vmd_trajectory",
+    "hardware-forward": "qtf.core.hardware_forward",
 }
 
 
@@ -187,6 +188,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ("grid-search", "Run a parameter grid-search workflow."),
         ("relax", "Run GROMACS relaxation through QTF utilities."),
         ("vmd-trajectory", "Create a VMD-compatible multi-model PDB."),
+        ("hardware-forward", "Execute saved circuit parameters on a sampler backend."),
     ]:
         passthrough = sub.add_parser(command, help=help_text)
         passthrough.add_argument("args", nargs=argparse.REMAINDER)

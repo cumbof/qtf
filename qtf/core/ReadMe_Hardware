@@ -1,0 +1,88 @@
+qtf/core/hardware_forward.py
+============================
+
+WHAT IT DOES
+------------
+Runs one forward pass of a saved QTF quantum circuit on real quantum
+hardware (or a local simulator), turns the measurement results into
+protein torsion angles, and rebuilds the 3D protein structure.
+
+Steps:
+  1. Load a saved circuit-parameter file (from qtf-fold).
+  2. Rebuild the folder (sequence + ansatz) that produced it.
+  3. Bind parameters, add measure_all, transpile for the backend.
+  4. Run once on hardware (IBM Runtime) or on AerSimulator.
+  5. Convert the shot histogram -> probability vector -> CDF -> angles.
+  6. Rebuild heavy-atom coordinates with NERF.
+  7. Optionally align to a reference PDB and compute RMSD.
+  8. Save a PDB (and optional JSON metadata).
+
+Command:
+  python -m qtf.core.hardware_forward [options]
+
+
+INPUTS
+------
+Required:
+  --params_json   Path to replica_<k>_params.json (from qtf-fold).
+  --out_pdb       Where to write the rebuilt structure.
+
+Backend (optional; omit to use local AerSimulator):
+  --backend_name       e.g. ibm_torino
+  --channel            IBM Runtime channel
+  --instance           IBM Runtime instance
+  --token              IBM Runtime API token
+  --use_sampler_v2     Use SamplerV2 (needed for qiskit-ibm-runtime >= 0.23)
+  --shots              Number of shots (default 4096)
+  --optimization_level Transpiler level (default 1)
+
+Reference / RMSD (optional):
+  --reference_pdb              Local PDB file
+  --reference_structure        PDB ID to fetch
+  --rmsd_mode                  ca | heavy   (default ca)
+  --rmsd_residue_scope         core | all   (default core)
+  --average_reference_backbone flag
+
+Folder overrides (only used if not stored in the JSON):
+  --sequence, --chi_mode, --omega_mode, --energy_backend,
+  --use_e2e_constraint, --e2e_scale,
+  --rosetta_repack, --rosetta_fa_min, --rosetta_cen_min
+
+
+OUTPUTS
+-------
+1. PDB file at --out_pdb
+   Contains the rebuilt heavy-atom structure with REMARK header:
+     - backend name and kind (ibm_runtime / aer)
+     - shots and unique bitstrings
+     - sequence, replica id, ensemble id, timestamp
+     - RMSD to reference (if a reference was given)
+
+2. JSON file at --out_json (optional)
+   Metadata: backend, shots, unique bitstrings, n_qubits, n_params,
+   total_angles, RMSD value + mode + scope, reference source,
+   absolute paths, and timestamp.
+
+3. Console log
+   Progress messages: parameters loaded, folder rebuilt, backend used,
+   sampling summary, RMSD value, output paths.
+
+
+EXAMPLE
+-------
+Hardware run:
+  python -m qtf.core.hardware_forward \
+      --params_json ./replica_1_params.json \
+      --backend_name ibm_torino \
+      --channel ibm_quantum \
+      --instance ibm-q/open/main \
+      --shots 4096 \
+      --use_sampler_v2 \
+      --out_pdb ./hw_replica_1.pdb \
+      --reference_pdb ./native.pdb
+
+Local dry-run (no hardware account):
+  python -m qtf.core.hardware_forward \
+      --params_json ./replica_1_params.json \
+      --out_pdb ./hw_replica_1_sim.pdb
+
