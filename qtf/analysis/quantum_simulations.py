@@ -47,6 +47,11 @@ BACKEND_COLORS = {
     "rosetta": "#009E73",
     "openmm": "#D55E00",
 }
+BACKEND_RAW_ENERGY_UNITS = {
+    "custom": "kcal/mol",
+    "rosetta": "REU",
+    "openmm": "kJ/mol",
+}
 PROTEIN_COLORS = {
     "5AWL": "#009E73",
     "2JOF": "#0072B2",
@@ -62,6 +67,11 @@ SUMMARY_SNAPSHOT_COLOR = "#009E73"
 NATIVE_FINAL_COLOR = "#CC79A7"
 THRESHOLD_COLOR = "#D55E00"
 RUN_TS_RE = re.compile(r"_(custom|openmm|rosetta)_(\d{8}_\d{6})$")
+
+
+def _raw_energy_ylabel(backend: object) -> str:
+    unit = BACKEND_RAW_ENERGY_UNITS.get(str(backend), "units")
+    return f"Energy ({unit})"
 
 
 def _panel_letter(index: int) -> str:
@@ -754,16 +764,106 @@ def build_snapshot_physics_summary(outdir: Path) -> pd.DataFrame:
     return pd.DataFrame(grouped_rows).sort_values(["protein", "backend"]).reset_index(drop=True)
 
 
+def _ca_coords_from_pdb(path: Path) -> np.ndarray:
+    coords: list[tuple[float, float, float]] = []
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if line.startswith(("ATOM  ", "HETATM")) and line[12:16].strip() == "CA":
+                try:
+                    coords.append((float(line[30:38]), float(line[38:46]), float(line[46:54])))
+                except ValueError:
+                    continue
+    return np.asarray(coords, dtype=float)
+
+
+def _compactness_from_pdb(path: Path) -> tuple[float, float, int]:
+    coords = _ca_coords_from_pdb(path)
+    n_ca = int(len(coords))
+    if n_ca == 0:
+        return np.nan, np.nan, 0
+    e2e = float(np.linalg.norm(coords[-1] - coords[0])) if n_ca >= 2 else np.nan
+    centered = coords - coords.mean(axis=0)
+    rg = float(np.sqrt(np.mean(np.sum(centered * centered, axis=1))))
+    return e2e, rg, n_ca
+
+
+def _first_existing_path(*values: object) -> Path | None:
+    for value in values:
+        if value is None or pd.isna(value):
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        path = Path(text)
+        if path.exists():
+            return path
+        marker = "run_outputs/quantum_simulations/"
+        if marker in text:
+            local_path = Path(marker + text.split(marker, 1)[1])
+            if local_path.exists():
+                return local_path
+    return None
+
+
+def build_best_snapshot_physics_summary(final_vs_best: pd.DataFrame) -> pd.DataFrame:
+    if final_vs_best.empty or not {"protein", "backend"}.issubset(final_vs_best.columns):
+        return pd.DataFrame()
+    rows: list[dict] = []
+    for _, row in final_vs_best.iterrows():
+        path = _first_existing_path(
+            row.get("best_snapshot_gromacs_minimized_full_pdb_path"),
+            row.get("best_snapshot_pdb_path"),
+        )
+        if path is None:
+            continue
+        e2e, rg, n_ca = _compactness_from_pdb(path)
+        rows.append({
+            "protein": row.get("protein"),
+            "backend": row.get("backend"),
+            "task": row.get("task"),
+            "task_id": row.get("task_id"),
+            "selected_run": row.get("selected_run"),
+            "best_snapshot_pdb_path": str(path),
+            "best_snapshot_e2e_A": e2e,
+            "best_snapshot_rg_A": rg,
+            "best_snapshot_n_ca": n_ca,
+        })
+
+    per_replica = pd.DataFrame(rows)
+    if per_replica.empty:
+        return per_replica
+
+    grouped_rows: list[dict] = []
+    for (protein, backend), g in per_replica.groupby(["protein", "backend"], dropna=False):
+        grouped = {
+            "protein": protein,
+            "backend": backend,
+            "n_best_snapshot_physics": int(len(g)),
+        }
+        for metric in ("e2e", "rg"):
+            values = _as_numeric(g[f"best_snapshot_{metric}_A"]).dropna()
+            grouped[f"best_snapshot_{metric}_mean_A"] = float(values.mean()) if not values.empty else np.nan
+            grouped[f"best_snapshot_{metric}_median_A"] = float(values.median()) if not values.empty else np.nan
+            grouped[f"best_snapshot_{metric}_q25_A"] = float(values.quantile(0.25)) if not values.empty else np.nan
+            grouped[f"best_snapshot_{metric}_q75_A"] = float(values.quantile(0.75)) if not values.empty else np.nan
+        grouped_rows.append(grouped)
+    return pd.DataFrame(grouped_rows).sort_values(["protein", "backend"]).reset_index(drop=True)
+
+
 def add_physics_to_backend_summary(
     backend_summary: pd.DataFrame,
     final_df: pd.DataFrame,
     snapshot_physics_summary: pd.DataFrame,
+    best_snapshot_physics_summary: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     if backend_summary.empty:
         return backend_summary
     out = backend_summary.copy()
-    physics_prefixes = ("final_e2e_", "final_rg_", "ref_e2e_", "ref_rg_", "snapshot_e2e_", "snapshot_rg_")
-    physics_exact = {"n_snapshot_physics"}
+    physics_prefixes = (
+        "final_e2e_", "final_rg_", "ref_e2e_", "ref_rg_",
+        "snapshot_e2e_", "snapshot_rg_", "best_snapshot_e2e_", "best_snapshot_rg_",
+    )
+    physics_exact = {"n_snapshot_physics", "n_best_snapshot_physics"}
     drop_cols = [
         c for c in out.columns
         if c in physics_exact
@@ -798,6 +898,17 @@ def add_physics_to_backend_summary(
             "snapshot_rg_mean_A", "snapshot_rg_median_A", "snapshot_rg_q25_A", "snapshot_rg_q75_A",
         ]
         out = out.merge(snapshot_physics_summary[[c for c in keep if c in snapshot_physics_summary.columns]], on=["protein", "backend"], how="left")
+    if best_snapshot_physics_summary is not None and not best_snapshot_physics_summary.empty:
+        keep = [
+            "protein", "backend", "n_best_snapshot_physics",
+            "best_snapshot_e2e_mean_A", "best_snapshot_e2e_median_A", "best_snapshot_e2e_q25_A", "best_snapshot_e2e_q75_A",
+            "best_snapshot_rg_mean_A", "best_snapshot_rg_median_A", "best_snapshot_rg_q25_A", "best_snapshot_rg_q75_A",
+        ]
+        out = out.merge(
+            best_snapshot_physics_summary[[c for c in keep if c in best_snapshot_physics_summary.columns]],
+            on=["protein", "backend"],
+            how="left",
+        )
     return out
 
 
@@ -858,10 +969,18 @@ def _require_matplotlib():
     return plt
 
 
-def _plot_funnel_points(ax, snaps: pd.DataFrame, finals: pd.DataFrame, native_threshold: float) -> None:
+def _plot_funnel_points(
+    ax,
+    snaps: pd.DataFrame,
+    finals: pd.DataFrame,
+    native_threshold: float,
+    *,
+    snapshot_energy_col: str = "snapshot_gromacs_potential_kj_mol",
+    final_energy_col: str = "gromacs_potential_kj_mol",
+) -> None:
     if not snaps.empty:
         x = _as_numeric(snaps["snapshot_effective_rmsd_to_reference_A"])
-        y = _as_numeric(snaps["snapshot_gromacs_potential_kj_mol"])
+        y = _as_numeric(snaps[snapshot_energy_col])
         native = x <= native_threshold
         other = ~native
         ax.scatter(x[other], y[other], s=4, alpha=0.14, c=SNAPSHOT_SAMPLE_COLOR, linewidths=0, label="snapshot sample")
@@ -876,7 +995,7 @@ def _plot_funnel_points(ax, snaps: pd.DataFrame, finals: pd.DataFrame, native_th
         )
     if not finals.empty:
         fx = _as_numeric(finals["rmsd_to_reference_A"])
-        fy = _as_numeric(finals["gromacs_potential_kj_mol"])
+        fy = _as_numeric(finals[final_energy_col])
         fnative = fx <= native_threshold
         ax.scatter(fx[~fnative], fy[~fnative], s=54, marker="X", alpha=0.9, c=FINAL_MODEL_COLOR, label="final models")
         ax.scatter(
@@ -929,13 +1048,47 @@ def make_panel_plots(
                 if r == len(backends) - 1:
                     ax.set_xlabel("RMSD to reference (Å)")
                 if c == 0:
-                    ax.set_ylabel("Potential Energy (kJ/mol)")
+                    ax.set_ylabel("GROMACS Potential Energy (kJ/mol)")
         handles, labels = axes[0][0].get_legend_handles_labels()
         fig.legend(handles, labels, loc="lower center", ncol=min(4, len(labels)), fontsize=8)
-        fig.suptitle("Folding funnels by protein and energy function", y=0.995)
+        fig.suptitle("Folding Funnels by Protein and Energy Function", y=0.995)
         fig.tight_layout(rect=(0, 0.055, 1, 0.97))
         fig.savefig(plots_dir / "panel_folding_funnels_zoom.png", dpi=240)
         plt.close(fig)
+
+        if {"snapshot_energy"}.issubset(snapshot_sample.columns) and {"energy"}.issubset(final_df.columns):
+            fig, axes = plt.subplots(len(backends), len(proteins), figsize=(5.9 * len(proteins), 3.4 * len(backends)), squeeze=False)
+            for r, backend in enumerate(backends):
+                for c, protein in enumerate(proteins):
+                    ax = axes[r][c]
+                    _label_panel_inside(ax, r * len(proteins) + c)
+                    snaps = snapshot_sample.loc[(snapshot_sample["protein"] == protein) & (snapshot_sample["backend"] == backend)]
+                    finals = final_df.loc[(final_df["protein"] == protein) & (final_df["backend"] == backend)]
+                    _plot_funnel_points(
+                        ax,
+                        snaps,
+                        finals,
+                        native_threshold,
+                        snapshot_energy_col="snapshot_energy",
+                        final_energy_col="energy",
+                    )
+                    y = _as_numeric(snaps.get("snapshot_energy", pd.Series(dtype=float))).dropna()
+                    if not y.empty:
+                        lo, hi = y.quantile([0.01, 0.95]).to_list()
+                        if np.isfinite(lo) and np.isfinite(hi) and lo < hi:
+                            ax.set_ylim(float(lo), float(hi))
+                    ax.set_title(f"{protein} {BACKEND_LABELS.get(backend, backend)}")
+                    if r == len(backends) - 1:
+                        ax.set_xlabel("RMSD to reference (Å)")
+                    if c == 0:
+                        ax.set_ylabel(_raw_energy_ylabel(backend))
+            handles, labels = axes[0][0].get_legend_handles_labels()
+            fig.legend(handles, labels, loc="lower center", ncol=min(4, len(labels)), fontsize=8)
+            fig.suptitle("Folding Funnels by Protein and Energy Function", y=0.995)
+            fig.tight_layout(rect=(0, 0.055, 1, 0.97))
+            fig.savefig(plots_dir / "panel_folding_funnels_raw_energy_zoom.png", dpi=240)
+            fig.savefig(plots_dir / "panel_folding_funnels_raw_energy_zoom.pdf")
+            plt.close(fig)
 
     if proteins and not final_vs_best.empty and {"protein", "backend"}.issubset(final_vs_best.columns):
         fig, axes = plt.subplots(1, len(proteins), figsize=(5.8 * len(proteins), 5.0), squeeze=False)
@@ -1018,6 +1171,77 @@ def make_panel_plots(
         fig.suptitle("RMSD improvement from snapshot mining")
         fig.tight_layout()
         fig.savefig(plots_dir / "panel_snapshot_improvement.png", dpi=240)
+        plt.close(fig)
+
+        fig, axes = plt.subplots(3, len(proteins), figsize=(5.9 * len(proteins), 13.6), squeeze=False)
+        for c, protein in enumerate(proteins):
+            g0 = final_vs_best.loc[final_vs_best["protein"] == protein]
+
+            ax = axes[0][c]
+            _label_panel(ax, c)
+            for backend in backends:
+                g = g0.loc[g0["backend"] == backend]
+                if g.empty:
+                    continue
+                ax.scatter(
+                    _as_numeric(g["rmsd_to_reference_A"]),
+                    _as_numeric(g["best_snapshot_effective_rmsd_A"]),
+                    s=18,
+                    alpha=0.55,
+                    color=BACKEND_COLORS.get(backend),
+                    label=BACKEND_LABELS.get(backend, backend),
+                )
+            vals = pd.concat([
+                _as_numeric(g0["rmsd_to_reference_A"]),
+                _as_numeric(g0["best_snapshot_effective_rmsd_A"]),
+            ]).dropna()
+            if not vals.empty:
+                lo, hi = float(vals.min()), float(vals.max())
+                ax.plot([lo, hi], [lo, hi], color="black", linewidth=1, linestyle="--")
+            ax.set_title(protein)
+            ax.set_xlabel("Final model RMSD (Å)")
+            if c == 0:
+                ax.set_ylabel("Best snapshot RMSD per replica (Å)")
+            ax.legend(fontsize=8)
+
+            ax = axes[1][c]
+            _label_panel(ax, len(proteins) + c)
+            data = []
+            labels = []
+            for backend in backends:
+                g = g0.loc[g0["backend"] == backend]
+                if g.empty:
+                    continue
+                data.append(_as_numeric(g["rmsd_to_reference_A"]).dropna().to_numpy())
+                labels.append(f"{BACKEND_LABELS.get(backend, backend).split()[0]}\nfinal")
+                data.append(_as_numeric(g["best_snapshot_effective_rmsd_A"]).dropna().to_numpy())
+                labels.append(f"{BACKEND_LABELS.get(backend, backend).split()[0]}\nsnapshot")
+            if data:
+                ax.boxplot(data, tick_labels=labels, showfliers=False)
+            ax.axhline(native_threshold, color=THRESHOLD_COLOR, linestyle="--", linewidth=1)
+            ax.set_title(protein)
+            if c == 0:
+                ax.set_ylabel("RMSD to reference (Å)")
+            ax.tick_params(axis="x", labelrotation=30)
+
+            ax = axes[2][c]
+            _label_panel(ax, 2 * len(proteins) + c)
+            for backend in backends:
+                g = g0.loc[g0["backend"] == backend]
+                vals = _as_numeric(g.get("snapshot_rmsd_improvement_A", pd.Series(dtype=float))).dropna()
+                if not vals.empty:
+                    ax.hist(vals, bins=40, alpha=0.45, color=BACKEND_COLORS.get(backend), label=BACKEND_LABELS.get(backend, backend))
+            ax.axvline(0.0, color="black", linestyle="--", linewidth=1)
+            ax.set_title(protein)
+            ax.set_xlabel("Final RMSD - best snapshot RMSD (Å)")
+            if c == 0:
+                ax.set_ylabel("Replica count")
+            ax.legend(fontsize=8)
+
+        fig.suptitle("Final replicas and best retained snapshots", y=0.995)
+        fig.tight_layout(rect=(0, 0, 1, 0.975))
+        fig.savefig(plots_dir / "panel_rmsd_snapshot_summary.png", dpi=240)
+        fig.savefig(plots_dir / "panel_rmsd_snapshot_summary.pdf")
         plt.close(fig)
 
     if proteins and not backend_summary.empty:
@@ -1244,10 +1468,10 @@ def write_native_like_summary_table(outdir: Path, backend_summary: pd.DataFrame)
                 "Best snapshot RMSD (Å)": row.get("snapshot_best_rmsd_A", np.nan),
                 "Experimental E2E (Å)": row.get("ref_e2e_median_A", np.nan),
                 "Final E2E median (Å)": row.get("final_e2e_median_A", np.nan),
-                "Snapshot E2E median (Å)": row.get("snapshot_e2e_median_A", np.nan),
+                "Best-snapshot E2E median (Å)": row.get("best_snapshot_e2e_median_A", np.nan),
                 "Experimental Rg (Å)": row.get("ref_rg_median_A", np.nan),
                 "Final Rg median (Å)": row.get("final_rg_median_A", np.nan),
-                "Snapshot Rg median (Å)": row.get("snapshot_rg_median_A", np.nan),
+                "Best-snapshot Rg median (Å)": row.get("best_snapshot_rg_median_A", np.nan),
                 "Final RMSD rank": int(row["final_rank"]) if pd.notna(row.get("final_rank")) else np.nan,
                 "Snapshot RMSD rank": int(row["snapshot_rank"]) if pd.notna(row.get("snapshot_rank")) else np.nan,
             })
@@ -1256,23 +1480,34 @@ def write_native_like_summary_table(outdir: Path, backend_summary: pd.DataFrame)
         return
     table_df.to_csv(outdir / "energy_function_native_like_summary_table.csv", index=False)
 
-    display = table_df.copy()
-    numeric_cols = [c for c in display.columns if c not in {"Protein", "Energy function", "Final RMSD rank", "Snapshot RMSD rank"}]
+    display_cols = [
+        "Protein",
+        "Energy function",
+        "Median final RMSD (Å)",
+        "Best final RMSD (Å)",
+        "Median top-snapshot RMSD (Å)",
+        "Best snapshot RMSD (Å)",
+        "Experimental E2E (Å)",
+        "Final E2E median (Å)",
+        "Best-snapshot E2E median (Å)",
+        "Experimental Rg (Å)",
+        "Final Rg median (Å)",
+        "Best-snapshot Rg median (Å)",
+    ]
+    display = table_df[[c for c in display_cols if c in table_df.columns]].copy()
+    numeric_cols = [c for c in display.columns if c not in {"Protein", "Energy function"}]
     for col in numeric_cols:
-        display[col] = _as_numeric(display[col]).map(lambda x: f"{x:.3f}" if pd.notna(x) else "")
-    for col in ("Final RMSD rank", "Snapshot RMSD rank"):
-        display[col] = display[col].map(lambda x: str(int(x)) if pd.notna(x) else "")
+        display[col] = _as_numeric(display[col]).map(lambda x: f"{x:.2f}" if pd.notna(x) else "")
     display["Energy function"] = display["Energy function"].astype(str).str.replace(" Energy Function", "", regex=False)
 
     column_labels = [
-        "Protein", "Energy\nfunction", "Median\nfinal\nRMSD", "Best\nfinal\nRMSD",
-        "Median\ntop-snapshot\nRMSD", "Best\nsnapshot\nRMSD",
-        "Exp.\nE2E", "Final\nE2E\nmedian", "Snapshot\nE2E\nmedian",
-        "Exp.\nRg", "Final\nRg\nmedian", "Snapshot\nRg\nmedian",
-        "Final\nRMSD\nrank", "Snapshot\nRMSD\nrank",
+        "Protein", "Energy", "Final\nRMSD\nmed.", "Final\nRMSD\nbest",
+        "Snapshot\nRMSD\nmed.", "Snapshot\nRMSD\nbest",
+        "Exp.\nE2E", "Final\nE2E\nmed.", "Best snap.\nE2E\nmed.",
+        "Exp.\nRg", "Final\nRg\nmed.", "Best snap.\nRg\nmed.",
     ]
-    col_widths = [0.055, 0.095, 0.075, 0.07, 0.09, 0.075, 0.065, 0.075, 0.09, 0.06, 0.075, 0.09, 0.07, 0.075]
-    fig, ax = plt.subplots(figsize=(22.0, 4.2))
+    col_widths = [0.06, 0.085, 0.085, 0.08, 0.095, 0.085, 0.075, 0.085, 0.095, 0.07, 0.08, 0.085]
+    fig, ax = plt.subplots(figsize=(10.8, 3.15))
     ax.axis("off")
     table = ax.table(
         cellText=display.values,
@@ -1283,8 +1518,8 @@ def write_native_like_summary_table(outdir: Path, backend_summary: pd.DataFrame)
         colWidths=col_widths,
     )
     table.auto_set_font_size(False)
-    table.set_fontsize(8.5)
-    table.scale(1.0, 1.75)
+    table.set_fontsize(7.1)
+    table.scale(1.0, 1.55)
     for (row, col), cell in table.get_celld().items():
         cell.set_edgecolor("#D0D0D0")
         cell.get_text().set_wrap(True)
@@ -1337,12 +1572,30 @@ def make_plots(
             ax.scatter(fx[~fnative], fy[~fnative], s=54, marker="X", alpha=0.9, c=FINAL_MODEL_COLOR, label="final models")
             ax.scatter(fx[fnative], fy[fnative], s=92, marker="*", alpha=0.95, c=NATIVE_FINAL_COLOR, label=f"native-like final <= {native_threshold:g} Å")
         ax.set_xlabel("RMSD to reference (Å)")
-        ax.set_ylabel("Potential Energy (kJ/mol)")
+        ax.set_ylabel("GROMACS Potential Energy (kJ/mol)")
         ax.set_title(f"{protein} {BACKEND_LABELS.get(backend, backend)}")
         ax.legend(loc="best", fontsize=8)
         fig.tight_layout()
         fig.savefig(plots_dir / f"funnel_{protein}_{backend}.png", dpi=220)
         plt.close(fig)
+
+        if {"snapshot_energy"}.issubset(snaps.columns) and {"energy"}.issubset(finals.columns):
+            fig, ax = plt.subplots(figsize=(7.2, 5.4))
+            _plot_funnel_points(
+                ax,
+                snaps,
+                finals,
+                native_threshold,
+                snapshot_energy_col="snapshot_energy",
+                final_energy_col="energy",
+            )
+            ax.set_xlabel("RMSD to reference (Å)")
+            ax.set_ylabel(_raw_energy_ylabel(backend))
+            ax.set_title(f"{protein} {BACKEND_LABELS.get(backend, backend)}")
+            ax.legend(loc="best", fontsize=8)
+            fig.tight_layout()
+            fig.savefig(plots_dir / f"funnel_raw_energy_{protein}_{backend}.png", dpi=220)
+            plt.close(fig)
 
     # Final vs best snapshot.
     final_vs_best_groups = final_vs_best.groupby("protein", dropna=False) if "protein" in final_vs_best.columns else []
@@ -1474,7 +1727,15 @@ def regenerate_plots_from_existing(outdir: Path, *, native_threshold: float) -> 
     physics_summary = pd.read_csv(physics_summary_path) if physics_summary_path.exists() else build_snapshot_physics_summary(outdir)
     if not physics_summary.empty:
         physics_summary.to_csv(physics_summary_path, index=False)
-    backend_summary = add_physics_to_backend_summary(backend_summary, final_df, physics_summary)
+    best_snapshot_physics_path = outdir / "best_snapshot_physics_summary.csv"
+    best_snapshot_physics = (
+        pd.read_csv(best_snapshot_physics_path)
+        if best_snapshot_physics_path.exists()
+        else build_best_snapshot_physics_summary(final_vs_best)
+    )
+    if not best_snapshot_physics.empty:
+        best_snapshot_physics.to_csv(best_snapshot_physics_path, index=False)
+    backend_summary = add_physics_to_backend_summary(backend_summary, final_df, physics_summary, best_snapshot_physics)
     backend_summary.to_csv(outdir / "backend_summary.csv", index=False)
     write_native_like_summary_table(outdir, backend_summary)
     make_plots(
@@ -1548,9 +1809,17 @@ def run_analysis(
     snapshot_physics_summary = build_snapshot_physics_summary(outdir)
     if not snapshot_physics_summary.empty:
         snapshot_physics_summary.to_csv(outdir / "snapshot_physics_summary.csv", index=False)
+    best_snapshot_physics_summary = build_best_snapshot_physics_summary(final_vs_best)
+    if not best_snapshot_physics_summary.empty:
+        best_snapshot_physics_summary.to_csv(outdir / "best_snapshot_physics_summary.csv", index=False)
 
     backend_summary = build_backend_summary(final_df, final_vs_best, snapshot_summary)
-    backend_summary = add_physics_to_backend_summary(backend_summary, final_df, snapshot_physics_summary)
+    backend_summary = add_physics_to_backend_summary(
+        backend_summary,
+        final_df,
+        snapshot_physics_summary,
+        best_snapshot_physics_summary,
+    )
     backend_summary.to_csv(outdir / "backend_summary.csv", index=False)
 
     term_corr, snapshot_corr = compute_term_correlations(final_df, snapshot_sample)

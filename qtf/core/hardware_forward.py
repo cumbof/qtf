@@ -27,7 +27,7 @@ Usage
         --backend_name ibm_torino \\
         --channel ibm_quantum \\
         --instance ibm-q/open/main \\
-        --shots 4096 \\
+        --shots 8192 \\
         --out_pdb  ./hw_replica_1.pdb \\
         --reference_pdb /path/to/native.pdb   # optional
 
@@ -38,11 +38,13 @@ script can be dry-run on a laptop before touching real hardware.
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 import logging
 import os
 import sys
 from datetime import datetime
+from time import perf_counter
 from typing import Optional, Tuple
 
 import numpy as np
@@ -51,6 +53,112 @@ from qtf.core.folder import QuantumBiophysicsFolder
 from qtf.utils import workflow as utils
 
 logger = logging.getLogger(__name__)
+
+
+def _now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def _safe_call(obj, attr: str, default=None):
+    value = getattr(obj, attr, default)
+    if callable(value):
+        try:
+            return value()
+        except Exception:
+            return default
+    return value
+
+
+def _backend_name(backend) -> str:
+    name = _safe_call(backend, "name", None)
+    if name is None:
+        name = getattr(backend, "name_str", None)
+    return str(name if name is not None else backend)
+
+
+def _package_versions() -> dict:
+    versions = {}
+    for package in ("qiskit", "qiskit-aer", "qiskit-ibm-runtime"):
+        try:
+            versions[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            versions[package] = None
+    return versions
+
+
+def _coupling_map_summary(backend) -> dict:
+    coupling_map = getattr(backend, "coupling_map", None)
+    edges = []
+    if coupling_map is not None:
+        try:
+            edges = [tuple(map(int, edge)) for edge in coupling_map.get_edges()]
+        except Exception:
+            edges = []
+    if not edges:
+        config = _safe_call(backend, "configuration", None)
+        raw_edges = getattr(config, "coupling_map", None) if config is not None else None
+        if raw_edges:
+            edges = [tuple(map(int, edge)) for edge in raw_edges]
+
+    degree = {}
+    for a, b in edges:
+        degree[a] = degree.get(a, 0) + 1
+        degree[b] = degree.get(b, 0) + 1
+    degrees = list(degree.values())
+    return {
+        "num_edges": int(len(edges)),
+        "num_connected_qubits": int(len(degree)),
+        "min_degree": int(min(degrees)) if degrees else None,
+        "max_degree": int(max(degrees)) if degrees else None,
+        "mean_degree": float(np.mean(degrees)) if degrees else None,
+    }
+
+
+def _backend_metadata(backend) -> dict:
+    config = _safe_call(backend, "configuration", None)
+    status = _safe_call(backend, "status", None)
+    target = getattr(backend, "target", None)
+    target_operation_names = []
+    if target is not None:
+        try:
+            target_operation_names = sorted(str(name) for name in target.operation_names)
+        except Exception:
+            target_operation_names = []
+    config_basis_gates = getattr(config, "basis_gates", None) if config is not None else None
+    config_coupling_map = getattr(config, "coupling_map", None) if config is not None else None
+    return {
+        "name": _backend_name(backend),
+        "version": getattr(backend, "version", None),
+        "num_qubits": getattr(backend, "num_qubits", None),
+        "basis_gates": list(config_basis_gates or []),
+        "coupling_map_summary": _coupling_map_summary(backend),
+        "configuration": {
+            "backend_name": getattr(config, "backend_name", None) if config is not None else None,
+            "backend_version": getattr(config, "backend_version", None) if config is not None else None,
+            "n_qubits": getattr(config, "n_qubits", None) if config is not None else None,
+            "simulator": getattr(config, "simulator", None) if config is not None else None,
+            "local": getattr(config, "local", None) if config is not None else None,
+            "conditional": getattr(config, "conditional", None) if config is not None else None,
+            "open_pulse": getattr(config, "open_pulse", None) if config is not None else None,
+            "memory": getattr(config, "memory", None) if config is not None else None,
+            "max_shots": getattr(config, "max_shots", None) if config is not None else None,
+            "coupling_map_edge_count": len(config_coupling_map or []) if config_coupling_map is not None else None,
+        },
+        "status": {
+            "operational": getattr(status, "operational", None) if status is not None else None,
+            "pending_jobs": getattr(status, "pending_jobs", None) if status is not None else None,
+            "status_msg": getattr(status, "status_msg", None) if status is not None else None,
+        },
+        "target": {
+            "num_qubits": getattr(target, "num_qubits", None) if target is not None else None,
+            "operation_names": target_operation_names,
+            "dt": getattr(target, "dt", None) if target is not None else None,
+            "granularity": getattr(target, "granularity", None) if target is not None else None,
+            "min_length": getattr(target, "min_length", None) if target is not None else None,
+            "pulse_alignment": getattr(target, "pulse_alignment", None) if target is not None else None,
+            "acquire_alignment": getattr(target, "acquire_alignment", None) if target is not None else None,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -105,17 +213,59 @@ def get_hardware_backend(args) -> Tuple[object, str]:
 # ---------------------------------------------------------------------------
 def _counts_from_backend_run(backend, tqc, shots):
     """Legacy ``backend.run(...)`` path (Aer, older IBM backends)."""
-    result = backend.run(tqc, shots=shots).result()
-    return result.get_counts()
+    submitted_at = _now_iso()
+    t0 = perf_counter()
+    job = backend.run(tqc, shots=shots)
+    job_id = _safe_call(job, "job_id", None)
+    result = job.result()
+    completed_at = _now_iso()
+    elapsed_s = perf_counter() - t0
+    return result.get_counts(), {
+        "job_id": job_id,
+        "job_status": str(_safe_call(job, "status", "")),
+        "queue_position": _safe_call(job, "queue_position", None),
+        "submitted_at": submitted_at,
+        "completed_at": completed_at,
+        "elapsed_seconds": float(elapsed_s),
+        "primitive": "backend.run",
+    }
 
 
-def _counts_from_sampler_v2(backend, tqc, shots):
+def _sampler_max_mitigation_options(shots: int) -> dict:
+    return {
+        "default_shots": int(shots),
+        "dynamical_decoupling": {
+            "enable": True,
+            "sequence_type": "XY4",
+            "extra_slack_distribution": "middle",
+            "scheduling_method": "alap",
+            "skip_reset_qubits": False,
+        },
+        "twirling": {
+            "enable_gates": True,
+            "enable_measure": True,
+            "num_randomizations": "auto",
+            "shots_per_randomization": "auto",
+            "strategy": "all",
+        },
+        "execution": {
+            "meas_type": "classified",
+        },
+    }
+
+
+def _counts_from_sampler_v2(backend, tqc, shots, *, sampler_options: Optional[dict] = None):
     """Modern ``SamplerV2`` path (qiskit-ibm-runtime ≥ 0.23)."""
     from qiskit_ibm_runtime import SamplerV2  # type: ignore
 
-    sampler = SamplerV2(mode=backend)
+    sampler = SamplerV2(mode=backend, options=sampler_options)
+    submitted_at = _now_iso()
+    t0 = perf_counter()
     job = sampler.run([tqc], shots=shots)
+    job_id = _safe_call(job, "job_id", None)
     result = job.result()
+    completed_at = _now_iso()
+    elapsed_s = perf_counter() - t0
     pub_result = result[0]
     # Prefer the 'meas' classical register created by measure_all(); fall
     # back to whichever single register is present.
@@ -127,7 +277,21 @@ def _counts_from_sampler_v2(backend, tqc, shots):
         (only_name,) = [name for name in dir(data)
                         if not name.startswith("_") and hasattr(getattr(data, name), "get_counts")][:1]
         bit_array = getattr(data, only_name)
-    return bit_array.get_counts()
+    job_meta = {
+        "job_id": job_id,
+        "job_status": str(_safe_call(job, "status", "")),
+        "queue_position": _safe_call(job, "queue_position", None),
+        "submitted_at": submitted_at,
+        "completed_at": completed_at,
+        "elapsed_seconds": float(elapsed_s),
+        "primitive": "SamplerV2",
+        "sampler_options": sampler_options or {},
+    }
+    try:
+        job_meta["result_metadata"] = dict(getattr(pub_result, "metadata", {}) or {})
+    except Exception:
+        job_meta["result_metadata"] = {}
+    return bit_array.get_counts(), job_meta
 
 
 def _bitstring_counts_to_pvec(counts: dict, n_qubits: int) -> np.ndarray:
@@ -147,6 +311,165 @@ def _bitstring_counts_to_pvec(counts: dict, n_qubits: int) -> np.ndarray:
     return pvec
 
 
+def _instruction_num_qubits(instruction) -> int:
+    """Return how many qubits an instruction acts on across Qiskit versions."""
+    qubits = getattr(instruction, "qubits", None)
+    if qubits is not None:
+        return len(qubits)
+    try:
+        return len(instruction[1])
+    except Exception:
+        operation = getattr(instruction, "operation", None)
+        return int(getattr(operation, "num_qubits", 0) or 0)
+
+
+def _circuit_depth(circuit, *, n_qubits: Optional[int] = None) -> int:
+    if n_qubits is None:
+        depth = circuit.depth()
+    else:
+        depth = circuit.depth(filter_function=lambda inst: _instruction_num_qubits(inst) == n_qubits)
+    return int(depth or 0)
+
+
+def _circuit_metrics(circuit) -> dict:
+    """Compact circuit resource metrics for persisted hardware metadata."""
+    op_counts = {str(name): int(count) for name, count in circuit.count_ops().items()}
+    non_gate_names = {"measure", "barrier", "delay"}
+    one_qubit_gate_count = 0
+    two_qubit_gate_count = 0
+    multi_qubit_gate_count = 0
+    two_qubit_gate_types = {}
+    for inst in circuit.data:
+        n_q = _instruction_num_qubits(inst)
+        operation = getattr(inst, "operation", None)
+        if operation is None:
+            operation = inst[0]
+        name = str(getattr(operation, "name", ""))
+        if name in non_gate_names:
+            continue
+        if n_q == 1:
+            one_qubit_gate_count += 1
+        elif n_q == 2:
+            two_qubit_gate_count += 1
+            two_qubit_gate_types[name] = two_qubit_gate_types.get(name, 0) + 1
+        elif n_q > 2:
+            multi_qubit_gate_count += 1
+
+    return {
+        "num_qubits": int(circuit.num_qubits),
+        "num_clbits": int(circuit.num_clbits),
+        "depth": _circuit_depth(circuit),
+        "size": int(circuit.size()),
+        "total_operation_count": int(sum(op_counts.values())),
+        "total_gate_count": int(sum(count for name, count in op_counts.items() if name not in non_gate_names)),
+        "measurement_count": int(op_counts.get("measure", 0)),
+        "barrier_count": int(op_counts.get("barrier", 0)),
+        "delay_count": int(op_counts.get("delay", 0)),
+        "one_qubit_gate_count": int(one_qubit_gate_count),
+        "two_qubit_gate_count": int(two_qubit_gate_count),
+        "two_qubit_gate_depth": _circuit_depth(circuit, n_qubits=2),
+        "multi_qubit_gate_count": int(multi_qubit_gate_count),
+        "operation_counts": op_counts,
+        "two_qubit_gate_counts_by_name": {k: int(v) for k, v in sorted(two_qubit_gate_types.items())},
+    }
+
+
+def _qubit_index(circuit, qubit) -> Optional[int]:
+    try:
+        return int(circuit.find_bit(qubit).index)
+    except Exception:
+        return None
+
+
+def _serialize_layout_mapping(mapping, source_circuit=None) -> list[dict]:
+    rows = []
+    if not mapping:
+        return rows
+    try:
+        items = mapping.items()
+    except Exception:
+        return rows
+    for key, value in items:
+        if isinstance(key, int):
+            physical = int(key)
+            virtual = value
+        elif isinstance(value, int):
+            physical = int(value)
+            virtual = key
+        else:
+            physical = None
+            virtual = key
+        rows.append({
+            "virtual": str(virtual),
+            "virtual_index": _qubit_index(source_circuit, virtual) if source_circuit is not None else None,
+            "physical": physical,
+        })
+    return sorted(rows, key=lambda row: (row["physical"] is None, row["physical"] or -1, str(row["virtual"])))
+
+
+def _layout_metadata(transpiled_circuit, source_circuit=None) -> dict:
+    layout = getattr(transpiled_circuit, "layout", None)
+    meta = {
+        "transpiled_qubit_count": int(transpiled_circuit.num_qubits),
+        "transpiled_qubits": [str(q) for q in getattr(transpiled_circuit, "qubits", [])],
+        "initial_layout": [],
+        "final_layout": [],
+        "input_qubit_mapping": [],
+    }
+    if layout is None:
+        return meta
+
+    initial_layout = getattr(layout, "initial_layout", None)
+    final_layout = getattr(layout, "final_layout", None)
+    input_qubit_mapping = getattr(layout, "input_qubit_mapping", None)
+
+    if initial_layout is not None:
+        try:
+            meta["initial_layout"] = _serialize_layout_mapping(initial_layout.get_virtual_bits(), source_circuit)
+        except Exception:
+            meta["initial_layout"] = []
+    if final_layout is not None:
+        try:
+            meta["final_layout"] = _serialize_layout_mapping(final_layout.get_virtual_bits(), transpiled_circuit)
+        except Exception:
+            meta["final_layout"] = []
+    if input_qubit_mapping:
+        meta["input_qubit_mapping"] = _serialize_layout_mapping(input_qubit_mapping, source_circuit)
+
+    try:
+        final_index_layout = layout.final_index_layout()
+        meta["final_index_layout"] = [
+            int(value) if value is not None else None
+            for value in final_index_layout
+        ]
+    except Exception:
+        meta["final_index_layout"] = []
+
+    return meta
+
+
+def _counts_metadata(counts: dict) -> dict:
+    normalized_counts = {str(bitstring).replace(" ", ""): int(count) for bitstring, count in counts.items()}
+    total = int(sum(normalized_counts.values()))
+    probabilities = {
+        bitstring: (float(count) / float(total) if total > 0 else 0.0)
+        for bitstring, count in normalized_counts.items()
+    }
+    sorted_counts = sorted(normalized_counts.items(), key=lambda item: (-item[1], item[0]))
+    return {
+        "counts": dict(sorted_counts),
+        "probabilities": {bitstring: probabilities[bitstring] for bitstring, _ in sorted_counts},
+        "top_bitstrings": [
+            {
+                "bitstring": bitstring,
+                "count": int(count),
+                "probability": probabilities[bitstring],
+            }
+            for bitstring, count in sorted_counts[:10]
+        ],
+    }
+
+
 def hardware_forward_angles(
     folder: QuantumBiophysicsFolder,
     params: np.ndarray,
@@ -155,6 +478,8 @@ def hardware_forward_angles(
     *,
     use_sampler_v2: bool,
     optimization_level: int,
+    seed_transpiler: Optional[int],
+    sampler_max_mitigation: bool,
 ) -> Tuple[np.ndarray, dict]:
     """Run one hardware forward pass and return physical torsion angles.
 
@@ -173,12 +498,34 @@ def hardware_forward_angles(
 
     qc = bound.copy()
     qc.measure_all()
-    tqc = transpile(qc, backend=backend, optimization_level=optimization_level)
+    transpile_started_at = _now_iso()
+    t0 = perf_counter()
+    tqc = transpile(
+        qc,
+        backend=backend,
+        optimization_level=optimization_level,
+        seed_transpiler=seed_transpiler,
+    )
+    transpile_completed_at = _now_iso()
+    transpile_elapsed_s = perf_counter() - t0
+    transpiled_metrics = _circuit_metrics(tqc)
+    transpiled_metrics["layout"] = _layout_metadata(tqc, qc)
+    circuit_meta = {
+        "ansatz": _circuit_metrics(folder.ansatz),
+        "bound_measured": _circuit_metrics(qc),
+        "transpiled": transpiled_metrics,
+        "transpile_optimization_level": int(optimization_level),
+        "transpile_seed": seed_transpiler,
+        "transpile_started_at": transpile_started_at,
+        "transpile_completed_at": transpile_completed_at,
+        "transpile_elapsed_seconds": float(transpile_elapsed_s),
+    }
 
     if use_sampler_v2:
-        counts = _counts_from_sampler_v2(backend, tqc, shots)
+        sampler_options = _sampler_max_mitigation_options(shots) if sampler_max_mitigation else None
+        counts, job_meta = _counts_from_sampler_v2(backend, tqc, shots, sampler_options=sampler_options)
     else:
-        counts = _counts_from_backend_run(backend, tqc, shots)
+        counts, job_meta = _counts_from_backend_run(backend, tqc, shots)
 
     pvec = _bitstring_counts_to_pvec(counts, folder.n_qubits)
 
@@ -191,9 +538,15 @@ def hardware_forward_angles(
     meta = {
         "shots_total": int(sum(counts.values())),
         "unique_bitstrings": int(len(counts)),
+        "bitstring_counts": _counts_metadata(counts),
         "n_qubits": int(folder.n_qubits),
         "n_states": int(2 ** folder.n_qubits),
-        "backend_name": getattr(backend, "name", None) or getattr(backend, "name_str", None) or str(backend),
+        "backend_name": _backend_name(backend),
+        "backend": _backend_metadata(backend),
+        "job": job_meta,
+        "software_versions": _package_versions(),
+        "circuit": circuit_meta,
+        "sampler_max_mitigation": bool(sampler_max_mitigation and use_sampler_v2),
     }
     return phys, meta
 
@@ -281,9 +634,15 @@ def main(argv=None):
     ap.add_argument("--use_sampler_v2", action="store_true",
                     help="Use SamplerV2 primitive instead of backend.run(). "
                          "Required for qiskit-ibm-runtime ≥ 0.23.")
-    ap.add_argument("--shots", type=int, default=4096)
-    ap.add_argument("--optimization_level", type=int, default=1,
+    ap.add_argument("--shots", type=int, default=8192)
+    ap.add_argument("--optimization_level", type=int, default=3,
                     help="Transpiler optimization level for the hardware circuit.")
+    ap.add_argument("--seed_transpiler", type=int, default=None,
+                    help="Optional Qiskit transpiler seed for reproducible circuit layout/optimization.")
+    ap.add_argument("--sampler_max_mitigation", dest="sampler_max_mitigation", action="store_true", default=True,
+                    help="Enable strongest available SamplerV2 controls: DD plus gate/measurement twirling.")
+    ap.add_argument("--no_sampler_max_mitigation", dest="sampler_max_mitigation", action="store_false",
+                    help="Disable SamplerV2 DD/twirling mitigation options.")
 
     # Folder-construction knobs that are NOT recorded in the params JSON.
     # Defaults match qtf-fold defaults so a plain rerun of a fold-produced
@@ -333,6 +692,8 @@ def main(argv=None):
         shots=int(args.shots),
         use_sampler_v2=bool(args.use_sampler_v2),
         optimization_level=int(args.optimization_level),
+        seed_transpiler=args.seed_transpiler,
+        sampler_max_mitigation=bool(args.sampler_max_mitigation),
     )
     logger.info("Hardware sampling complete: %d unique bitstrings out of %d shots.",
                 run_meta["unique_bitstrings"], run_meta["shots_total"])
@@ -395,11 +756,17 @@ def main(argv=None):
             "ensemble_id": payload.get("ensemble_id"),
             "backend_name": run_meta["backend_name"],
             "backend_kind": backend_kind,
+            "backend": run_meta.get("backend"),
+            "job": run_meta.get("job"),
+            "software_versions": run_meta.get("software_versions"),
             "shots": run_meta["shots_total"],
             "unique_bitstrings": run_meta["unique_bitstrings"],
+            "bitstring_counts": run_meta.get("bitstring_counts"),
             "n_qubits": folder.n_qubits,
             "n_params": folder.n_params,
             "total_angles": folder.total_angles,
+            "circuit": run_meta.get("circuit"),
+            "sampler_max_mitigation": run_meta.get("sampler_max_mitigation"),
             "rmsd_to_reference_A": rmsd_value,
             "rmsd_mode": args.rmsd_mode,
             "rmsd_residue_scope": args.rmsd_residue_scope,

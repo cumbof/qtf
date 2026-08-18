@@ -529,6 +529,8 @@ def align_structure_to_reference(
     rmsd_mode: str,
     rmsd_residue_scope: str,
 ) -> Tuple[np.ndarray, float, Dict[str, object], Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    _model_all_sel, _model_all_keys, model_all_residues = select_rmsd_coords(model_coords, model_labels, rmsd_mode, "all")
+    _ref_all_sel, _ref_all_keys, ref_all_residues = select_rmsd_coords(reference_coords, reference_labels, rmsd_mode, "all")
     model_sel, model_keys, model_residues = select_rmsd_coords(model_coords, model_labels, rmsd_mode, rmsd_residue_scope)
     ref_sel, ref_keys, ref_residues = select_rmsd_coords(reference_coords, reference_labels, rmsd_mode, rmsd_residue_scope)
     ref_map = {key: coord for key, coord in zip(ref_keys, ref_sel)}
@@ -553,7 +555,8 @@ def align_structure_to_reference(
     ref_common_arr = np.asarray(ref_common, dtype=float)
     if model_common_arr.shape != ref_common_arr.shape:
         raise ValueError(f"Shape mismatch for rmsd_mode={rmsd_mode}: {model_common_arr.shape} vs {ref_common_arr.shape}")
-    n_residues = len(model_residues) if model_residues else len(ref_residues)
+    all_residues = model_all_residues or ref_all_residues
+    n_residues = len(all_residues)
     meta = rmsd_selection_metadata(
         rmsd_mode,
         rmsd_residue_scope,
@@ -562,6 +565,11 @@ def align_structure_to_reference(
         n_matched=len(model_common_arr),
         n_missing=len(missing),
     )
+    selected_residues = model_residues or ref_residues
+    if selected_residues:
+        meta["rmsd_start_residue_1indexed"] = int(min(selected_residues)) + 1
+        meta["rmsd_end_residue_1indexed"] = int(max(selected_residues)) + 1
+        meta["rmsd_n_selected_residues"] = int(len(selected_residues))
     transform = _kabsch_alignment_transform(model_common_arr, ref_common_arr)
     aligned_common = apply_alignment_transform(model_common_arr, transform)
     diff = aligned_common - ref_common_arr
