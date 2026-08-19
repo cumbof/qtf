@@ -19,6 +19,7 @@ import math
 import os
 import platform
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -72,6 +73,7 @@ from qtf.scoring import (
     score_pheat_structure,
 )
 from qtf.utils import gromacs as qtf_gromacs
+from qtf.utils.paths import relativize_absolute_paths
 
 try:
     from pheat import (
@@ -104,7 +106,7 @@ try:
     from pheat.roundtrip import normalize_max_chi, normalize_stored_angles
 except ImportError as exc:
     raise SystemExit(
-        "qtf fold requires PHEAT to be importable in the active Python "
+        "qtf fold-simulation requires PHEAT to be importable in the active Python "
         "environment. Install PHEAT into this environment before running."
     ) from exc
 
@@ -478,7 +480,7 @@ class RunStatusWriter:
     def write(self, *, flush_console: bool = False) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self.path.with_name(f"{self.path.name}.tmp")
-        text = json.dumps(self.payload, indent=4, default=self._json_default)
+        text = json.dumps(relativize_absolute_paths(self.payload), indent=4, default=self._json_default)
         tmp_path.write_text(text + "\n", encoding="utf-8")
         tmp_path.replace(self.path)
         if flush_console and self.flush_console is not None:
@@ -700,7 +702,7 @@ def _jsonify(value):
 
 
 def _write_json(path: Path, payload: dict) -> None:
-    text = json.dumps(_jsonify(payload), indent=4)
+    text = json.dumps(relativize_absolute_paths(_jsonify(payload)), indent=4)
     path.write_text(text + "\n", encoding="utf-8")
 
 
@@ -738,6 +740,7 @@ def _first_present(*values):
 
 def _write_ranked_multimodel_pdb(path: Path, entries: Sequence[Mapping[str, Any]]) -> Optional[Path]:
     model_index = 0
+    path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as out:
         for entry in entries:
             pdb_path = _first_existing_path(entry.get("pdb_path"))
@@ -866,6 +869,7 @@ def _previous_run_result_records(job_dir: Path) -> list[dict[str, Any]]:
             for row in reader:
                 records.append(dict(row))
     result_paths = list(job_dir.glob("replica_*_result.json"))
+    result_paths.extend(job_dir.glob("replicas/replica_*/replica_*_result.json"))
     result_paths.extend(job_dir.glob("replica_*_primary_outputs/replica_*_result.json"))
     for result_path in sorted(set(result_paths)):
         try:
@@ -881,10 +885,6 @@ def _previous_run_result_records(job_dir: Path) -> list[dict[str, Any]]:
             "circuit_params_json_path": payload.get("circuit_params_json_path"),
             "result_path": str(result_path),
         }
-        if record["circuit_params_npz_path"] is None and replica_id is not None:
-            record["circuit_params_npz_path"] = str(
-                job_dir / "circuit_parameters" / f"replica_{int(replica_id) + 1}_params.npz"
-            )
         records.append(record)
     return records
 
@@ -984,15 +984,16 @@ def _write_circuit_parameter_artifacts(
 ) -> dict[str, str]:
     params_dir = outdir / "circuit_parameters"
     params_dir.mkdir(parents=True, exist_ok=True)
-    replica_number = int(args.replica_id) + 1
-    json_path = params_dir / f"replica_{replica_number}_params.json"
-    npz_path = params_dir / f"replica_{replica_number}_params.npz"
+    replica_id = int(args.replica_id)
+    replica_number = replica_id + 1
+    json_path = params_dir / f"replica_{replica_id}_params.json"
+    npz_path = params_dir / f"replica_{replica_id}_params.npz"
     manifest_path = params_dir / "circuit_parameters.json"
     vector = np.asarray(params, dtype=float).reshape(-1)
     payload = {
         "format": "qtf.circuit_parameters.v1",
-        "replica_id": int(args.replica_id),
-        "replica": replica_number,
+        "replica_id": replica_id,
+        "replica_number": replica_number,
         "run_label": getattr(args, "run_label", None),
         "sequence": args.predict,
         "recipe": getattr(args, "phase_preset", None),
@@ -1024,8 +1025,8 @@ def _write_circuit_parameter_artifacts(
         except Exception:
             pass
     entry = {
-        "replica_id": int(args.replica_id),
-        "replica": replica_number,
+        "replica_id": replica_id,
+        "replica_number": replica_number,
         "run_label": getattr(args, "run_label", None),
         "energy": float(energy),
         "rmsd_to_reference_A": None if rmsd is None else float(rmsd),
@@ -1035,7 +1036,7 @@ def _write_circuit_parameter_artifacts(
     }
     manifest["replicas"] = [
         item for item in manifest.get("replicas", [])
-        if _entry_replica_id(item) != int(args.replica_id)
+        if _entry_replica_id(item) != replica_id
     ]
     manifest["replicas"].append(entry)
     manifest["replicas"].sort(key=lambda item: int(item.get("replica_id", item.get("id", 0))))
@@ -1491,7 +1492,10 @@ def _score_options_for_folder_params(
     options: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     score_options = dict(options or {})
-    if str(model).strip().lower().replace("_", "-") != "pheat-coarse-protein-folding-v1":
+    if str(model).strip().lower().replace("_", "-") not in {
+        "pheat-custom-energy-v1",
+        "pheat-coarse-protein-folding-v1",
+    }:
         return score_options
     if "decoded_torsions" in score_options or params is None:
         return score_options
@@ -1854,7 +1858,9 @@ def _run_validation_evaluators(
                 outdir=outdir,
                 prefix=prefix,
                 candidate_key=f"{candidate['candidate_key']}_{candidate['candidate_set']}",
-                include_prepared_output=True,
+                # Validation energies belong in the result metadata. User-facing
+                # refined structures are exported explicitly as named PDBs.
+                include_prepared_output=False,
             )
             validation_warnings = _validation_warnings_for_score(score)
             results.append(
@@ -2534,7 +2540,8 @@ def _pdb_text(path: Path) -> str:
 
 
 def _json_script_payload(payload) -> str:
-    return json.dumps(payload, separators=(",", ":"), sort_keys=True).replace("</", "<\\/")
+    portable = relativize_absolute_paths(payload)
+    return json.dumps(portable, separators=(",", ":"), sort_keys=True).replace("</", "<\\/")
 
 
 def _format_optional_float(value, digits: int = 4) -> str:
@@ -4626,9 +4633,17 @@ def _copy_molstar_assets(outdir: Path) -> tuple[Optional[Path], Optional[str]]:
     try:
         from pheat.molstar_assets import copy_molstar_assets
 
-        return copy_molstar_assets(outdir / "vendor" / "molstar", warn=True)
+        return copy_molstar_assets(outdir / "report_assets" / "molstar", warn=True)
     except Exception as exc:
         return None, str(exc)
+
+
+def _molstar_asset_href(report_path: Path, molstar_dir: Path) -> str:
+    """Return the report-relative URL for a shared job-level Mol* bundle."""
+
+    return Path(
+        os.path.relpath(Path(molstar_dir).resolve(), Path(report_path).parent.resolve())
+    ).as_posix()
 
 
 def _format_optional_int(value) -> str:
@@ -6567,8 +6582,12 @@ def _write_qtf_html_report(
     css_link = ""
     js_script = ""
     if molstar_dir is not None:
-        css_link = '<link rel="stylesheet" href="vendor/molstar/molstar.css">'
-        js_script = '<script src="vendor/molstar/molstar.js"></script>'
+        molstar_href = html.escape(
+            _molstar_asset_href(report_path, Path(molstar_dir)),
+            quote=True,
+        )
+        css_link = f'<link rel="stylesheet" href="{molstar_href}/molstar.css">'
+        js_script = f'<script src="{molstar_href}/molstar.js"></script>'
 
     phase_results = result.get("phase_results") or []
     phase_schedule = result.get("phase_schedule") or {}
@@ -10028,7 +10047,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
-    primary_output_dir = outdir / f"{prefix}_primary_outputs"
+    primary_output_dir = outdir / "replicas" / prefix
     primary_output_dir.mkdir(parents=True, exist_ok=True)
     console_capture = io.StringIO()
     sys.stdout = TeeStream(sys.stdout, console_capture)
@@ -10039,7 +10058,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     command_line = _command_line(argv, args.report_command_line)
 
     def _flush_console_log() -> None:
-        console_log_path.write_text(console_capture.getvalue(), encoding="utf-8")
+        portable_console = relativize_absolute_paths(console_capture.getvalue())
+        console_log_path.write_text(portable_console, encoding="utf-8")
 
     status_writer = RunStatusWriter(
         status_path,
@@ -10639,7 +10659,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
     except PhaseOptimizationError as exc:
         print(f"{_console_prefix(args.replica_id)} {exc}")
-        execution_context["console_output"] = console_capture.getvalue()
+        execution_context["console_output"] = relativize_absolute_paths(console_capture.getvalue())
         console_log_path.write_text(execution_context["console_output"], encoding="utf-8")
         status_writer.update(
             status="failed",
@@ -10670,7 +10690,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         max_chi=output_max_chi,
     )
 
-    pdb_path = primary_output_dir / f"{prefix}.pdb"
+    pdb_path = primary_output_dir / f"{prefix}_final.pdb"
     ca_pdb_path = primary_output_dir / f"{prefix}_ca.pdb"
     heavy_json_path = primary_output_dir / f"{prefix}_heavy.json"
     residue_geometry_path = primary_output_dir / f"{prefix}_residue_geometry.json"
@@ -10681,15 +10701,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     reference_residue_geometry_path = None
     reference_metric_residue_geometry_path = None
     structure_snapshots = list(getattr(folder, "structure_snapshots", []) or [])
+    snapshots_output_dir = primary_output_dir / "snapshots"
     top_snapshot_results = list(getattr(folder, "top_snapshot_results", []) or [])
     structure_snapshot_payloads = []
     snapshot_structures = {}
     report_structure_domain_coverages: dict[str, dict[str, Any]] = {}
     top_snapshot_gromacs_evaluator = None
-    if phase_schedule.validation.enabled and "top_snapshots" in phase_schedule.validation.candidates:
+    if phase_schedule.validation.enabled:
         for evaluator_name in phase_schedule.validation.evaluators:
             evaluator = phase_schedule.evaluators.get(evaluator_name)
-            if evaluator is not None and evaluator.score_model == "pheat-gromacs-mdrun":
+            status = evaluator_status_by_name.get(evaluator_name) or {}
+            if (
+                evaluator is not None
+                and evaluator.score_model == "pheat-gromacs-mdrun"
+                and status.get("status") in {None, "ok"}
+            ):
                 top_snapshot_gromacs_evaluator = evaluator
                 break
 
@@ -10703,6 +10729,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         maxwarn = int(run_settings.get("grompp_maxwarn") or options.get("gromacs_maxwarn") or 2)
         return forcefield, water, nsteps, emtol, maxwarn
 
+    def _gromacs_refine_pdb(raw_path: Path, refined_path: Path, evaluator: EvaluatorConfig) -> dict[str, Any]:
+        """Refine one PDB through the shared retained-artifact utility."""
+        forcefield, water, nsteps, emtol, maxwarn = _gromacs_minimize_settings(evaluator)
+        return qtf_gromacs.refine_pdb_with_gromacs(
+            str(raw_path),
+            refined_path,
+            forcefield=forcefield,
+            water=water,
+            nsteps=nsteps,
+            emtol=emtol,
+            maxwarn=maxwarn,
+        )
+
     workflow_progress.start("Artifact generation")
     with timings.section(
         "artifact_writes",
@@ -10715,6 +10754,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             domain=report_structure_domain,
         )
         report_structure_domain_coverages["final"] = final_report_coverage
+        final_gromacs_payload: dict[str, Any] = {}
+        if top_snapshot_gromacs_evaluator is not None:
+            final_gromacs_path = primary_output_dir / f"{prefix}_final_gromacs_refined.pdb"
+            final_gromacs_payload = _gromacs_refine_pdb(
+                pdb_path,
+                final_gromacs_path,
+                top_snapshot_gromacs_evaluator,
+            )
         write_structure_json(final_structure, heavy_json_path)
         write_residue_geometry_json(
             final_residue_geometry,
@@ -10766,7 +10813,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             raw_pdb_path = None
             gromacs_payload: dict[str, Any] = {}
             if payload.get("snapshot_status") == "ok" and structure is not None:
-                raw_pdb_path = primary_output_dir / f"{_snapshot_file_stem(prefix, payload)}.pdb"
+                artifact_dir = snapshots_output_dir if payload.get("role") == "top_snapshot" else primary_output_dir
+                artifact_dir.mkdir(parents=True, exist_ok=True)
+                raw_pdb_path = artifact_dir / f"{_snapshot_file_stem(prefix, payload)}.pdb"
                 report_structure, report_coverage = _write_report_pdb(
                     structure,
                     raw_pdb_path,
@@ -10777,23 +10826,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 payload["report_structure_domain"] = report_structure_domain
                 payload["report_domain_coverage"] = report_coverage
                 if payload.get("role") == "top_snapshot" and top_snapshot_gromacs_evaluator is not None:
-                    gromacs_dir = (
-                        primary_output_dir
-                        / "gromacs_minimized_models"
-                        / "snapshots"
-                        / _snapshot_file_stem(prefix, payload)
+                    refined_pdb_path = snapshots_output_dir / (
+                        f"{_snapshot_file_stem(prefix, payload)}_gromacs_refined.pdb"
                     )
-                    forcefield, water, nsteps, emtol, maxwarn = _gromacs_minimize_settings(
-                        top_snapshot_gromacs_evaluator
-                    )
-                    gromacs_payload = qtf_gromacs.minimize_pdb_with_gromacs(
-                        str(raw_pdb_path),
-                        str(gromacs_dir),
-                        forcefield=forcefield,
-                        water=water,
-                        nsteps=nsteps,
-                        emtol=emtol,
-                        maxwarn=maxwarn,
+                    gromacs_payload = _gromacs_refine_pdb(
+                        raw_pdb_path,
+                        refined_pdb_path,
+                        top_snapshot_gromacs_evaluator,
                     )
                     payload["gromacs_status"] = gromacs_payload.get("gromacs_status")
                     payload["gromacs_message"] = gromacs_payload.get("gromacs_message")
@@ -11176,7 +11215,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     structure = snapshot_structures.get(key)
                     if structure is None:
                         continue
-                    aligned_snapshot_path = primary_output_dir / f"{_snapshot_file_stem(prefix, snapshot)}_aligned.pdb"
+                    aligned_dir = (
+                        snapshots_output_dir
+                        if snapshot.get("role") == "top_snapshot"
+                        else primary_output_dir
+                    )
+                    aligned_dir.mkdir(parents=True, exist_ok=True)
+                    aligned_snapshot_path = aligned_dir / f"{_snapshot_file_stem(prefix, snapshot)}_aligned.pdb"
                     _snapshot_reference, aligned_snapshot, aligned_atom_count = _aligned_pheat_structures(
                         pheat_reference.metric_structure,
                         structure,
@@ -11192,7 +11237,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     snapshot["aligned_matched_heavy_atoms"] = aligned_atom_count
                     snapshot["aligned_atom_count"] = len(aligned_snapshot_report.atoms)
                     snapshot["aligned_report_domain_coverage"] = aligned_snapshot_coverage
-            molstar_dir, molstar_error = _copy_molstar_assets(primary_output_dir)
+            molstar_dir, molstar_error = _copy_molstar_assets(outdir)
             molstar_vendor_path = molstar_dir
         except Exception as exc:
             report_error = str(exc)
@@ -11222,28 +11267,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except Exception:
         primary_gromacs_kcal = None
 
-    ensemble_ranked_pdb_path = _write_ranked_multimodel_pdb(
-        primary_output_dir / "ensemble_ranked.pdb",
-        [
-            {
-                "pdb_path": str(folded_aligned_pdb_path or pdb_path),
-                "remarks": [
-                    f"QTF_SOURCE replica=replica_{int(args.replica_id) + 1} replica_id={int(args.replica_id)}",
-                    "QTF_RANK file_rank=1 energy_rank=1 rmsd_rank=1",
-                    (
-                        f"QTF_SCORE energy={_ranked_pdb_value(final_energy)} "
-                        f"score_total={_ranked_pdb_value(final_score.get('total'))} "
-                        f"score_units={_ranked_pdb_value(final_score.get('units'))} "
-                        f"gromacs_potential_kj_mol={_ranked_pdb_value(primary_gromacs_kj)} "
-                        f"gromacs_potential_kcal_mol={_ranked_pdb_value(primary_gromacs_kcal)} "
-                        f"rmsd_A={_ranked_pdb_value(rmsd)} "
-                        f"alignment_atom_set={_ranked_pdb_value(ranked_pdb_alignment_atom_set)}"
-                    ),
-                    f"QTF_PDB_SOURCE {folded_aligned_pdb_path or pdb_path}",
-                ],
-            }
-        ],
-    )
+    # Ranked multi-model PDBs are job-level artifacts. They are generated by
+    # aggregate_job_outputs after this replica result has been written.
+    ensemble_ranked_pdb_path = outdir / "ensemble_ranked.pdb"
 
     top_snapshot_payload_by_key = {
         str(snapshot.get("key")): snapshot
@@ -11301,14 +11327,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 ],
             }
         )
-    snapshot_ranked_pdb_path = _write_ranked_multimodel_pdb(
-        primary_output_dir / "snapshot_ranked.pdb",
-        snapshot_ranked_entries,
-    )
-    if ensemble_ranked_pdb_path is not None:
-        print(f"{_console_prefix(args.replica_id)} Ranked ensemble PDB: {ensemble_ranked_pdb_path}")
-    if snapshot_ranked_pdb_path is not None:
-        print(f"{_console_prefix(args.replica_id)} Ranked snapshot PDB: {snapshot_ranked_pdb_path}")
+    snapshot_ranked_pdb_path = outdir / "snapshot_ranked.pdb"
 
     circuit_parameter_artifacts = _write_circuit_parameter_artifacts(
         outdir,
@@ -11513,6 +11532,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "gate_estimates": gate_estimates,
         "phase_gate_estimates": phase_gate_estimates,
         "pdb_path": str(pdb_path),
+        "gromacs_refined_pdb_path": final_gromacs_payload.get("gromacs_minimized_full_pdb_path"),
+        "gromacs_refined_log_path": final_gromacs_payload.get("gromacs_log_path"),
+        "gromacs_refinement_status": final_gromacs_payload.get("gromacs_status"),
+        "gromacs_refinement_message": final_gromacs_payload.get("gromacs_message"),
+        "gromacs_refinement_converged": final_gromacs_payload.get("gromacs_converged"),
+        "gromacs_refinement_final_max_force": final_gromacs_payload.get("gromacs_final_max_force"),
+        "gromacs_potential_kj_mol": final_gromacs_payload.get("gromacs_potential_kj_mol"),
+        "gromacs_potential_kcal_mol": final_gromacs_payload.get("gromacs_potential_kcal_mol"),
         "ca_pdb_path": str(ca_pdb_path),
         "ensemble_ranked_pdb_path": str(ensemble_ranked_pdb_path) if ensemble_ranked_pdb_path is not None else None,
         "snapshot_ranked_pdb_path": str(snapshot_ranked_pdb_path) if snapshot_ranked_pdb_path is not None else None,
@@ -11555,9 +11582,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"  Report     : {report_path}")
     print(f"  Saved to   : {result_path}")
 
-    console_output = console_capture.getvalue()
+    console_output = relativize_absolute_paths(console_capture.getvalue())
     execution_context["console_output"] = console_output
     result["execution"] = dict(execution_context)
+    result = relativize_absolute_paths(result)
     _write_json(software_versions_path, software_versions_full)
     console_log_path.write_text(console_output, encoding="utf-8")
 
@@ -11582,7 +11610,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             report_error = str(exc)
             result["report_error"] = report_error
             print(f"{_console_prefix(args.replica_id)} HTML report failed: {exc}")
-            execution_context["console_output"] = console_capture.getvalue()
+            execution_context["console_output"] = relativize_absolute_paths(console_capture.getvalue())
             result["execution"] = dict(execution_context)
             console_log_path.write_text(execution_context["console_output"], encoding="utf-8")
 

@@ -1283,7 +1283,10 @@ class QuantumBiophysicsFolder:
         options: Optional[dict[str, Any]],
     ) -> dict[str, Any]:
         score_options = dict(options or {})
-        if str(model).strip().lower().replace("_", "-") == "pheat-coarse-protein-folding-v1":
+        if str(model).strip().lower().replace("_", "-") in {
+            "pheat-custom-energy-v1",
+            "pheat-coarse-protein-folding-v1",
+        }:
             score_options.setdefault("decoded_torsions", self._angle_dict(angle_vector))
         return score_options
 

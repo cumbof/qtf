@@ -10,13 +10,22 @@ import os
 from pathlib import Path
 from typing import Any, Iterable
 
+from qtf.utils.paths import relativize_absolute_paths
+
 
 def _relative_path(value: Any, root: Path) -> Any:
     if not isinstance(value, str) or not value:
         return value
     candidate = Path(value)
     if not candidate.is_absolute():
-        return value
+        cwd_candidate = (Path.cwd() / candidate).resolve()
+        root_candidate = (root / candidate).resolve()
+        if cwd_candidate.exists():
+            candidate = cwd_candidate
+        elif root_candidate.exists():
+            candidate = root_candidate
+        else:
+            return value
     try:
         return os.path.relpath(candidate, root)
     except ValueError:
@@ -33,7 +42,8 @@ def _numeric(value: Any) -> float:
 
 def _write_json(path: Path, payload: Any) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+    portable = relativize_absolute_paths(payload)
+    temporary.write_text(json.dumps(portable, indent=2, sort_keys=False) + "\n", encoding="utf-8")
     temporary.replace(path)
 
 
@@ -49,7 +59,7 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     with temporary.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(relativize_absolute_paths(rows))
     temporary.replace(path)
 
 
@@ -58,10 +68,10 @@ def _existing_path(root: Path, *values: Any) -> Path | None:
         if not value:
             continue
         path = Path(str(value))
-        if not path.is_absolute():
-            path = root / path
-        if path.is_file():
-            return path
+        candidates = [path] if path.is_absolute() else [root / path, Path.cwd() / path]
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate.resolve()
     return None
 
 
@@ -81,11 +91,14 @@ def _write_multimodel_pdb(path: Path, rows: Iterable[dict[str, Any]], root: Path
             output.write(f"MODEL     {count:4d}\n")
             output.write(
                 "REMARK QTF_SOURCE "
-                f"replica_id={row.get('replica_id')} source={_relative_path(str(source), root)}\n"
+                f"replica_id={row.get('replica_id')} "
+                f"snapshot_rank_within_replica={row.get('snapshot_rank_within_replica')} "
+                f"source={_relative_path(str(source), root)}\n"
             )
             output.write(
                 "REMARK QTF_SCORE "
-                f"energy={row.get('energy')} rmsd_A={row.get('rmsd_to_reference_A')}\n"
+                f"energy={row.get('energy', row.get('snapshot_energy'))} "
+                f"rmsd_A={row.get('rmsd_to_reference_A', row.get('snapshot_effective_rmsd_to_reference_A'))}\n"
             )
             for line in source.read_text(encoding="utf-8").splitlines():
                 if line[:6].strip().upper() not in {"MODEL", "ENDMDL", "END"}:
@@ -108,7 +121,11 @@ def _ensemble_row(result: dict[str, Any], root: Path) -> dict[str, Any]:
         "sequence": result.get("sequence"),
         "recipe": result.get("recipe"),
         "energy": result.get("objective_total", result.get("energy")),
-        "energy_model": result.get("optimizer_objective"),
+        "energy_model": (
+            result.get("objective_model")
+            or result.get("result_score_model")
+            or result.get("score_model")
+        ),
         "score_model": result.get("result_score_model", result.get("score_model")),
         "score_total": result.get("score_total", result.get("primary_score_total")),
         "score_units": result.get("score_units", result.get("primary_score_units")),
@@ -121,9 +138,20 @@ def _ensemble_row(result: dict[str, Any], root: Path) -> dict[str, Any]:
         "n_qubits": result.get("n_qubits"),
         "n_params": result.get("n_params"),
         "pdb_path": _relative_path(result.get("pdb_path"), root),
+        "gromacs_minimized_full_pdb_path": _relative_path(
+            result.get("gromacs_refined_pdb_path")
+            if result.get("gromacs_refinement_status") == "ok"
+            else None,
+            root,
+        ),
+        "gromacs_status": result.get("gromacs_refinement_status"),
+        "gromacs_converged": result.get("gromacs_refinement_converged"),
+        "gromacs_final_max_force": result.get("gromacs_refinement_final_max_force"),
+        "gromacs_potential_kj_mol": result.get("gromacs_potential_kj_mol"),
         "ca_pdb_path": _relative_path(result.get("ca_pdb_path"), root),
         "result_path": _relative_path(
-            str(root / f"replica_{replica_id}_primary_outputs" / f"replica_{replica_id}_result.json"),
+            result.get("_result_path")
+            or str(root / "replicas" / f"replica_{replica_id}" / f"replica_{replica_id}_result.json"),
             root,
         ),
         "circuit_params_json_path": _relative_path(result.get("circuit_params_json_path"), root),
@@ -174,9 +202,14 @@ def aggregate_job_outputs(job_dir: str | Path) -> dict[str, Any]:
     lock_path = root / ".qtf_aggregate.lock"
     with lock_path.open("a+", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        result_paths = sorted(root.glob("replica_*_primary_outputs/replica_*_result.json"))
+        result_paths = sorted(root.glob("replicas/replica_*/replica_*_result.json"))
+        result_paths.extend(sorted(root.glob("replica_*_primary_outputs/replica_*_result.json")))
         result_paths.extend(sorted(root.glob("replica_*_result.json")))
-        results = [json.loads(path.read_text(encoding="utf-8")) for path in result_paths]
+        results = []
+        for path in result_paths:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["_result_path"] = str(path.resolve())
+            results.append(payload)
         ensemble = sorted((_ensemble_row(result, root) for result in results), key=lambda row: _numeric(row["energy"]))
         for rank, row in enumerate(ensemble, start=1):
             row["ensemble_rank"] = rank
@@ -216,4 +249,3 @@ def aggregate_job_outputs(job_dir: str | Path) -> dict[str, Any]:
             _write_json(root / "snapshot_ranked.json", snapshots)
             _write_multimodel_pdb(root / "snapshot_ranked.pdb", snapshots, root)
         return {"replicas": len(ensemble), "snapshots": len(snapshots), "job_dir": str(root)}
-

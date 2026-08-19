@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 from qtf.utils import gromacs as qtf_gromacs
+from qtf.utils.paths import relativize_absolute_paths
 
 
 def main(argv=None):
@@ -60,7 +61,7 @@ def main(argv=None):
     result_path = outdir / "relax_result.json"
     result_json = {k: (None if isinstance(v, float) and math.isnan(v) else v) for k, v in result.items()}
     with open(result_path, "w") as f:
-        json.dump(result_json, f, indent=2)
+        json.dump(relativize_absolute_paths(result_json), f, indent=2)
     print(f"[relax] result JSON: {result_path}")
 
 

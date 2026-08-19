@@ -27,6 +27,7 @@ import pandas as pd
 from qtf.core.folder import QuantumBiophysicsFolder
 from qtf.utils import workflow as utils
 from qtf.utils import gromacs as qtf_gromacs
+from qtf.utils.paths import relativize_absolute_paths, write_portable_csv
 from qtf.utils.workflow import (
     AA3_TO_1,
     adjacent_heavy_clash_metrics,
@@ -250,15 +251,12 @@ def main(argv=None):
     ap.add_argument("--chi_mode", default="selective", choices=["chi1_only", "selective", "all"])
     ap.add_argument("--max_sidechain_opts_per_residue", type=int, default=9,
                     help="Max sampled local torsion choices per residue. 0 means exhaustive local enumeration and can explode for 125/5/all.")
-    ap.add_argument("--energy_backend", default="custom", choices=["custom", "rosetta", "openmm"],
-                    help="Energy backend: custom QTF energy, PyRosetta-backed score, or OpenMM-backed score.")
+    ap.add_argument("--energy_backend", default="custom", choices=["custom", "openmm"],
+                    help="Energy backend: native custom energy or OpenMM-backed score.")
     ap.add_argument("--use_e2e_constraint", type=int, default=1,
                     help="1 to use length-scaled E2E constraint in custom scorer, 0 to disable.")
     ap.add_argument("--e2e_scale", type=float, default=1.0,
                     help="Multiplier for the length-scaled E2E constraint when enabled.")
-    ap.add_argument("--rosetta_repack", type=int, default=0)
-    ap.add_argument("--rosetta_fa_min", type=int, default=0)
-    ap.add_argument("--rosetta_cen_min", type=int, default=0)
     ap.add_argument("--gromacs_minimize", type=int, default=None,
                     help="1 to add hydrogens/topology and minimize each saved full PDB with GROMACS")
     ap.add_argument("--gromacs_forcefield", default="amber99sb-ildn")
@@ -328,9 +326,6 @@ def main(argv=None):
             energy_backend=args.energy_backend,
             use_e2e_constraint=bool(args.use_e2e_constraint),
             e2e_scale=args.e2e_scale,
-            rosetta_repack=bool(args.rosetta_repack),
-            rosetta_fa_min=bool(args.rosetta_fa_min),
-            rosetta_cen_min=bool(args.rosetta_cen_min),
         )
         folders_by_k[k].current_stage = 3
 
@@ -598,14 +593,14 @@ def main(argv=None):
 
     csv_path = os.path.join(args.outdir, "beamsearch_ranked.csv")
     json_path = os.path.join(args.outdir, "beamsearch_ranked.json")
-    df_out.to_csv(csv_path, index=False)
+    write_portable_csv(df_out, csv_path)
 
     payload = [{k: _jsonify(v) for k, v in rec.items()} for rec in df_out.to_dict(orient="records")]
     with open(json_path, "w") as f:
-        json.dump(payload, f, indent=2)
+        json.dump(relativize_absolute_paths(payload), f, indent=2)
 
     if args.save_partial and partial_rows:
-        pd.DataFrame(partial_rows).to_csv(os.path.join(args.outdir, "beamsearch_partial_states.csv"), index=False)
+        write_portable_csv(pd.DataFrame(partial_rows), os.path.join(args.outdir, "beamsearch_partial_states.csv"))
 
     best = df.iloc[0].to_dict()
     best_summary = {
@@ -630,16 +625,16 @@ def main(argv=None):
         "best": {k: _jsonify(v) for k, v in best.items()},
     }
     with open(os.path.join(args.outdir, "beamsearch_best.json"), "w") as f:
-        json.dump(best_summary, f, indent=2)
+        json.dump(relativize_absolute_paths(best_summary), f, indent=2)
 
     if args.reference_pdb:
         native_count = int(df_out["native_like"].sum()) if "native_like" in df_out.columns else 0
         with open(os.path.join(args.outdir, "native_like_counts.json"), "w") as f:
-            json.dump({
+            json.dump(relativize_absolute_paths({
                 "native_like": native_count,
                 "non_native": int(len(df_out) - native_count),
                 "native_thresh_A": args.native_thresh
-            }, f, indent=2)
+            }), f, indent=2)
 
         term_cols = [c for c in df_out.columns if c.startswith("term_") and c not in ("term_total",)]
         if term_cols and "native_like" in df_out.columns:
@@ -653,8 +648,9 @@ def main(argv=None):
                     "mean_non_native": float(mean_non) if pd.notna(mean_non) else None,
                     "delta_native_minus_non": float(mean_nat - mean_non) if (pd.notna(mean_nat) and pd.notna(mean_non)) else None
                 })
-            pd.DataFrame(rows2).sort_values("delta_native_minus_non").to_csv(
-                os.path.join(args.outdir, "native_like_term_differences.csv"), index=False
+            write_portable_csv(
+                pd.DataFrame(rows2).sort_values("delta_native_minus_non"),
+                os.path.join(args.outdir, "native_like_term_differences.csv"),
             )
 
         if term_cols and "rmsd_to_reference_A" in df_out.columns:
@@ -664,8 +660,9 @@ def main(argv=None):
                 pearson = df_out[[c, target]].corr(method="pearson").iloc[0, 1]
                 spearman = df_out[[c, target]].corr(method="spearman").iloc[0, 1]
                 corr_rows.append({"feature": c, "pearson_r": float(pearson), "spearman_r": float(spearman)})
-            pd.DataFrame(corr_rows).sort_values("spearman_r").to_csv(
-                os.path.join(args.outdir, "term_correlations_vs_rmsd.csv"), index=False
+            write_portable_csv(
+                pd.DataFrame(corr_rows).sort_values("spearman_r"),
+                os.path.join(args.outdir, "term_correlations_vs_rmsd.csv"),
             )
 
     print(f"[beam] wrote: {csv_path}")

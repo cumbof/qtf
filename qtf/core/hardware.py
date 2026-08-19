@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""
-Single-shot hardware forward pass for a saved QTF circuit-parameter vector.
+"""Single-shot hardware folding from random or saved circuit parameters.
 
-Given a ``replica_<k>_params.json`` produced by ``qtf-fold`` (format
-``qtf.circuit_parameters.v1``), this script:
+``qtf fold-hardware`` initializes random parameters for the requested sequence
+by default. Passing ``--params-json`` instead loads parameters saved by
+``qtf fold-simulation`` (format ``qtf.circuit_parameters.v1``). It then:
 
   1. Reconstructs a ``QuantumBiophysicsFolder`` with matching configuration
-     (sequence, chi_mode, omega_mode, energy_backend, ansatz layout).
-  2. Binds the saved parameters onto the ansatz and executes **one forward
-     pass on real quantum hardware** (sampler mode: measure_all + shots).
+     (sequence, geometry settings, and ansatz layout).
+  2. Binds the parameters onto the ansatz and executes the circuit once on
+     real quantum hardware (sampler mode: measure_all + shots).
   3. Converts the empirical shot distribution to torsion angles via the
      same CDF mapping used by ``QuantumBiophysicsFolder._get_angles_sampler``.
   4. Rebuilds the full heavy-atom structure via NERF
@@ -17,22 +17,17 @@ Given a ``replica_<k>_params.json`` produced by ``qtf-fold`` (format
   5. Writes a PDB file, and — when a reference structure is provided —
      rigid-aligns to it and reports RMSD.
 
-The hardware backend is selected in ``get_hardware_backend()``. Edit that
-function (or use the CLI flags) to plug in your IBM/other credentials.
+Unless ``--backend-name`` is supplied, IBM Runtime's ``least_busy()`` chooses
+an operational, non-simulator backend with enough qubits. Use
+``--local-simulator`` for an explicit offline Aer run.
 
 Usage
 -----
-    python -m qtf.core.hardware_forward \\
-        --params_json /path/to/circuit_parameters/replica_1_params.json \\
-        --backend_name ibm_torino \\
-        --channel ibm_quantum \\
-        --instance ibm-q/open/main \\
-        --shots 8192 \\
-        --out_pdb  ./hw_replica_1.pdb \\
-        --reference_pdb /path/to/native.pdb   # optional
+    qtf fold-hardware --sequence YYDPETGTWY --shots 8192
 
-If ``--backend_name`` is omitted, an ``AerSimulator`` is used so the same
-script can be dry-run on a laptop before touching real hardware.
+    qtf fold-hardware \\
+        --params-json run_outputs/fold/circuit_parameters \\
+        --replica-id 0 --backend-name ibm_torino --shots 8192
 """
 
 from __future__ import annotations
@@ -50,7 +45,9 @@ from typing import Optional, Tuple
 import numpy as np
 
 from qtf.core.folder import QuantumBiophysicsFolder
+from qtf.utils import save_pdb
 from qtf.utils import workflow as utils
+from qtf.utils.paths import relativize_absolute_paths
 
 logger = logging.getLogger(__name__)
 
@@ -164,52 +161,45 @@ def _backend_metadata(backend) -> dict:
 # ---------------------------------------------------------------------------
 # Hardware backend selection
 # ---------------------------------------------------------------------------
-def get_hardware_backend(args) -> Tuple[object, str]:
-    """Return ``(backend, kind)`` where ``kind`` is 'ibm_runtime' or 'aer'.
+def get_hardware_backend(args, *, min_num_qubits: int) -> Tuple[object, str]:
+    """Select an IBM backend, using Runtime's least-busy device by default."""
 
-    EDIT THIS FUNCTION to hard-code your hardware credentials / instance if
-    you do not want to pass them on the command line. The default behaviour
-    is:
-
-      * If ``--backend_name`` is given → use ``qiskit_ibm_runtime``
-        (``QiskitRuntimeService``) with the given channel/instance/token
-        (falling back to a saved account if these are omitted).
-      * Otherwise → return a local ``AerSimulator`` so the script is
-        directly runnable without a hardware connection (useful for
-        dry-runs / debugging).
-    """
-    if args.backend_name:
+    if args.local_simulator:
         try:
-            from qiskit_ibm_runtime import QiskitRuntimeService
+            from qiskit_aer import AerSimulator
         except ImportError as exc:
-            raise SystemExit(
-                "qiskit-ibm-runtime is required for hardware execution.\n"
-                "Install with: pip install qiskit-ibm-runtime"
-            ) from exc
-
-        service_kwargs = {}
-        if args.channel:
-            service_kwargs["channel"] = args.channel
-        if args.instance:
-            service_kwargs["instance"] = args.instance
-        if args.token:
-            service_kwargs["token"] = args.token
-        service = QiskitRuntimeService(**service_kwargs)
-        backend = service.backend(args.backend_name)
-        return backend, "ibm_runtime"
+            raise SystemExit("--local-simulator requires qiskit-aer") from exc
+        return AerSimulator(), "aer"
 
     try:
-        from qiskit_aer import AerSimulator
+        from qiskit_ibm_runtime import QiskitRuntimeService
     except ImportError as exc:
         raise SystemExit(
-            "No --backend_name given and qiskit-aer is not installed; "
-            "cannot fall back to local simulation."
+            "qiskit-ibm-runtime is required for hardware execution.\n"
+            "Install with: pip install qiskit-ibm-runtime"
         ) from exc
-    return AerSimulator(), "aer"
+
+    service_kwargs = {}
+    if args.channel:
+        service_kwargs["channel"] = args.channel
+    if args.instance:
+        service_kwargs["instance"] = args.instance
+    if args.token:
+        service_kwargs["token"] = args.token
+    service = QiskitRuntimeService(**service_kwargs)
+    if args.backend_name:
+        return service.backend(args.backend_name), "ibm_runtime"
+    backend = service.least_busy(
+        min_num_qubits=int(min_num_qubits),
+        operational=True,
+        simulator=False,
+    )
+    logger.info("Runtime least_busy selected backend: %s", _backend_name(backend))
+    return backend, "ibm_runtime"
 
 
 # ---------------------------------------------------------------------------
-# One forward pass: bind → transpile → sample → CDF → angles
+# One hardware execution: bind → transpile → sample → CDF → angles
 # ---------------------------------------------------------------------------
 def _counts_from_backend_run(backend, tqc, shots):
     """Legacy ``backend.run(...)`` path (Aer, older IBM backends)."""
@@ -470,7 +460,7 @@ def _counts_metadata(counts: dict) -> dict:
     }
 
 
-def hardware_forward_angles(
+def hardware_angles(
     folder: QuantumBiophysicsFolder,
     params: np.ndarray,
     backend,
@@ -481,7 +471,7 @@ def hardware_forward_angles(
     seed_transpiler: Optional[int],
     sampler_max_mitigation: bool,
 ) -> Tuple[np.ndarray, dict]:
-    """Run one hardware forward pass and return physical torsion angles.
+    """Run one hardware folding execution and return physical torsion angles.
 
     Also returns a small ``meta`` dict with the raw counts summary and
     backend identifier for logging.
@@ -556,6 +546,41 @@ def hardware_forward_angles(
 # ---------------------------------------------------------------------------
 # Main entry
 # ---------------------------------------------------------------------------
+def _resolve_params_json(path: str, replica_id: Optional[int]) -> str:
+    """Resolve a replica JSON from a file, manifest, or fold directory."""
+    candidate = os.path.abspath(os.path.expanduser(path))
+    if os.path.isdir(candidate):
+        direct = os.path.join(candidate, "circuit_parameters.json")
+        nested = os.path.join(candidate, "circuit_parameters", "circuit_parameters.json")
+        candidate = direct if os.path.isfile(direct) else nested
+    if not os.path.isfile(candidate):
+        raise FileNotFoundError(f"circuit parameter input not found: {path}")
+    if os.path.basename(candidate) != "circuit_parameters.json":
+        return candidate
+
+    with open(candidate, "r", encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    entries = list(manifest.get("replicas") or [])
+    if replica_id is None:
+        if len(entries) != 1:
+            raise ValueError(
+                f"{candidate} contains {len(entries)} replicas; pass --replica-id to select one"
+            )
+        entry = entries[0]
+    else:
+        matches = [entry for entry in entries if int(entry.get("replica_id", -1)) == replica_id]
+        if not matches:
+            raise ValueError(f"replica_id {replica_id} is not present in {candidate}")
+        entry = matches[0]
+    raw = entry.get("json_path")
+    if not raw:
+        raise ValueError(f"selected manifest entry has no json_path: {candidate}")
+    selected = raw if os.path.isabs(str(raw)) else os.path.join(os.path.dirname(candidate), str(raw))
+    if not os.path.isfile(selected):
+        raise FileNotFoundError(f"saved replica parameter JSON not found: {selected}")
+    return selected
+
+
 def _load_params_manifest(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as handle:
         payload = json.load(handle)
@@ -592,7 +617,7 @@ def _build_folder_from_manifest(payload: dict, args) -> QuantumBiophysicsFolder:
         geometry_mode=geometry.get("geometry_mode"),
         geometry_table=geometry.get("geometry_table"),
         geometry_profile=geometry.get("geometry_profile"),
-        score_model=str(result.get("score_model") or "pheat-coarse-protein-folding-v1"),
+        score_model=str(result.get("score_model") or "pheat-custom-energy-v1"),
         circuit_template=recipe.get("circuit_template"),
         circuit=recipe.get("circuit"),
         optimizer_angle_mode="sampler",
@@ -616,16 +641,20 @@ def _build_folder_from_manifest(payload: dict, args) -> QuantumBiophysicsFolder:
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
-        prog="qtf-hw-forward",
-        description="Run one hardware forward pass from a saved circuit-parameter JSON, "
-                    "NERF-rebuild the structure, and (optionally) compute RMSD.",
+        prog="qtf fold-hardware",
+        description="Execute a QTF circuit on IBM hardware and rebuild the measured structure. "
+                    "Saved parameters are optional; random parameters are used by default.",
     )
-    ap.add_argument("--params_json", required=True,
-                    help="Path to replica_<k>_params.json (qtf.circuit_parameters.v1).")
-    ap.add_argument("--out_pdb", required=True,
-                    help="Output PDB path for the rebuilt heavy-atom structure.")
-    ap.add_argument("--out_json", default=None,
-                    help="Optional JSON path for run metadata (backend, shots, RMSD, ...).")
+    ap.add_argument("--params-json", "--params_json", dest="params_json", default=None,
+                    help="Optional replica JSON, circuit_parameters manifest/directory, or simulation output directory.")
+    ap.add_argument("--replica-id", type=int, default=None,
+                    help="Zero-based replica ID when selecting from a manifest or directory.")
+    ap.add_argument("--outdir", default="run_outputs/hardware_fold",
+                    help="Output directory used when explicit output files are not supplied.")
+    ap.add_argument("--out-pdb", "--out_pdb", dest="out_pdb", default=None,
+                    help="Output PDB path; defaults to OUTDIR/hardware_model.pdb.")
+    ap.add_argument("--out-json", "--out_json", dest="out_json", default=None,
+                    help="Metadata JSON path; defaults to OUTDIR/hardware_result.json.")
     ap.add_argument("--reference_pdb", default=None,
                     help="Optional local reference PDB path for RMSD.")
     ap.add_argument("--reference_structure", default=None,
@@ -634,75 +663,109 @@ def main(argv=None):
     ap.add_argument("--rmsd_residue_scope", default="core", choices=["core", "all"])
     ap.add_argument("--average_reference_backbone", action="store_true")
 
-    # Hardware backend flags — leave empty to fall back to AerSimulator.
-    ap.add_argument("--backend_name", default=None,
-                    help="Hardware backend name (e.g. 'ibm_torino'). "
-                         "If omitted, AerSimulator is used.")
+    ap.add_argument("--backend-name", "--backend_name", dest="backend_name", default=None,
+                    help="Specific IBM backend. If omitted, Runtime least_busy() selects an operational device.")
+    ap.add_argument("--local-simulator", action="store_true",
+                    help="Explicitly use Aer locally instead of submitting an IBM hardware job.")
     ap.add_argument("--channel", default=None, help="qiskit_ibm_runtime channel.")
     ap.add_argument("--instance", default=None, help="qiskit_ibm_runtime instance.")
     ap.add_argument("--token", default=None, help="qiskit_ibm_runtime API token.")
-    ap.add_argument("--use_sampler_v2", action="store_true",
-                    help="Use SamplerV2 primitive instead of backend.run(). "
-                         "Required for qiskit-ibm-runtime ≥ 0.23.")
+    ap.add_argument("--use-sampler-v2", "--use_sampler_v2", dest="use_sampler_v2", action="store_true", default=True,
+                    help="Use the Runtime SamplerV2 primitive (default for IBM hardware).")
+    ap.add_argument("--no-sampler-v2", dest="use_sampler_v2", action="store_false",
+                    help="Use backend.run instead; mainly intended for local compatibility tests.")
     ap.add_argument("--shots", type=int, default=8192)
-    ap.add_argument("--optimization_level", type=int, default=3,
+    ap.add_argument("--optimization-level", type=int, default=3,
                     help="Transpiler optimization level for the hardware circuit.")
-    ap.add_argument("--seed_transpiler", type=int, default=None,
+    ap.add_argument("--seed-transpiler", "--seed_transpiler", dest="seed_transpiler", type=int, default=None,
                     help="Optional Qiskit transpiler seed for reproducible circuit layout/optimization.")
-    ap.add_argument("--sampler_max_mitigation", dest="sampler_max_mitigation", action="store_true", default=True,
+    ap.add_argument("--sampler-max-mitigation", "--sampler_max_mitigation", dest="sampler_max_mitigation", action="store_true", default=True,
                     help="Enable strongest available SamplerV2 controls: DD plus gate/measurement twirling.")
-    ap.add_argument("--no_sampler_max_mitigation", dest="sampler_max_mitigation", action="store_false",
+    ap.add_argument("--no-sampler-max-mitigation", "--no_sampler_max_mitigation", dest="sampler_max_mitigation", action="store_false",
                     help="Disable SamplerV2 DD/twirling mitigation options.")
+    ap.add_argument("--gromacs", dest="gromacs", action="store_true", default=True,
+                    help="GROMACS-refine the rebuilt hardware structure (default).")
+    ap.add_argument("--no-gromacs", dest="gromacs", action="store_false",
+                    help="Skip post-run GROMACS refinement.")
+    ap.add_argument("--gromacs-outdir", default=None,
+                    help="GROMACS artifact directory; defaults to OUTDIR/gromacs_minimized.")
+    ap.add_argument("--gromacs-forcefield", default="amber99sb-ildn")
+    ap.add_argument("--gromacs-water", default="tip3p")
+    ap.add_argument("--gromacs-nsteps", type=int, default=5000)
+    ap.add_argument("--gromacs-emtol", type=float, default=100.0)
+    ap.add_argument("--gromacs-maxwarn", type=int, default=2)
 
     # Folder-construction knobs that are NOT recorded in the params JSON.
-    # Defaults match qtf-fold defaults so a plain rerun of a fold-produced
+    # Defaults match qtf-fold-simulation defaults so a plain rerun of a fold-produced
     # replica reconstructs the same folder identity.
     ap.add_argument("--sequence", default=None,
-                    help="Override sequence (usually taken from the params JSON).")
-    ap.add_argument("--recipe", default=None,
-                    help="Override the recipe recorded in the parameter JSON.")
+                    help="Protein sequence; required when --params-json is omitted.")
+    ap.add_argument("--recipe", default="qtf-main-snapshot-equivalent",
+                    help="Recipe defining the circuit and geometry when random parameters are used.")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="Optional seed for random circuit-parameter initialization.")
     ap.add_argument("--chi_mode", default="all",
                     choices=["beam", "selective", "all"],
                     help="Only used if the params JSON does not record chi_mode.")
     ap.add_argument("--omega_mode", default="window",
                     choices=["free", "fixed", "window"])
-    ap.add_argument("--energy_backend", default="custom",
-                    choices=["custom", "rosetta", "openmm"])
     ap.add_argument("--use_e2e_constraint", type=int, default=1)
     ap.add_argument("--e2e_scale", type=float, default=1.0)
-    ap.add_argument("--rosetta_repack", type=int, default=0)
-    ap.add_argument("--rosetta_fa_min", type=int, default=0)
-    ap.add_argument("--rosetta_cen_min", type=int, default=0)
 
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    output_dir = os.path.abspath(os.path.expanduser(args.outdir))
+    args.out_pdb = args.out_pdb or os.path.join(output_dir, "hardware_model.pdb")
+    args.out_json = args.out_json or os.path.join(output_dir, "hardware_result.json")
+    args.gromacs_outdir = args.gromacs_outdir or os.path.join(output_dir, "gromacs_minimized")
 
-    # ---- Load parameter manifest & construct folder ----
-    payload = _load_params_manifest(args.params_json)
-    params = np.asarray(payload["params"], dtype=float).reshape(-1)
-    logger.info("Loaded %d circuit parameters from %s (sequence=%s)",
-                params.size, args.params_json, payload.get("sequence"))
-
+    # ---- Construct the circuit and initialize its parameters ----
+    params_json = None
+    if args.params_json:
+        params_json = _resolve_params_json(args.params_json, args.replica_id)
+        payload = _load_params_manifest(params_json)
+    else:
+        if not args.sequence:
+            ap.error("--sequence is required when --params-json is not supplied")
+        payload = {
+            "format": "qtf.hardware_parameters.random.v1",
+            "sequence": args.sequence,
+            "recipe": args.recipe,
+            "replica_id": None,
+            "parameter_source": "random",
+        }
     folder = _build_folder_from_manifest(payload, args)
+    if params_json is not None:
+        params = np.asarray(payload["params"], dtype=float).reshape(-1)
+        logger.info("Loaded %d circuit parameters from %s", params.size, params_json)
+        parameter_source = "saved"
+    else:
+        params = np.random.default_rng(args.seed).uniform(-np.pi, np.pi, size=folder.n_params)
+        payload["params"] = params.tolist()
+        payload["n_qubits"] = int(folder.n_qubits)
+        payload["n_params"] = int(folder.n_params)
+        payload["random_seed"] = args.seed
+        parameter_source = "random"
+        logger.info("Initialized %d random circuit parameters (seed=%s)", params.size, args.seed)
     logger.info("Rebuilt folder: n_qubits=%d n_params=%d total_angles=%d",
                 folder.n_qubits, folder.n_params, folder.total_angles)
 
     # ---- Pick backend & wire it into the folder ----
-    backend, backend_kind = get_hardware_backend(args)
+    backend, backend_kind = get_hardware_backend(args, min_num_qubits=folder.n_qubits)
     folder.backend = backend
     folder.shots = int(args.shots)
     logger.info("Using backend: %s (%s), shots=%d, sampler_v2=%s",
                 getattr(backend, "name", str(backend)), backend_kind,
-                args.shots, bool(args.use_sampler_v2))
+                args.shots, bool(args.use_sampler_v2 and backend_kind == "ibm_runtime"))
 
-    # ---- Single hardware forward pass → angles ----
-    angles, run_meta = hardware_forward_angles(
+    # ---- Single hardware folding execution → angles ----
+    angles, run_meta = hardware_angles(
         folder,
         params,
         backend,
         shots=int(args.shots),
-        use_sampler_v2=bool(args.use_sampler_v2),
+        use_sampler_v2=bool(args.use_sampler_v2 and backend_kind == "ibm_runtime"),
         optimization_level=int(args.optimization_level),
         seed_transpiler=args.seed_transpiler,
         sampler_max_mitigation=bool(args.sampler_max_mitigation),
@@ -740,31 +803,36 @@ def main(argv=None):
     out_pdb = os.path.abspath(args.out_pdb)
     os.makedirs(os.path.dirname(out_pdb) or ".", exist_ok=True)
     remarks = [
-        "QTF SINGLE-SHOT HARDWARE FORWARD REBUILD",
+        "QTF SINGLE-SHOT HARDWARE FOLD REBUILD",
         f"BACKEND {run_meta['backend_name']}  KIND {backend_kind}",
         f"SHOTS {run_meta['shots_total']}  UNIQUE_BITSTRINGS {run_meta['unique_bitstrings']}",
         f"SEQUENCE {folder.sequence}",
-        f"REPLICA {payload.get('replica', 'NA')}  ENSEMBLE_ID {payload.get('ensemble_id', 'NA')}",
+        f"REPLICA_ID {payload.get('replica_id', 'NA')}  ENSEMBLE_ID {payload.get('ensemble_id', 'NA')}",
         f"TIMESTAMP {datetime.now().isoformat(timespec='seconds')}",
     ]
     if rmsd_meta is not None:
         remarks.append(f"RMSD_TO_REFERENCE_A {rmsd_value:.4f} MODE {args.rmsd_mode} SCOPE {args.rmsd_residue_scope}")
-    folder.save_pdb(
+    save_pdb(
         coords,
         labels,
         filename=out_pdb,
         energy=float(payload.get("energy", 0.0)),
         remarks=remarks,
         include_hydrogens=False,
+        sequence=folder.sequence,
     )
     logger.info("Wrote structure PDB: %s", out_pdb)
 
     # ---- Optional metadata dump ----
     if args.out_json:
         out_meta = {
-            "params_json": os.path.abspath(args.params_json),
+            "params_json": os.path.abspath(params_json) if params_json is not None else None,
+            "parameter_source": parameter_source,
+            "random_seed": args.seed if parameter_source == "random" else None,
+            "circuit_parameters": params.tolist(),
             "sequence": folder.sequence,
-            "replica": payload.get("replica"),
+            "replica_id": payload.get("replica_id"),
+            "replica_number": payload.get("replica_number", payload.get("replica")),
             "ensemble_id": payload.get("ensemble_id"),
             "backend_name": run_meta["backend_name"],
             "backend_kind": backend_kind,
@@ -787,10 +855,46 @@ def main(argv=None):
             "out_pdb": out_pdb,
             "timestamp": datetime.now().isoformat(timespec="seconds"),
         }
+        if args.gromacs:
+            from qtf.core.hardware_gromacs import refine_hardware_structure
+
+            logger.info("Running GROMACS refinement: %s", args.gromacs_outdir)
+            try:
+                gromacs_meta = refine_hardware_structure(
+                    out_pdb,
+                    args.gromacs_outdir,
+                    reference_source=args.reference_pdb or args.reference_structure,
+                    rmsd_mode=args.rmsd_mode,
+                    rmsd_residue_scope=args.rmsd_residue_scope,
+                    forcefield=args.gromacs_forcefield,
+                    water=args.gromacs_water,
+                    nsteps=args.gromacs_nsteps,
+                    emtol=args.gromacs_emtol,
+                    maxwarn=args.gromacs_maxwarn,
+                )
+                out_meta.update(gromacs_meta)
+                effective_rmsd = gromacs_meta.get("hardware_effective_rmsd_to_reference_A")
+                if effective_rmsd is not None:
+                    out_meta["rmsd_to_reference_A"] = effective_rmsd
+                logger.info(
+                    "GROMACS refinement status: %s",
+                    gromacs_meta.get("gromacs_status", "unknown"),
+                )
+            except Exception as exc:
+                logger.warning("GROMACS refinement failed: %s", exc)
+                out_meta.update(
+                    {
+                        "hardware_gromacs_enabled": True,
+                        "gromacs_status": "error",
+                        "gromacs_message": str(exc),
+                    }
+                )
+        else:
+            out_meta["hardware_gromacs_enabled"] = False
         out_json = os.path.abspath(args.out_json)
         os.makedirs(os.path.dirname(out_json) or ".", exist_ok=True)
         with open(out_json, "w", encoding="utf-8") as handle:
-            json.dump(_jsonify(out_meta), handle, indent=2)
+            json.dump(relativize_absolute_paths(_jsonify(out_meta)), handle, indent=2)
         logger.info("Wrote run metadata: %s", out_json)
 
     return 0

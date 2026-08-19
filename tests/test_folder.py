@@ -780,7 +780,7 @@ class TestPheatGeometryIntegrity:
     def test_coarse_model_exposes_end_to_end_controls(self):
         from pheat.scoring import score_model_option_specs
 
-        specs = {item["name"] for item in score_model_option_specs("pheat-coarse-protein-folding-v1")}
+        specs = {item["name"] for item in score_model_option_specs("pheat-custom-energy-v1")}
         assert {"use_end_to_end_constraint", "end_to_end_scale", "decoded_torsions"}.issubset(specs)
 
 
@@ -881,12 +881,12 @@ class TestLengthAwareE2EConstraint:
         assert computed == pytest.approx(expected_target)
 
     def test_constraint_term_is_nonneg_and_finite(self):
-        f = QuantumBiophysicsFolder("GAVCL", score_model="pheat-coarse-protein-folding-v1")
+        f = QuantumBiophysicsFolder("GAVCL", score_model="pheat-custom-energy-v1")
         rng = np.random.default_rng(0)
         params = rng.uniform(-0.8, 0.8, f.n_params)
         payload, _ = f.score_model_for_params(
             params,
-            "pheat-coarse-protein-folding-v1",
+            "pheat-custom-energy-v1",
             angle_mode="statevector",
             options={"use_end_to_end_constraint": True},
         )
@@ -894,12 +894,12 @@ class TestLengthAwareE2EConstraint:
         assert payload["terms"]["end_to_end"] >= 0.0
 
     def test_constraint_disabled_gives_zero(self):
-        f = QuantumBiophysicsFolder("GAVCL", score_model="pheat-coarse-protein-folding-v1")
+        f = QuantumBiophysicsFolder("GAVCL", score_model="pheat-custom-energy-v1")
         rng = np.random.default_rng(1)
         params = rng.uniform(-0.8, 0.8, f.n_params)
         payload, _ = f.score_model_for_params(
             params,
-            "pheat-coarse-protein-folding-v1",
+            "pheat-custom-energy-v1",
             angle_mode="statevector",
             options={"use_end_to_end_constraint": False},
         )
@@ -922,12 +922,12 @@ class TestBondGraphVDWExclusions:
             assert not f.mask_non_bonded_vdw[j, i]
 
     def test_steric_terms_are_finite_and_nonnegative(self):
-        f = QuantumBiophysicsFolder("GAVC", score_model="pheat-coarse-protein-folding-v1")
+        f = QuantumBiophysicsFolder("GAVC", score_model="pheat-custom-energy-v1")
         rng = np.random.default_rng(7)
         params = rng.uniform(-0.8, 0.8, f.n_params)
         payload, _ = f.score_model_for_params(
             params,
-            "pheat-coarse-protein-folding-v1",
+            "pheat-custom-energy-v1",
             angle_mode="statevector",
         )
         assert np.isfinite(payload["terms"]["steric"])

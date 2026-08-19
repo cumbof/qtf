@@ -3,10 +3,13 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+
+from qtf.utils.paths import relativize_absolute_paths
 
 
 def find_gmx() -> Optional[str]:
@@ -58,10 +61,8 @@ def prepare_pdb_for_gromacs(src_pdb: str, dst_pdb: Path) -> None:
     as separate residue blocks. This pass preserves coordinates but groups and
     serializes atoms by residue.
 
-    It also normalizes a small set of nonstandard atom names emitted by the
-    Rosetta-backed path into force-field-compatible names. In practice the
-    important case is PRO backbone NV -> N, which lets pdb2gmx map the residue
-    to the standard PRO template.
+    It also normalizes the legacy PRO backbone alias NV to the conventional N,
+    allowing pdb2gmx to map the residue to its standard template.
     """
     atom_order = {
         "N": 0,
@@ -98,9 +99,8 @@ def prepare_pdb_for_gromacs(src_pdb: str, dst_pdb: Path) -> None:
                 resseq = original_index
             icode = line[26].strip()
 
-            # Rosetta's PRO backbone nitrogen can appear as NV in the emitted PDB.
-            # pdb2gmx does not recognize that name for standard amino-acid templates,
-            # so rewrite it to the conventional backbone N here.
+            # Some legacy PDB producers emit PRO backbone nitrogen as NV.
+            # pdb2gmx expects the conventional backbone name N.
             if res_name == "PRO" and atom_name == "NV":
                 atom_name = "N"
                 line = rewrite_atom_name(line, atom_name)
@@ -336,13 +336,22 @@ def minimize_pdb_with_gromacs(
         "gromacs_potential_kj_mol": np.nan,
         "gromacs_potential_kcal_mol": np.nan,
         "gromacs_converged_fmax_lt_100": False,
+        "gromacs_converged": False,
         "gromacs_final_max_force": np.nan,
     }
+
+    def finalize() -> Dict[str, object]:
+        if log_path.is_file():
+            portable_log = relativize_absolute_paths(
+                log_path.read_text(encoding="utf-8", errors="replace")
+            )
+            log_path.write_text(portable_log, encoding="utf-8")
+        return result
 
     if not gmx:
         result["gromacs_status"] = "missing_gmx"
         result["gromacs_message"] = "GROMACS executable not found"
-        return result
+        return finalize()
 
     input_pdb = Path(pdb_path).resolve()
     prepared_pdb = workdir / "prepared_input.pdb"
@@ -381,7 +390,7 @@ def minimize_pdb_with_gromacs(
         if proc.returncode != 0:
             result["gromacs_status"] = "failed"
             result["gromacs_message"] = f"command failed: {' '.join(cmd[:2])}"
-            return result
+            return finalize()
 
     write_minimization_mdp(mdp, nsteps=nsteps, emtol=emtol)
     grompp = [
@@ -396,13 +405,13 @@ def minimize_pdb_with_gromacs(
     if proc.returncode != 0:
         result["gromacs_status"] = "failed"
         result["gromacs_message"] = "command failed: gmx grompp"
-        return result
+        return finalize()
 
     proc = _run([gmx, "mdrun", "-deffnm", "em", "-nt", "1"], workdir, log_path)
     if proc.returncode != 0:
         result["gromacs_status"] = "failed"
         result["gromacs_message"] = "command failed: gmx mdrun"
-        return result
+        return finalize()
 
     potential_xvg = workdir / "potential.xvg"
     proc = _run(
@@ -420,25 +429,95 @@ def minimize_pdb_with_gromacs(
     if proc.returncode != 0:
         result["gromacs_status"] = "failed"
         result["gromacs_message"] = "command failed: gmx editconf minimized pdb"
-        return result
+        return finalize()
+
+    command_stats = parse_gromacs_log_stats(log_path)
+    mdrun_stats = parse_gromacs_log_stats(workdir / "em.log")
+    final_max_force = (
+        mdrun_stats["gromacs_final_max_force"]
+        if np.isfinite(mdrun_stats["gromacs_final_max_force"])
+        else command_stats["gromacs_final_max_force"]
+    )
+    converged = bool(np.isfinite(final_max_force) and final_max_force <= float(emtol))
+    result.update(
+        {
+            "gromacs_converged_fmax_lt_100": bool(
+                np.isfinite(final_max_force) and final_max_force < 100.0
+            ),
+            "gromacs_converged": converged,
+            "gromacs_final_max_force": final_max_force,
+        }
+    )
+    potential_kj = float(result["gromacs_potential_kj_mol"])
+    if not np.isfinite(potential_kj) or abs(potential_kj) > 1.0e9:
+        result["gromacs_status"] = "failed"
+        result["gromacs_message"] = "minimization produced a non-finite or physically invalid potential energy"
+        return finalize()
+    if not np.isfinite(final_max_force):
+        result["gromacs_status"] = "failed"
+        result["gromacs_message"] = "minimization produced a non-finite maximum force"
+        return finalize()
+    if not converged:
+        result["gromacs_status"] = "failed"
+        result["gromacs_message"] = (
+            f"minimization did not converge to the requested Fmax <= {float(emtol):g}; "
+            f"final Fmax was {float(final_max_force):g}"
+        )
+        return finalize()
 
     result["gromacs_status"] = "ok"
     result["gromacs_message"] = ""
     result["gromacs_minimized_full_pdb_path"] = str(minimized_pdb)
-    command_stats = parse_gromacs_log_stats(log_path)
-    mdrun_stats = parse_gromacs_log_stats(workdir / "em.log")
-    result.update(
-        {
-            "gromacs_converged_fmax_lt_100": bool(
-                command_stats["gromacs_converged_fmax_lt_100"]
-                or mdrun_stats["gromacs_converged_fmax_lt_100"]
-            ),
-            "gromacs_final_max_force": (
-                mdrun_stats["gromacs_final_max_force"]
-                if np.isfinite(mdrun_stats["gromacs_final_max_force"])
-                else command_stats["gromacs_final_max_force"]
-            ),
-        }
-    )
     compact_successful_minimization_dir(workdir, keep_paths=[minimized_pdb, log_path])
-    return result
+    return finalize()
+
+
+def refine_pdb_with_gromacs(
+    pdb_path: str,
+    refined_pdb_path: str | Path,
+    *,
+    log_path: str | Path | None = None,
+    forcefield: str = "amber99sb-ildn",
+    water: str = "tip3p",
+    nsteps: int = 5000,
+    emtol: float = 100.0,
+    maxwarn: int = 2,
+) -> Dict[str, object]:
+    """Run minimization in temporary storage and retain only its PDB and log.
+
+    This is the shared artifact-level interface for simulation and hardware
+    folds. ``minimize_pdb_with_gromacs`` remains the lower-level work-directory
+    implementation used by callers that need the complete working location.
+    """
+
+    refined_pdb_path = Path(refined_pdb_path).resolve()
+    retained_log_path = (
+        Path(log_path).resolve()
+        if log_path is not None
+        else refined_pdb_path.with_suffix(".log")
+    )
+    refined_pdb_path.parent.mkdir(parents=True, exist_ok=True)
+    retained_log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(prefix="qtf-gromacs-") as workdir:
+        result = minimize_pdb_with_gromacs(
+            pdb_path,
+            workdir,
+            forcefield=forcefield,
+            water=water,
+            nsteps=nsteps,
+            emtol=emtol,
+            maxwarn=maxwarn,
+        )
+        generated_log = result.get("gromacs_log_path")
+        if generated_log and Path(str(generated_log)).is_file():
+            shutil.copy2(str(generated_log), retained_log_path)
+            result["gromacs_log_path"] = str(retained_log_path)
+
+        generated_pdb = result.get("gromacs_minimized_full_pdb_path")
+        if result.get("gromacs_status") == "ok" and generated_pdb and Path(str(generated_pdb)).is_file():
+            shutil.copy2(str(generated_pdb), refined_pdb_path)
+            result["gromacs_minimized_full_pdb_path"] = str(refined_pdb_path)
+
+        result["gromacs_workdir"] = None
+        return result

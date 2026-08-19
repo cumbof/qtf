@@ -14,6 +14,8 @@ from typing import Iterable, Optional
 
 import pandas as pd
 
+from qtf.utils.paths import write_portable_csv
+
 
 def _first_present(df: pd.DataFrame, candidates: Iterable[str]) -> Optional[str]:
     for name in candidates:
@@ -174,7 +176,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     if args.out_md:
         Path(args.out_md).write_text(f"Source: {args.csv}\n\n{md}\n")
     if args.out_csv:
-        top.to_csv(args.out_csv, index=False)
+        write_portable_csv(top, args.out_csv)
 
 
 if __name__ == "__main__":

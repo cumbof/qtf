@@ -61,7 +61,7 @@ are extracted and mapped directly to torsion angles in [−π, π].
 
 - **Logarithmic qubit scaling** — a 10-residue protein (~30 DoF) uses only 5 qubits
 - **Physics-based energy function** with 10 distinct terms (no neural network required)
-- **Amber-style custom parameterization** plus optional Rosetta and OpenMM backends
+- **Native custom scoring** plus optional OpenMM and external force-field validation
 - **Ensemble folding** with reproducible random initialisation and full provenance
 - **Comprehensive ranking** — energy, RMSD vs ground truth, radius of gyration, convergence
 - **Interactive Plotly visualisations** — 3-D backbone overlay, energy landscape, ranking dashboard

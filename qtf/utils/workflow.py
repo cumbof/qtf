@@ -736,9 +736,6 @@ def score_native_structure(
     energy_backend: str = "custom",
     use_e2e_constraint: bool = True,
     e2e_scale: float = 1.0,
-    rosetta_repack: bool = False,
-    rosetta_fa_min: bool = False,
-    rosetta_cen_min: bool = False,
     gromacs_minimize: bool = False,
     gromacs_forcefield: str = "amber99sb-ildn",
     gromacs_water: str = "tip3p",
@@ -770,9 +767,6 @@ def score_native_structure(
             energy_backend=energy_backend,
             use_e2e_constraint=use_e2e_constraint,
             e2e_scale=e2e_scale,
-            rosetta_repack=rosetta_repack,
-            rosetta_fa_min=rosetta_fa_min,
-            rosetta_cen_min=rosetta_cen_min,
         )
         folder.current_stage = 3
 
@@ -818,21 +812,18 @@ def make_folder(
     energy_backend: str,
     use_e2e_constraint: bool,
     e2e_scale: float,
-    rosetta_repack: bool,
-    rosetta_fa_min: bool,
-    rosetta_cen_min: bool,
     chi_mode: Optional[str] = None,
     selective_chi_map: Optional[Dict[str, List[str]]] = None,
 ) -> QuantumBiophysicsFolder:
     """Construct a QuantumBiophysicsFolder with the shared runtime options."""
+    model_aliases = {
+        "custom": "pheat-custom-energy-v1",
+        "openmm": "pheat-openmm-prepared",
+    }
+    score_model = model_aliases.get(str(energy_backend).strip().lower(), energy_backend)
     folder_kwargs: Dict[str, Any] = {
         "sequence": sequence,
-        "energy_backend": energy_backend,
-        "use_e2e_constraint": bool(use_e2e_constraint),
-        "e2e_scale": float(e2e_scale),
-        "rosetta_repack": bool(rosetta_repack),
-        "rosetta_fa_min": bool(rosetta_fa_min),
-        "rosetta_cen_min": bool(rosetta_cen_min),
+        "score_model": score_model,
     }
     if chi_mode is not None:
         folder_kwargs["chi_mode"] = chi_mode

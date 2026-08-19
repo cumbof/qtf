@@ -18,7 +18,7 @@ def test_builtin_recipes_load():
 
     recipes = load_builtin_recipes()
     assert "engine" not in recipes["qtf-main-equivalent"]
-    assert recipes["qtf-main-equivalent"]["phases"][0]["score_model"] == "pheat-coarse-protein-folding-v1"
+    assert recipes["qtf-main-equivalent"]["phases"][0]["score_model"] == "pheat-custom-energy-v1"
     assert recipes["qtf-heavy-atom-phased"]["phases"][0]["score_model"].startswith("pheat-")
     assert recipes["qtf-main-equivalent"]["circuit_template"]["name"] == "EfficientSU2"
     assert recipes["qtf-heavy-atom-phased"]["circuit_template"]["source"] == "qtf"
@@ -277,7 +277,7 @@ def test_command_line_redacts_ibm_token_and_crn():
     )
     override = qtf_engine._command_line(
         None,
-        "qtf fold --ibm-token direct-secret-token --ibm-instance-crn crn:v1:secret-instance",
+        "qtf fold-simulation --ibm-token direct-secret-token --ibm-instance-crn crn:v1:secret-instance",
     )
 
     assert "direct-secret-token" not in command_line
@@ -1287,7 +1287,7 @@ def test_main_snapshot_equivalent_schedule_resolves():
     assert schedule.preset == "qtf-main-snapshot-equivalent"
     assert [phase.name for phase in schedule.phases] == ["collapse", "refine", "relax"]
     assert {phase.optimizer for phase in schedule.phases} == {"COBYLA"}
-    assert {phase.score_model for phase in schedule.phases} == {"pheat-coarse-protein-folding-v1"}
+    assert {phase.score_model for phase in schedule.phases} == {"pheat-custom-energy-v1"}
     assert {phase.score_options["use_end_to_end_constraint"] for phase in schedule.phases} == {True}
     assert {phase.score_options["end_to_end_scale"] for phase in schedule.phases} == {1.0}
     assert {phase.score_options["hydrophobic_burial_denominator"] for phase in schedule.phases} == {35.0}
@@ -1861,7 +1861,7 @@ def test_fold_cli_passes_metric_and_geometry_options_from_recipe():
     from qtf.cli import _build_parser, _qtf_argv
     from qtf.recipes import resolve_recipe
 
-    args = _build_parser().parse_args(["fold", "qtf-heavy-atom-phased", "--sequence", "GA"])
+    args = _build_parser().parse_args(["fold-simulation", "qtf-heavy-atom-phased", "--sequence", "GA"])
     argv = _qtf_argv(args, resolve_recipe("qtf-heavy-atom-phased"))
     assert argv[argv.index("--metric-atom-sets") + 1] == "ca,backbone,all-heavy"
     assert argv[argv.index("--rmsd-alignment-atom-set") + 1] == "same-as-rmsd"
@@ -1875,7 +1875,7 @@ def test_fold_cli_passes_snapshot_options_to_engine():
     from qtf.recipes import resolve_recipe
 
     args = _build_parser().parse_args([
-        "fold",
+        "fold-simulation",
         "qtf-main-snapshot-equivalent",
         "--sequence",
         "GA",
@@ -1897,7 +1897,7 @@ def test_fold_cli_passes_initial_params_options_to_engine(tmp_path):
     from qtf.recipes import resolve_recipe
 
     args = _build_parser().parse_args([
-        "fold",
+        "fold-simulation",
         "qtf-main-snapshot-equivalent",
         "--sequence",
         "GA",
@@ -1916,7 +1916,7 @@ def test_fold_cli_passes_seed_offset_to_engine():
     from qtf.recipes import resolve_recipe
 
     args = _build_parser().parse_args([
-        "fold",
+        "fold-simulation",
         "qtf-main-snapshot-equivalent",
         "--sequence",
         "GA",
@@ -1932,7 +1932,7 @@ def test_fold_cli_passes_replica_count_to_engine():
     from qtf.recipes import resolve_recipe
 
     args = _build_parser().parse_args([
-        "fold",
+        "fold-simulation",
         "qtf-main-snapshot-equivalent",
         "--sequence",
         "GA",
@@ -2067,10 +2067,10 @@ def test_engine_initial_params_select_reads_primary_output_result_dirs(tmp_path)
         ),
         encoding="utf-8",
     )
-    replica_1_dir = tmp_path / "replica_0_primary_outputs"
-    replica_2_dir = tmp_path / "replica_1_primary_outputs"
-    replica_1_dir.mkdir()
-    replica_2_dir.mkdir()
+    replica_1_dir = tmp_path / "replicas" / "replica_0"
+    replica_2_dir = tmp_path / "replicas" / "replica_1"
+    replica_1_dir.mkdir(parents=True)
+    replica_2_dir.mkdir(parents=True)
     (replica_1_dir / "replica_0_result.json").write_text(
         json.dumps({"replica_id": 0, "energy": 8.0, "rmsd_to_reference": 1.0}),
         encoding="utf-8",
@@ -2103,7 +2103,7 @@ def test_fold_cli_passes_length_encoding_options_from_recipe():
         },
         "phases": [{"name": "phase-a", "optimizer": "COBYLA", "score_model": "pheat-physics"}],
     }
-    args = _build_parser().parse_args(["fold", "custom", "--sequence", "GA"])
+    args = _build_parser().parse_args(["fold-simulation", "custom", "--sequence", "GA"])
     argv = _qtf_argv(args, recipe)
     assert argv[argv.index("--store-lengths") + 1] == "backbone"
     assert argv[argv.index("--length-encoding-scope") + 1] == "per-residue"
@@ -2120,7 +2120,7 @@ def test_fold_cli_passes_phase_geometry_option_to_engine():
     }
     args = _build_parser().parse_args(
         [
-            "fold",
+            "fold-simulation",
             "custom",
             "--sequence",
             "GA",
@@ -2140,7 +2140,7 @@ def test_fold_cli_forwards_ibm_auth_options_to_engine():
         "phases": [{"name": "phase-a", "optimizer": "COBYLA", "score_model": "pheat-physics"}],
     }
     args = _build_parser().parse_args([
-        "fold",
+        "fold-simulation",
         "custom",
         "--sequence",
         "GA",
@@ -2173,7 +2173,7 @@ def test_fold_cli_forwards_gate_estimate_backend_crns_to_engine():
         "phases": [{"name": "phase-a", "optimizer": "COBYLA", "score_model": "pheat-physics"}],
     }
     args = _build_parser().parse_args([
-        "fold",
+        "fold-simulation",
         "custom",
         "--sequence",
         "GA",
@@ -2202,7 +2202,7 @@ def test_fold_cli_passes_selective_chi_map_from_recipe():
         },
         "phases": [{"name": "phase-a", "optimizer": "COBYLA", "score_model": "pheat-physics"}],
     }
-    args = _build_parser().parse_args(["fold", "custom", "--sequence", "PW"])
+    args = _build_parser().parse_args(["fold-simulation", "custom", "--sequence", "PW"])
     argv = _qtf_argv(args, recipe)
     assert argv.count("--selective-chi") == 2
     assert "P=chi1" in argv
@@ -2218,7 +2218,7 @@ def test_fold_cli_selective_chi_cli_overrides_recipe():
         "phases": [{"name": "phase-a", "optimizer": "COBYLA", "score_model": "pheat-physics"}],
     }
     args = _build_parser().parse_args(
-        ["fold", "custom", "--sequence", "PW", "--selective-chi", "W=chi1,chi2"]
+        ["fold-simulation", "custom", "--sequence", "PW", "--selective-chi", "W=chi1,chi2"]
     )
     argv = _qtf_argv(args, recipe)
     assert argv.count("--selective-chi") == 1
@@ -2230,9 +2230,9 @@ def test_fold_parser_uses_recipe_language():
     from qtf.cli import _build_parser
 
     help_text = _build_parser().format_help()
-    assert "fold" in help_text
+    assert "fold-simulation" in help_text
 
-    fold_help = _build_parser().parse_args(["fold", "--help"]) if False else None
+    fold_help = _build_parser().parse_args(["fold-simulation", "--help"]) if False else None
     assert fold_help is None
 
 
@@ -2241,7 +2241,7 @@ def test_score_model_names_are_canonical():
 
     models = available_score_models()
     assert "pheat-physics" in models
-    assert "pheat-coarse-protein-folding-v1" in models
+    assert "pheat-custom-energy-v1" in models
     assert "pheat-generic" in models
     assert "pheat-geometry-integrity" in models
     assert "generic" not in models
@@ -2427,9 +2427,20 @@ def test_qtf_copies_pheat_managed_molstar_assets(tmp_path, monkeypatch):
     copied, error = qtf_engine._copy_molstar_assets(tmp_path / "report")
 
     assert error is None
-    assert copied == tmp_path / "report" / "vendor" / "molstar"
+    assert copied == tmp_path / "report" / "report_assets" / "molstar"
     assert (copied / "molstar.js").read_text(encoding="utf-8") == "window.molstar = {};\n"
     assert (copied / "manifest.json").exists()
+
+
+def test_replica_reports_share_job_level_molstar_assets(tmp_path):
+    import qtf.engines.qtf as qtf_engine
+
+    shared = tmp_path / "report_assets" / "molstar"
+    report_0 = tmp_path / "replicas" / "replica_0" / "replica_0_report.html"
+    report_1 = tmp_path / "replicas" / "replica_1" / "replica_1_report.html"
+
+    assert qtf_engine._molstar_asset_href(report_0, shared) == "../../report_assets/molstar"
+    assert qtf_engine._molstar_asset_href(report_1, shared) == "../../report_assets/molstar"
 
 
 def test_qtf_molstar_asset_copy_warns_when_pheat_assets_missing(tmp_path, monkeypatch):
@@ -2537,7 +2548,7 @@ def test_folder_passes_decoded_torsions_to_coarse_pheat_scorer(monkeypatch):
 
         def to_dict(self):
             return {
-                "model": "pheat-coarse-protein-folding-v1",
+                "model": "pheat-custom-energy-v1",
                 "total": 3.0,
                 "units": "arbitrary",
                 "terms": {},
@@ -2552,16 +2563,16 @@ def test_folder_passes_decoded_torsions_to_coarse_pheat_scorer(monkeypatch):
         return FakeScore()
 
     monkeypatch.setattr(folder_mod, "score_pheat_structure", fake_score)
-    folder = QuantumBiophysicsFolder("GAA", score_model="pheat-coarse-protein-folding-v1")
+    folder = QuantumBiophysicsFolder("GAA", score_model="pheat-custom-energy-v1")
     payload, total = folder.score_model_for_params(
         np.zeros(folder.n_params),
-        "pheat-coarse-protein-folding-v1",
+        "pheat-custom-energy-v1",
         angle_mode="statevector",
         options={"hydrophobic_gamma": 15.0},
     )
     assert total == 3.0
     assert payload["status"] == "ok"
-    assert captured["model"] == "pheat-coarse-protein-folding-v1"
+    assert captured["model"] == "pheat-custom-energy-v1"
     assert captured["kwargs"]["hydrophobic_gamma"] == 15.0
     assert "decoded_torsions" in captured["kwargs"]
     assert captured["kwargs"]["decoded_torsions"]

@@ -102,7 +102,7 @@ QTF/
 │   │   ├── accelerate.py    # Numba-jitted distance matrix, electrostatic, VDW, SASA kernels
 │   │   └── gromacs.py       # GROMACS minimisation wrapper and PDB utilities
 │   └── cli/
-│       └── __init__.py      # qtf fold: canonical recipe-driven command
+│       └── __init__.py      # qtf fold-simulation: canonical recipe-driven command
 ├── tests/                   # pytest test suite
 ├── docs/                    # MkDocs documentation source
 ├── .github/

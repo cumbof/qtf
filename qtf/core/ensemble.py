@@ -19,6 +19,8 @@ import tempfile
 from typing import TYPE_CHECKING
 
 import numpy as np
+
+from qtf.utils.paths import relativize_absolute_paths
 from scipy.optimize import minimize
 
 from qtf.core.folder import QuantumBiophysicsFolder
@@ -541,7 +543,7 @@ class EnsembleFoldingManager:
             )
             try:
                 with os.fdopen(fd, "w") as fh:
-                    json.dump(snapshot, fh, indent=2)
+                    json.dump(relativize_absolute_paths(snapshot), fh, indent=2)
                 os.replace(tmp_path, self._checkpoint_path)
             except Exception:
                 try:

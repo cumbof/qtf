@@ -1,0 +1,13 @@
+qtf fold-simulation qtf-main-snapshot-equivalent --sequence YYDPETGTWY --n-runs 1 --max-iter 100 --scout-attempts 5 --top-k-snapshots 2 --snapshot-sort-by energy --seed-mode derived --seed 12345 --outdir run_outputs/chignolin_simulator_smoke
+
+# Random parameters; IBM Runtime automatically selects the least-busy suitable backend.
+qtf fold-hardware --sequence YYDPETGTWY --seed 12345 --channel ibm_quantum_platform --shots 8192 --optimization-level 3 --seed-transpiler 12345 --sampler-max-mitigation --outdir run_outputs/chignolin_hardware_random_least_busy
+
+# Random parameters with a specifically requested IBM backend.
+qtf fold-hardware --sequence YYDPETGTWY --seed 12345 --backend-name ibm_torino --channel ibm_quantum_platform --shots 8192 --optimization-level 3 --seed-transpiler 12345 --sampler-max-mitigation --outdir run_outputs/chignolin_hardware_random_ibm_torino
+
+# Parameters saved by the simulation command above; IBM Runtime automatically selects the least-busy suitable backend.
+qtf fold-hardware --params-json run_outputs/chignolin_simulator_smoke/circuit_parameters --replica-id 0 --channel ibm_quantum_platform --shots 8192 --optimization-level 3 --seed-transpiler 12345 --sampler-max-mitigation --outdir run_outputs/chignolin_hardware_saved_least_busy
+
+# Offline hardware-path smoke test using random parameters and Aer instead of IBM hardware.
+qtf fold-hardware --local-simulator --sequence YYDPETGTWY --seed 12345 --shots 256 --outdir run_outputs/chignolin_hardware_local_smoke

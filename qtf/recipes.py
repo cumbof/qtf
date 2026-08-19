@@ -1,4 +1,4 @@
-"""Recipe loading for the ``qtf fold`` command."""
+"""Recipe loading for the ``qtf fold-simulation`` command."""
 
 from __future__ import annotations
 

@@ -9,7 +9,7 @@ recipes:
         reps: auto
         entanglement: circular
     fold:
-      description: Default outer-loop controls used by qtf fold before phase-specific overrides are applied.
+      description: Default outer-loop controls used by qtf fold-simulation before phase-specific overrides are applied.
       force_field: protein-coarse-charge-v1
       max_iter: 2000
       scout_attempts: 50
@@ -32,14 +32,14 @@ recipes:
     result:
       description: Score and select the final phase structure with the PHEAT coarse protein folding objective.
       primary: last_phase_structure
-      score_model: pheat-coarse-protein-folding-v1
+      score_model: pheat-custom-energy-v1
       score_options:
         charge_profile: protein-coarse-charge-v1
         hydrophobic_gamma: 2.5
         end_to_end_weight: 1.5
     scouting:
       description: Generate collapsed starting candidates using a stronger hydrophobic/end-to-end bias.
-      score_model: pheat-coarse-protein-folding-v1
+      score_model: pheat-custom-energy-v1
       backend: inherit
       shots: null
       attempts: 50
@@ -52,7 +52,7 @@ recipes:
         label: Mechanical collapse
         description: Drive the chain into a compact starting shape before refinement.
         optimizer: COBYLA
-        score_model: pheat-coarse-protein-folding-v1
+        score_model: pheat-custom-energy-v1
         optimizer_backend: inherit
         readout_backend: inherit
         shots: null
@@ -67,7 +67,7 @@ recipes:
         label: Physics refinement
         description: Improve the collapsed structure with the same strong coarse objective.
         optimizer: SLSQP
-        score_model: pheat-coarse-protein-folding-v1
+        score_model: pheat-custom-energy-v1
         optimizer_backend: inherit
         readout_backend: inherit
         shots: null
@@ -83,7 +83,7 @@ recipes:
         label: Natural relaxation
         description: Reduce the coarse bias and relax toward the final PHEAT coarse physics score.
         optimizer: SLSQP
-        score_model: pheat-coarse-protein-folding-v1
+        score_model: pheat-custom-energy-v1
         optimizer_backend: inherit
         readout_backend: inherit
         shots: null
@@ -107,7 +107,7 @@ recipes:
         reps: auto
         entanglement: circular
     fold:
-      description: Default outer-loop controls used by qtf fold before phase-specific overrides are applied.
+      description: Default outer-loop controls used by qtf fold-simulation before phase-specific overrides are applied.
       force_field: protein-coarse-charge-v1
       max_iter: 2000
       scout_attempts: 50
@@ -130,7 +130,7 @@ recipes:
     result:
       description: Score the retained structure with the same coarse protein-folding objective used for the final stage.
       primary: last_phase_structure
-      score_model: pheat-coarse-protein-folding-v1
+      score_model: pheat-custom-energy-v1
       score_options:
         charge_profile: protein-coarse-charge-v1
         hydrophobic_gamma: 2.5
@@ -180,7 +180,7 @@ recipes:
         - gromacs_minimize
     scouting:
       description: Generate collapsed starting candidates using a stronger hydrophobic/end-to-end bias.
-      score_model: pheat-coarse-protein-folding-v1
+      score_model: pheat-custom-energy-v1
       backend: inherit
       shots: null
       attempts: 50
@@ -197,7 +197,7 @@ recipes:
         label: Mechanical collapse
         description: Drive the chain into a compact starting shape before refinement.
         optimizer: COBYLA
-        score_model: pheat-coarse-protein-folding-v1
+        score_model: pheat-custom-energy-v1
         optimizer_backend: inherit
         readout_backend: inherit
         shots: null
@@ -216,7 +216,7 @@ recipes:
         label: Physics refinement
         description: Continue optimizing the strong coarse objective.
         optimizer: COBYLA
-        score_model: pheat-coarse-protein-folding-v1
+        score_model: pheat-custom-energy-v1
         optimizer_backend: inherit
         readout_backend: inherit
         shots: null
@@ -235,7 +235,7 @@ recipes:
         label: Natural relaxation
         description: Reduce the coarse bias and relax toward the final PHEAT coarse physics score.
         optimizer: COBYLA
-        score_model: pheat-coarse-protein-folding-v1
+        score_model: pheat-custom-energy-v1
         optimizer_backend: inherit
         readout_backend: inherit
         shots: null

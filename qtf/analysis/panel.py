@@ -7,6 +7,8 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from qtf.utils.paths import relativize_absolute_paths, write_portable_csv
+
 
 logger = logging.getLogger(__name__)
 
@@ -325,28 +327,28 @@ def collect_panel_results(root: Path, outdir: Path) -> Dict[str, Path]:
     written = {}
     if not beam_df.empty:
         written["master_beam_rows"] = outdir / "master_beam_rows.csv"
-        beam_df.to_csv(written["master_beam_rows"], index=False)
+        write_portable_csv(beam_df, written["master_beam_rows"])
         logger.info("Wrote %s (%d rows)", written["master_beam_rows"], len(beam_df))
     else:
         logger.warning("no beam rows found")
 
     if not native_df.empty:
         written["master_native_rows"] = outdir / "master_native_rows.csv"
-        native_df.to_csv(written["master_native_rows"], index=False)
+        write_portable_csv(native_df, written["master_native_rows"])
         logger.info("Wrote %s (%d rows)", written["master_native_rows"], len(native_df))
     else:
         logger.warning("no native rows found")
 
     if not manifest_df.empty:
         written["master_grid_manifest"] = outdir / "master_grid_manifest.csv"
-        manifest_df.to_csv(written["master_grid_manifest"], index=False)
+        write_portable_csv(manifest_df, written["master_grid_manifest"])
         logger.info("Wrote %s (%d rows)", written["master_grid_manifest"], len(manifest_df))
     else:
         logger.warning("no manifest rows found")
 
     if not summary_df.empty:
         written["master_experiment_summary"] = outdir / "master_experiment_summary.csv"
-        summary_df.to_csv(written["master_experiment_summary"], index=False)
+        write_portable_csv(summary_df, written["master_experiment_summary"])
         logger.info("Wrote %s (%d rows)", written["master_experiment_summary"], len(summary_df))
     else:
         logger.warning("no summary rows built")
@@ -441,7 +443,7 @@ def build_corrected_summary(beam_csv: Path, native_csv: Path, manifest_csv: Path
 
     merged["native_beats_best_energy"] = merged["native_total_energy"] < merged["best_energy"]
     merged["native_beats_best_rmsd_energy"] = merged["native_total_energy"] < merged["best_rmsd_energy"]
-    merged.to_csv(outdir / "master_experiment_summary_corrected.csv", index=False)
+    write_portable_csv(merged, outdir / "master_experiment_summary_corrected.csv")
 
     protein_summary = (
         merged.groupby("protein_name", dropna=False)
@@ -460,7 +462,7 @@ def build_corrected_summary(beam_csv: Path, native_csv: Path, manifest_csv: Path
         )
         .reset_index()
     )
-    protein_summary.to_csv(outdir / "protein_level_summary_corrected.csv", index=False)
+    write_portable_csv(protein_summary, outdir / "protein_level_summary_corrected.csv")
     return beam, native, merged
 
 
@@ -494,7 +496,7 @@ def _save_term_correlations(beam: pd.DataFrame, summary: pd.DataFrame, outdir: P
                 "spearman_r": sub[c].corr(sub["rmsd_to_reference_A"], method="spearman"),
             })
         corr_df = pd.DataFrame(corr_rows).sort_values("spearman_r")
-        corr_df.to_csv(outdir / "term_correlations_overall.csv", index=False)
+        write_portable_csv(corr_df, outdir / "term_correlations_overall.csv")
 
         if not corr_df.empty:
             plt.figure(figsize=(8, max(4, 0.28 * len(corr_df))))
@@ -524,7 +526,7 @@ def _save_term_correlations(beam: pd.DataFrame, summary: pd.DataFrame, outdir: P
                 "spearman_r": sub[c].corr(sub["rmsd_to_reference_A"], method="spearman"),
             })
         corr_good = pd.DataFrame(corr_rows).sort_values("spearman_r")
-        corr_good.to_csv(outdir / "term_correlations_good_rebuild_only.csv", index=False)
+        write_portable_csv(corr_good, outdir / "term_correlations_good_rebuild_only.csv")
 
         if not corr_good.empty:
             plt.figure(figsize=(8, max(4, 0.28 * len(corr_good))))
@@ -564,13 +566,13 @@ def save_ranked_parameter_sets(summary: pd.DataFrame, outdir: Path):
         ["score", "mean_ranking_gap", "mean_best_rmsd", "min_best_rmsd"]
     ).reset_index(drop=True)
 
-    grouped.to_csv(outdir / "grid_ranked_parameter_sets.csv", index=False)
+    write_portable_csv(grouped, outdir / "grid_ranked_parameter_sets.csv")
 
 
 def make_plots(beam: pd.DataFrame, summary: pd.DataFrame, outdir: Path):
     if not summary.empty and "native_rebuild_ca_rmsd" in summary.columns:
         rebuild = summary[["protein_name", "reference_pdb_id", "native_rebuild_ca_rmsd"]].drop_duplicates().sort_values("protein_name")
-        rebuild.to_csv(outdir / "native_rebuild_quality.csv", index=False)
+        write_portable_csv(rebuild, outdir / "native_rebuild_quality.csv")
         plt.figure(figsize=(8, 4.5))
         plt.bar(rebuild["protein_name"], rebuild["native_rebuild_ca_rmsd"])
         plt.axhline(GOOD_REBUILD_THRESH, linestyle="--")
@@ -603,12 +605,14 @@ def make_plots(beam: pd.DataFrame, summary: pd.DataFrame, outdir: Path):
             "hbond_scale", "sasa_scale", "vdw_rep_scale", "vdw_attr_scale",
             "rotamer_scale", "pi_stack_scale", "best_rmsd", "best_energy_rmsd", "ranking_gap"
         ] if c in summary.columns]
-        summary[gap_cols].copy().to_csv(outdir / "ranking_gap_summary.csv", index=False)
-        summary.sort_values(["protein_name", "best_rmsd", "ranking_gap"]).groupby("protein_name", dropna=False).head(5).to_csv(
-            outdir / "slide_top5_by_best_rmsd.csv", index=False
+        write_portable_csv(summary[gap_cols].copy(), outdir / "ranking_gap_summary.csv")
+        write_portable_csv(
+            summary.sort_values(["protein_name", "best_rmsd", "ranking_gap"]).groupby("protein_name", dropna=False).head(5),
+            outdir / "slide_top5_by_best_rmsd.csv",
         )
-        summary.sort_values(["protein_name", "ranking_gap", "best_rmsd"]).groupby("protein_name", dropna=False).head(5).to_csv(
-            outdir / "slide_top5_by_ranking_gap.csv", index=False
+        write_portable_csv(
+            summary.sort_values(["protein_name", "ranking_gap", "best_rmsd"]).groupby("protein_name", dropna=False).head(5),
+            outdir / "slide_top5_by_ranking_gap.csv",
         )
 
     if not beam.empty and "rmsd_to_reference_A" in beam.columns and "energy" in beam.columns:
@@ -639,11 +643,11 @@ def analyze_collected_results(indir: Path, outdir: Path):
     beam, native, summary = build_corrected_summary(beam_csv, native_csv, manifest_csv, outdir)
     make_plots(beam, summary, outdir)
     save_ranked_parameter_sets(summary, outdir)
-    (outdir / "analysis_run_info.json").write_text(json.dumps({
+    (outdir / "analysis_run_info.json").write_text(json.dumps(relativize_absolute_paths({
         "indir": str(indir),
         "outdir": str(outdir),
         "files_written": sorted([p.name for p in outdir.iterdir() if p.is_file()]),
-    }, indent=2))
+    }), indent=2))
 
 
 def run_panel_analysis(root: Path, outdir: Path):

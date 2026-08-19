@@ -143,6 +143,9 @@ qtf/
 | `qiskit-aer` | 0.14 | GPU/CPU statevector simulation backend |
 | `plotly` | 5.18 | Interactive 3-D and 2-D Plotly figures |
 | `pandas` | 2.0 | Per-replica statistics `DataFrame`; CSV export |
+| `pheat` | 0.2 | Heavy-atom reconstruction, scoring, external-engine preparation, and report assets |
+| `PyYAML` | — | Recipe loading |
+| `jsonschema` | — | Recipe and structured-output validation |
 
 Optional extras:
 
@@ -159,9 +162,9 @@ Optional extras:
 > QTF's default `custom` energy backend works out of the box — no additional dependencies required.
 >
 > - External physics engines are configured in fold recipes through PHEAT scorer/evaluator options.
-> - **OpenMM** is intentionally not included in QTF's pip extras. Install it via conda-forge when using OpenMM-backed PHEAT evaluators:
+> - **OpenMM/PDBFixer** are intentionally not included in QTF's pip extras. Install them via conda-forge when using OpenMM-backed PHEAT evaluators:
 >   ```bash
->   conda install -c conda-forge openmm
+>   conda install -c conda-forge openmm pdbfixer
 >   ```
 > - **GROMACS** (used by PHEAT external validation recipes and `gromacs_postprocess_structure()`) must be available as `gmx` or `gmx_mpi`. It can be installed system-wide on `PATH`, or inside the active conda environment:
 >   ```bash
@@ -171,6 +174,12 @@ Optional extras:
 >   ```bash
 >   which gmx
 >   gmx --version
+>   ```
+> - Per-replica HTML reports use PHEAT-managed **Mol\*** browser assets. Node/npm is required only to download the pinned assets; it is not needed to open completed reports because one shared bundle is copied to `report_assets/molstar` in each job directory:
+>   ```bash
+>   conda install -c conda-forge nodejs
+>   pheat molstar install
+>   pheat molstar status
 >   ```
 
 ---
@@ -199,10 +208,10 @@ pip install -e ".[dev,workflows]"
 
 QTF installs one canonical command, `qtf`.
 
-### `qtf fold` — recipe-driven folding
+### `qtf fold-simulation` — recipe-driven folding
 
 ```bash
-qtf fold qtf-main-equivalent \
+qtf fold-simulation qtf-main-equivalent \
   --sequence YYDPETGTWY \
   --reference-structure pdb/5AWL.pdb \
   --outdir outputs/example_fold
@@ -215,12 +224,12 @@ backend execution.
 Useful discovery commands:
 
 ```bash
-qtf fold --list-recipes
-qtf fold --show-recipe qtf-main-equivalent
+qtf fold-simulation --list-recipes
+qtf fold-simulation --show-recipe qtf-main-equivalent
 ```
 
-`qtf fold` runs named YAML recipes. The built-in main-equivalent recipe uses
-PHEAT geometry/scoring through the native `pheat-coarse-protein-folding-v1` scorer and reports
+`qtf fold-simulation` runs named YAML recipes. The built-in main-equivalent recipe uses
+PHEAT geometry/scoring through the native `pheat-custom-energy-v1` scorer and reports
 RMSD only when a reference structure is provided.
 
 Completed fold runs also save final circuit parameters under
@@ -229,7 +238,7 @@ Completed fold runs also save final circuit parameters under
 or hardware runs:
 
 ```bash
-qtf fold qtf-main-equivalent \
+qtf fold-simulation qtf-main-equivalent \
   --sequence YYDPETGTWY \
   --reference-structure pdb/5AWL.pdb \
   --initial-params outputs/example_fold \
@@ -1010,19 +1019,6 @@ m2.run_ensemble(n_runs=3, max_iter=500)
 for i in range(3):
     assert m1.results[i]["energy"] == m2.results[i]["energy"]  # ✓
 ```
-
-To isolate the effect of energy backend on folding outcome:
-
-```python
-for backend in ("custom", "rosetta", "openmm"):
-    folder = QuantumBiophysicsFolder("YYDPETGTWY")
-    manager = EnsembleFoldingManager(folder)
-    manager.run_ensemble(n_runs=5, max_iter=2000, scout_attempts=50)
-    # All three runs start from the same initial geometries,
-    # so differences in results are due to the scoring backend.
-```
-
----
 
 ## Logging
 

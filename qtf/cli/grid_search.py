@@ -30,9 +30,6 @@ RANDOM_SEED = 42
 ENERGY_BACKEND = "custom"
 USE_E2E_CONSTRAINT = 1
 E2E_SCALE = 1.0
-ROSETTA_REPACK = 0
-ROSETTA_FA_MIN = 0
-ROSETTA_CEN_MIN = 0
 
 HBOND_SCALE = [0.75]
 SASA_SCALE = [0.7]
@@ -104,15 +101,12 @@ def main(argv=None):
     ap.add_argument("--max_sidechain_opts_per_residue", type=int, default=MAX_SIDECHAIN_OPTS)
     ap.add_argument("--rmsd_mode", default="ca", choices=["ca", "heavy"])
     ap.add_argument("--rmsd_residue_scope", default="core", choices=["core", "all"])
-    ap.add_argument("--energy_backend", default=ENERGY_BACKEND, choices=["custom", "rosetta", "openmm"])
+    ap.add_argument("--energy_backend", default=ENERGY_BACKEND, choices=["custom", "openmm"])
     ap.add_argument("--use_e2e_constraint", type=int, default=USE_E2E_CONSTRAINT)
     ap.add_argument("--e2e_scale", type=float, default=E2E_SCALE)
     ap.add_argument("--gromacs_minimize", type=int, default=None,
                     help="Override the default GROMACS postprocess behavior; when omitted, GROMACS minimization is enabled for all backends.")
     ap.add_argument("--hard_clash_reject_A", type=float, default=0.75)
-    ap.add_argument("--rosetta_repack", type=int, default=ROSETTA_REPACK)
-    ap.add_argument("--rosetta_fa_min", type=int, default=ROSETTA_FA_MIN)
-    ap.add_argument("--rosetta_cen_min", type=int, default=ROSETTA_CEN_MIN)
     ap.add_argument("--only_proteins", nargs="*", default=[])
     ap.add_argument("--skip_existing", action=argparse.BooleanOptionalAction, default=True)
     args = ap.parse_args(argv)
@@ -193,9 +187,6 @@ def main(argv=None):
                 "e2e_scale": args.e2e_scale,
                 "gromacs_minimize": resolved_gromacs_minimize,
                 "hard_clash_reject_A": args.hard_clash_reject_A,
-                "rosetta_repack": args.rosetta_repack,
-                "rosetta_fa_min": args.rosetta_fa_min,
-                "rosetta_cen_min": args.rosetta_cen_min,
                 "grid_json": args.grid_json or "",
                 **params,
             }
@@ -223,9 +214,6 @@ def main(argv=None):
                     "--e2e_scale", str(args.e2e_scale),
                     "--gromacs_minimize", str(resolved_gromacs_minimize),
                     "--hard_clash_reject_A", str(args.hard_clash_reject_A),
-                    "--rosetta_repack", str(args.rosetta_repack),
-                    "--rosetta_fa_min", str(args.rosetta_fa_min),
-                    "--rosetta_cen_min", str(args.rosetta_cen_min),
                     "--reference_pdb", pdb_path,
                     "--outdir", str(beam_dir),
                 ]
@@ -241,9 +229,6 @@ def main(argv=None):
                     "--use_e2e_constraint", str(args.use_e2e_constraint),
                     "--e2e_scale", str(args.e2e_scale),
                     "--gromacs_minimize", str(resolved_gromacs_minimize),
-                    "--rosetta_repack", str(args.rosetta_repack),
-                    "--rosetta_fa_min", str(args.rosetta_fa_min),
-                    "--rosetta_cen_min", str(args.rosetta_cen_min),
                     "--out_csv", str(native_csv),
                     "--out_json", str(native_dir / f"{name}_native_score.json"),
                 ]

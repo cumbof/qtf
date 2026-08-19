@@ -17,7 +17,7 @@ _PASSTHROUGH_COMMANDS = {
     "grid-search": "qtf.cli.grid_search",
     "relax": "qtf.cli.relax",
     "vmd-trajectory": "qtf.cli.make_vmd_trajectory",
-    "hardware-forward": "qtf.core.hardware_forward",
+    "fold-hardware": "qtf.core.hardware",
 }
 
 
@@ -27,8 +27,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _run_passthrough(argv[0], argv[1:])
     parser = _build_parser()
     args = parser.parse_args(argv)
-    if args.command == "fold":
-        return _fold(args)
+    if args.command == "fold-simulation":
+        return _fold_simulation(args)
     if args.command in _PASSTHROUGH_COMMANDS:
         return _run_passthrough(args.command, getattr(args, "args", []))
     parser.print_help()
@@ -38,7 +38,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="qtf")
     sub = parser.add_subparsers(dest="command")
-    fold = sub.add_parser("fold", help="Run a QTF fold recipe.")
+    fold = sub.add_parser("fold-simulation", help="Optimize and rebuild a QTF structure using simulation.")
     fold.add_argument("recipe_name", nargs="?")
     fold.add_argument("--recipe-file", default=None, help="YAML file containing additional or overriding recipes.")
     fold.add_argument("--list-recipes", action="store_true")
@@ -188,7 +188,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ("grid-search", "Run a parameter grid-search workflow."),
         ("relax", "Run GROMACS relaxation through QTF utilities."),
         ("vmd-trajectory", "Create a VMD-compatible multi-model PDB."),
-        ("hardware-forward", "Execute saved circuit parameters on a sampler backend."),
+        ("fold-hardware", "Execute a QTF circuit on IBM hardware and rebuild the measured structure."),
     ]:
         passthrough = sub.add_parser(command, help=help_text)
         passthrough.add_argument("args", nargs=argparse.REMAINDER)
@@ -202,7 +202,7 @@ def _run_passthrough(command: str, argv: Sequence[str]) -> int:
     return int(result or 0)
 
 
-def _fold(args) -> int:
+def _fold_simulation(args) -> int:
     recipes = load_recipes(args.recipe_file)
     if args.list_recipes:
         for name in sorted(recipes):
@@ -212,7 +212,7 @@ def _fold(args) -> int:
         _print_recipe(args.show_recipe, args.recipe_file)
         return 0
     if not args.recipe_name:
-        raise SystemExit("qtf fold requires a recipe name unless --list-recipes or --show-recipe is used.")
+        raise SystemExit("qtf fold-simulation requires a recipe name unless --list-recipes or --show-recipe is used.")
 
     recipe = resolve_recipe(args.recipe_name, args.recipe_file)
     _apply_common_recipe_overrides(recipe, args)

@@ -8,6 +8,8 @@ import json
 import os
 import sys
 from pathlib import Path
+
+from qtf.utils.paths import relativize_absolute_paths, write_portable_csv
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -32,12 +34,9 @@ def main(argv=None):
                     help="RMSD atom selection: all CA atoms or all heavy atoms")
     ap.add_argument("--rmsd_residue_scope", default="core", choices=["core", "all"],
                     help="Residue range used for RMSD; core excludes the first and last residues")
-    ap.add_argument("--energy_backend", default="custom", choices=["custom", "rosetta", "openmm"])
+    ap.add_argument("--energy_backend", default="custom", choices=["custom", "openmm"])
     ap.add_argument("--use_e2e_constraint", type=int, default=1)
     ap.add_argument("--e2e_scale", type=float, default=1.0)
-    ap.add_argument("--rosetta_repack", type=int, default=0)
-    ap.add_argument("--rosetta_fa_min", type=int, default=0)
-    ap.add_argument("--rosetta_cen_min", type=int, default=0)
     ap.add_argument("--gromacs_minimize", type=int, default=None,
                     help="1 to add hydrogens/topology and minimize the rebuilt native structure with GROMACS")
     ap.add_argument("--gromacs_forcefield", default="amber99sb-ildn")
@@ -80,9 +79,6 @@ def main(argv=None):
                     energy_backend=args.energy_backend,
                     use_e2e_constraint=bool(args.use_e2e_constraint),
                     e2e_scale=args.e2e_scale,
-                    rosetta_repack=bool(args.rosetta_repack),
-                    rosetta_fa_min=bool(args.rosetta_fa_min),
-                    rosetta_cen_min=bool(args.rosetta_cen_min),
                     gromacs_minimize=bool(args.gromacs_minimize),
                     gromacs_forcefield=args.gromacs_forcefield,
                     gromacs_water=args.gromacs_water,
@@ -113,9 +109,6 @@ def main(argv=None):
                 energy_backend=args.energy_backend,
                 use_e2e_constraint=bool(args.use_e2e_constraint),
                 e2e_scale=args.e2e_scale,
-                rosetta_repack=bool(args.rosetta_repack),
-                rosetta_fa_min=bool(args.rosetta_fa_min),
-                rosetta_cen_min=bool(args.rosetta_cen_min),
                 gromacs_minimize=bool(args.gromacs_minimize),
                 gromacs_forcefield=args.gromacs_forcefield,
                 gromacs_water=args.gromacs_water,
@@ -130,10 +123,10 @@ def main(argv=None):
 
     df = pd.DataFrame(rows)
     Path(args.out_csv).parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(args.out_csv, index=False)
+    write_portable_csv(df, args.out_csv)
 
     if args.out_json:
-        Path(args.out_json).write_text(json.dumps(rows, indent=2))
+        Path(args.out_json).write_text(json.dumps(relativize_absolute_paths(rows), indent=2))
 
     print(df.to_string(index=False))
     print(f"\nWrote {args.out_csv}")

@@ -5,9 +5,9 @@ from qtf.analysis.aggregate_results import aggregate_job_outputs
 
 
 def _write_replica(root, replica_id, energy, rmsd):
-    primary = root / f"replica_{replica_id}_primary_outputs"
-    primary.mkdir()
-    pdb = primary / f"replica_{replica_id}.pdb"
+    primary = root / "replicas" / f"replica_{replica_id}"
+    primary.mkdir(parents=True)
+    pdb = primary / f"replica_{replica_id}_final.pdb"
     pdb.write_text("ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00           C\nEND\n")
     result = {
         "replica_id": replica_id,
@@ -15,10 +15,10 @@ def _write_replica(root, replica_id, energy, rmsd):
         "sequence": "AA",
         "recipe": "qtf-main-snapshot-equivalent",
         "objective_total": energy,
-        "optimizer_objective": "pheat-coarse-protein-folding-v1",
+        "optimizer_objective": energy,
         "score_total": energy,
         "score_units": "arbitrary",
-        "result_score_model": "pheat-coarse-protein-folding-v1",
+        "result_score_model": "pheat-custom-energy-v1",
         "rmsd_to_reference_A": rmsd,
         "pdb_path": str(pdb),
         "structure_snapshots": [
@@ -47,7 +47,7 @@ def test_aggregate_job_outputs_writes_ranked_relative_indexes(tmp_path):
     with (tmp_path / "ensemble_ranked.csv").open(newline="") as handle:
         rows = list(csv.DictReader(handle))
     assert [int(row["replica_id"]) for row in rows] == [1, 0]
-    assert rows[0]["pdb_path"] == "replica_1_primary_outputs/replica_1.pdb"
+    assert rows[0]["pdb_path"] == "replicas/replica_1/replica_1_final.pdb"
     assert not rows[0]["pdb_path"].startswith("/")
     assert (tmp_path / "ensemble_ranked.json").is_file()
     assert (tmp_path / "ensemble_ranked.pdb").is_file()
@@ -56,3 +56,9 @@ def test_aggregate_job_outputs_writes_ranked_relative_indexes(tmp_path):
     assert (tmp_path / "snapshot_ranked.pdb").is_file()
     assert (tmp_path / "summary_results.csv").is_file()
     assert (tmp_path / "summary_results.json").is_file()
+    with (tmp_path / "summary_results.csv").open(newline="") as handle:
+        summary = next(csv.DictReader(handle))
+    assert summary["Objective Model"] == "pheat-custom-energy-v1"
+    assert summary["Best Objective"] == "2.0"
+    assert not (tmp_path / "replicas" / "replica_0" / "ensemble_ranked.pdb").exists()
+    assert not (tmp_path / "replicas" / "replica_0" / "snapshots" / "snapshot_ranked.pdb").exists()

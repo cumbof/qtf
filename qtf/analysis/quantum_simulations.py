@@ -24,9 +24,12 @@ import json
 import logging
 import os
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
+
+from qtf.utils.paths import relativize_absolute_paths, write_portable_csv
 
 import numpy as np
 import pandas as pd
@@ -963,7 +966,7 @@ def compute_term_correlations(final_df: pd.DataFrame, snapshot_sample: pd.DataFr
 
 
 def _require_matplotlib():
-    os.environ.setdefault("MPLCONFIGDIR", "/tmp/qtf_matplotlib")
+    os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "qtf_matplotlib"))
     Path(os.environ["MPLCONFIGDIR"]).mkdir(parents=True, exist_ok=True)
     import matplotlib.pyplot as plt
     return plt
@@ -1478,7 +1481,7 @@ def write_native_like_summary_table(outdir: Path, backend_summary: pd.DataFrame)
     table_df = pd.DataFrame(rows)
     if table_df.empty:
         return
-    table_df.to_csv(outdir / "energy_function_native_like_summary_table.csv", index=False)
+    write_portable_csv(table_df, outdir / "energy_function_native_like_summary_table.csv")
 
     display_cols = [
         "Protein",
@@ -1726,7 +1729,7 @@ def regenerate_plots_from_existing(outdir: Path, *, native_threshold: float) -> 
     physics_summary_path = outdir / "snapshot_physics_summary.csv"
     physics_summary = pd.read_csv(physics_summary_path) if physics_summary_path.exists() else build_snapshot_physics_summary(outdir)
     if not physics_summary.empty:
-        physics_summary.to_csv(physics_summary_path, index=False)
+        write_portable_csv(physics_summary, physics_summary_path)
     best_snapshot_physics_path = outdir / "best_snapshot_physics_summary.csv"
     best_snapshot_physics = (
         pd.read_csv(best_snapshot_physics_path)
@@ -1734,9 +1737,9 @@ def regenerate_plots_from_existing(outdir: Path, *, native_threshold: float) -> 
         else build_best_snapshot_physics_summary(final_vs_best)
     )
     if not best_snapshot_physics.empty:
-        best_snapshot_physics.to_csv(best_snapshot_physics_path, index=False)
+        write_portable_csv(best_snapshot_physics, best_snapshot_physics_path)
     backend_summary = add_physics_to_backend_summary(backend_summary, final_df, physics_summary, best_snapshot_physics)
-    backend_summary.to_csv(outdir / "backend_summary.csv", index=False)
+    write_portable_csv(backend_summary, outdir / "backend_summary.csv")
     write_native_like_summary_table(outdir, backend_summary)
     make_plots(
         outdir,
@@ -1754,7 +1757,9 @@ def regenerate_plots_from_existing(outdir: Path, *, native_threshold: float) -> 
         "native_threshold": native_threshold,
         "plots_written": sorted(p.name for p in (outdir / "plots").iterdir()) if (outdir / "plots").exists() else [],
     }
-    (outdir / "plot_regeneration_info.json").write_text(json.dumps(info, indent=2))
+    (outdir / "plot_regeneration_info.json").write_text(
+        json.dumps(relativize_absolute_paths(info), indent=2)
+    )
     return info
 
 
@@ -1780,10 +1785,10 @@ def run_analysis(
         ]
 
     manifest = selected_runs_to_frame(selected, missing)
-    manifest.to_csv(outdir / "selected_run_manifest.csv", index=False)
+    write_portable_csv(manifest, outdir / "selected_run_manifest.csv")
 
     final_df = collect_final_models(selected)
-    final_df.to_csv(outdir / "final_models.csv", index=False)
+    write_portable_csv(final_df, outdir / "final_models.csv")
 
     if skip_snapshots:
         best_snapshots = pd.DataFrame()
@@ -1799,19 +1804,19 @@ def run_analysis(
             max_funnel_points_per_group=max_funnel_points_per_group,
             rng_seed=rng_seed,
         )
-        best_snapshots.to_csv(outdir / "best_snapshots_by_task.csv", index=False)
-        snapshot_summary.to_csv(outdir / "snapshot_task_summary.csv", index=False)
-        global_top.to_csv(outdir / "global_top_snapshots.csv", index=False)
-        snapshot_sample.to_csv(outdir / "funnel_snapshot_points.csv", index=False)
+        write_portable_csv(best_snapshots, outdir / "best_snapshots_by_task.csv")
+        write_portable_csv(snapshot_summary, outdir / "snapshot_task_summary.csv")
+        write_portable_csv(global_top, outdir / "global_top_snapshots.csv")
+        write_portable_csv(snapshot_sample, outdir / "funnel_snapshot_points.csv")
         final_vs_best = build_final_vs_best(final_df, best_snapshots)
-        final_vs_best.to_csv(outdir / "final_vs_best_snapshot.csv", index=False)
+        write_portable_csv(final_vs_best, outdir / "final_vs_best_snapshot.csv")
 
     snapshot_physics_summary = build_snapshot_physics_summary(outdir)
     if not snapshot_physics_summary.empty:
-        snapshot_physics_summary.to_csv(outdir / "snapshot_physics_summary.csv", index=False)
+        write_portable_csv(snapshot_physics_summary, outdir / "snapshot_physics_summary.csv")
     best_snapshot_physics_summary = build_best_snapshot_physics_summary(final_vs_best)
     if not best_snapshot_physics_summary.empty:
-        best_snapshot_physics_summary.to_csv(outdir / "best_snapshot_physics_summary.csv", index=False)
+        write_portable_csv(best_snapshot_physics_summary, outdir / "best_snapshot_physics_summary.csv")
 
     backend_summary = build_backend_summary(final_df, final_vs_best, snapshot_summary)
     backend_summary = add_physics_to_backend_summary(
@@ -1820,11 +1825,11 @@ def run_analysis(
         snapshot_physics_summary,
         best_snapshot_physics_summary,
     )
-    backend_summary.to_csv(outdir / "backend_summary.csv", index=False)
+    write_portable_csv(backend_summary, outdir / "backend_summary.csv")
 
     term_corr, snapshot_corr = compute_term_correlations(final_df, snapshot_sample)
-    term_corr.to_csv(outdir / "term_correlations_final.csv", index=False)
-    snapshot_corr.to_csv(outdir / "snapshot_energy_correlations.csv", index=False)
+    write_portable_csv(term_corr, outdir / "term_correlations_final.csv")
+    write_portable_csv(snapshot_corr, outdir / "snapshot_energy_correlations.csv")
 
     make_plots(
         outdir,
@@ -1851,7 +1856,9 @@ def run_analysis(
         "files_written": sorted(p.name for p in outdir.iterdir() if p.is_file()),
         "plots_written": sorted(p.name for p in (outdir / "plots").iterdir()) if (outdir / "plots").exists() else [],
     }
-    (outdir / "analysis_run_info.json").write_text(json.dumps(info, indent=2))
+    (outdir / "analysis_run_info.json").write_text(
+        json.dumps(relativize_absolute_paths(info), indent=2)
+    )
     return info
 
 
@@ -1895,4 +1902,3 @@ def main(argv: Optional[list[str]] = None) -> None:
 
 if __name__ == "__main__":
     main()
-
