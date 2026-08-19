@@ -592,5 +592,5 @@ class TestPdbIdFromPath:
     def test_local_pdb_path_with_subdirs(self):
         from qtf.utils.workflow import pdb_id_from_path
         assert pdb_id_from_path(
-            "/home/user/experimental_structures/pdb_files/6LYT.pdb"
+            "experimental_structures/pdb_files/6LYT.pdb"
         ) == "6LYT"

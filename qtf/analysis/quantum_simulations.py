@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
@@ -963,7 +964,7 @@ def compute_term_correlations(final_df: pd.DataFrame, snapshot_sample: pd.DataFr
 
 
 def _require_matplotlib():
-    os.environ.setdefault("MPLCONFIGDIR", "/tmp/qtf_matplotlib")
+    os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "qtf_matplotlib"))
     Path(os.environ["MPLCONFIGDIR"]).mkdir(parents=True, exist_ok=True)
     import matplotlib.pyplot as plt
     return plt
