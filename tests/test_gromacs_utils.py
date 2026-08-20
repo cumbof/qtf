@@ -29,6 +29,8 @@ def test_minimize_pdb_with_gromacs_compacts_successful_workdir(tmp_path, monkeyp
             (cwd / "em.gro").write_text("gro\n")
             (cwd / "em.edr").write_text("edr\n")
             (cwd / "em.log").write_text("Maximum force     =  9.0e+01\nconverged to Fmax < 100\n")
+            with open(log_path, "a", encoding="utf-8") as handle:
+                handle.write("Maximum force     =  9.0e+01\nconverged to Fmax < 100\n")
         elif command == "energy":
             Path(cmd[5]).write_text("@ title\n0 -123.4\n")
         elif command == "editconf":

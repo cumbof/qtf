@@ -603,7 +603,7 @@ class TestGetAnglesGlobalPhase:
             angles = f._get_angles(params)
             assert angles[0] == pytest.approx(0.0, abs=1e-10)
 
-    def test_global_phase_shift_gives_identical_angles(self):
+    def test_global_phase_shift_gives_identical_angles(self, monkeypatch):
         """A statevector multiplied by e^{iα} must yield the same angles."""
         f = QuantumBiophysicsFolder("GAV")
         params = np.ones(f.n_params) * 0.3
@@ -614,15 +614,15 @@ class TestGetAnglesGlobalPhase:
         )).data
         angles_orig = f._get_angles(params)
 
-        # Manually apply the global-phase correction to a phase-shifted copy
+        import qtf.core.folder as folder_module
+
+        # Exercise the production decoder with globally shifted statevectors.
         for alpha in (0.5, 1.234, -2.0, np.pi):
             psi_shifted = np.exp(1j * alpha) * psi
-            phases_shifted = np.angle(psi_shifted)[: f.total_angles]
-            angles_manual = (
-                phases_shifted - np.angle(psi_shifted[0]) + np.pi
-            ) % (2 * np.pi) - np.pi
+            monkeypatch.setattr(folder_module, "_statevector_data", lambda _c, value=psi_shifted: value)
+            angles_shifted = f._get_angles(params)
             np.testing.assert_allclose(
-                angles_orig, angles_manual, atol=1e-10,
+                angles_orig, angles_shifted, atol=1e-10,
                 err_msg=f"mismatch at alpha={alpha}"
             )
 
@@ -633,8 +633,11 @@ class TestGetAnglesGlobalPhase:
         for _ in range(10):
             params = rng.uniform(-2 * np.pi, 2 * np.pi, f.n_params)
             angles = f._get_angles(params)
-            assert np.all(angles > -np.pi - 1e-10), "angle below -π"
-            assert np.all(angles <= np.pi + 1e-10), "angle above +π"
+            for angle, dof in zip(angles, f.dof_map):
+                if dof["type"] == "omega" and f.omega_mode == "window":
+                    assert f.OMEGA_MIN <= angle <= f.OMEGA_MAX
+                else:
+                    assert -np.pi - 1e-10 <= angle <= np.pi + 1e-10
 
     def test_angles_length_matches_total_angles(self):
         f = QuantumBiophysicsFolder("GGG")
@@ -1120,10 +1123,10 @@ class TestNonFiniteAngles:
             return np.full(orig_get_angles(params).shape, np.nan)
 
         monkeypatch.setattr(f, "_get_angles", _nan_angles)
-        terms = f.energy_function(np.zeros(f.n_params), return_terms=True)
-        assert isinstance(terms, dict)
-        assert "non_finite_penalty" in terms
-        assert terms["non_finite_penalty"] > 1e5
+        penalty = f.energy_function(np.zeros(f.n_params), return_terms=True)
+        assert np.isfinite(penalty)
+        assert "non_finite_penalty" in f.last_energy_terms
+        assert f.last_energy_terms["non_finite_penalty"] > 1e5
 
     def test_normal_angles_unchanged(self):
         """The guard must not affect the normal path (no monkeypatch)."""
@@ -1432,7 +1435,11 @@ class TestMode:
         angles = f._get_angles(params)
         assert angles.shape == (f.total_angles,)
         assert np.all(np.isfinite(angles))
-        assert np.all(angles >= -np.pi) and np.all(angles <= np.pi)
+        for angle, dof in zip(angles, f.dof_map):
+            if dof["type"] == "omega" and f.omega_mode == "window":
+                assert f.OMEGA_MIN <= angle <= f.OMEGA_MAX
+            else:
+                assert -np.pi <= angle <= np.pi
 
     def test_sampler_and_statevector_agree_coarsely(self):
         """Sampler angles should lie in (-π, π] like statevector angles."""

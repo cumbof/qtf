@@ -173,9 +173,9 @@ Optional extras:
 > ```
 > Installing OpenMM with `pip` may result in a broken package that fails to import (mismatched CUDA runtime, missing shared libraries, or failed C++ extension load).
 >
-> **GROMACS** (used by `qtf-relax`, `--gromacs_minimize`, and `gromacs_postprocess_structure()`) must be available as `gmx` or `gmx_mpi`. It can be installed system-wide on `PATH`, or inside the active conda environment:
+> **GROMACS 2026 or newer** (used by `qtf-relax`, `--gromacs_minimize`, and `gromacs_postprocess_structure()`) must be available as `gmx` or `gmx_mpi`. It can be installed system-wide on `PATH`, or inside the active conda environment:
 > ```bash
-> conda install -c conda-forge gromacs
+> conda install -c conda-forge "gromacs>=2026"
 > ```
 > Verify the environment before submitting long jobs:
 > ```bash

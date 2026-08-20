@@ -1324,7 +1324,8 @@ class QuantumBiophysicsFolder:
 
         return qc
 
-    def _nerf_step(self, a, b, c, bond_len, bond_angle, torsion):
+    @staticmethod
+    def _nerf_step(a, b, c, bond_len, bond_angle, torsion):
         """
         Natural Extension Reference Frame (NERF)
         This is the standard math for placing atom D given atoms A, B, C.
