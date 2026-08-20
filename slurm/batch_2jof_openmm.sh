@@ -7,13 +7,11 @@
 #SBATCH --error=../logs/qtf_2jof_openmm_%A_%a.err
 #SBATCH --time=48:00:00
 #SBATCH --mem-per-cpu=2G
-#SBATCH --partition=defq
-#SBATCH --mail-type=FAIL
-#SBATCH --mail-user=raubenb@ccf.org
+# Set site-specific partition and notification directives when submitting.
 
 set -eo pipefail
 
-source ~/miniforge3/bin/activate
+eval "$(conda shell.bash hook)"
 conda activate qtf
 
 set -u
