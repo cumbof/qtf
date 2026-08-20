@@ -166,9 +166,9 @@ Optional extras:
 >   ```bash
 >   conda install -c conda-forge openmm pdbfixer
 >   ```
-> - **GROMACS** (used by PHEAT external validation recipes and `gromacs_postprocess_structure()`) must be available as `gmx` or `gmx_mpi`. It can be installed system-wide on `PATH`, or inside the active conda environment:
+> - **GROMACS 2026 or newer** (used by PHEAT external validation recipes and `gromacs_postprocess_structure()`) must be available as `gmx` or `gmx_mpi`. Because GROMACS is an external executable rather than a Python package, it is not listed in `pyproject.toml`. Install it system-wide on `PATH`, or inside the active conda environment:
 >   ```bash
->   conda install -c conda-forge gromacs
+>   conda install -c conda-forge "gromacs>=2026"
 >   ```
 >   Verify the environment before submitting long jobs:
 >   ```bash
