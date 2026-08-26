@@ -253,6 +253,60 @@ QTF/backend objective energy from the previous ensemble, not the GROMACS
 post-minimization energy. `best_rmsd` selects the lowest previous reference
 RMSD when available; `first` maps replica N to the saved replica N vector.
 
+### `qtf fold-hardware` — cold starts and warm starts
+
+Hardware execution uses the same recipe and structure-rebuilding pipeline as
+simulation. If `--params-json` is omitted, QTF creates random circuit
+parameters (a hardware cold start). If it is supplied, QTF loads the selected
+replica's saved circuit parameters (a hardware warm start). When
+`--backend-name` is omitted, Qiskit IBM Runtime selects the least-busy
+operational backend; provide a backend name to request a specific device.
+
+Hardware cold start on the least-busy suitable IBM backend:
+
+```bash
+qtf fold-hardware \
+  --sequence YYDPETGTWY \
+  --recipe qtf-main-snapshot-equivalent \
+  --channel ibm_quantum_platform \
+  --shots 8192 \
+  --optimization-level 3 \
+  --sampler-max-mitigation \
+  --outdir outputs/hardware_cold_start
+```
+
+Hardware cold start on a named backend:
+
+```bash
+qtf fold-hardware \
+  --sequence YYDPETGTWY \
+  --recipe qtf-main-snapshot-equivalent \
+  --backend-name ibm_torino \
+  --channel ibm_quantum_platform \
+  --shots 8192 \
+  --optimization-level 3 \
+  --sampler-max-mitigation \
+  --outdir outputs/hardware_cold_start_named
+```
+
+Hardware warm start from replica 0 saved by a simulator run:
+
+```bash
+qtf fold-hardware \
+  --params-json outputs/example_fold/circuit_parameters \
+  --replica-id 0 \
+  --channel ibm_quantum_platform \
+  --shots 8192 \
+  --optimization-level 3 \
+  --sampler-max-mitigation \
+  --outdir outputs/hardware_warm_start
+```
+
+For an offline hardware-path test without IBM credentials, add
+`--local-simulator`. To skip the default post-run GROMACS refinement, add
+`--no-gromacs`. Hardware commands write the rebuilt PDB, result metadata,
+transpiled-circuit information, and validation artifacts under `--outdir`.
+
 ### `qtf vmd-trajectory` — VMD-compatible multi-model PDBs
 
 ```bash
