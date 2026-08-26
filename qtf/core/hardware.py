@@ -667,7 +667,8 @@ def main(argv=None):
     ap.add_argument("--backend-name", "--backend_name", dest="backend_name", default=None,
                     help="Specific IBM backend. If omitted, Runtime least_busy() selects an operational device.")
     ap.add_argument("--local-simulator", action="store_true",
-                    help="Explicitly use Aer locally instead of submitting an IBM hardware job.")
+                    help=("Testing/development mode: use Aer locally instead of submitting an IBM job. "
+                          "Use it for offline validation or continued parameter experimentation."))
     ap.add_argument("--channel", default=None, help="qiskit_ibm_runtime channel.")
     ap.add_argument("--instance", default=None, help="qiskit_ibm_runtime instance.")
     ap.add_argument("--token", default=None, help="qiskit_ibm_runtime API token.")
