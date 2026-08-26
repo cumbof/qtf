@@ -143,6 +143,7 @@ def _build_parser() -> argparse.ArgumentParser:
     fold.add_argument("--geometry-mode", default=None)
     fold.add_argument("--geometry-table", default=None)
     fold.add_argument("--geometry-profile", default=None)
+    fold.add_argument("--rebuild-method", choices=["pheat", "nerf"], default=None)
     fold.add_argument("--bond-angle-encoding", default=None)
     fold.add_argument("--tau-center-deg", type=float, default=None)
     fold.add_argument("--tau-span-deg", type=float, default=None)
@@ -375,6 +376,7 @@ def _qtf_argv(args, recipe: dict) -> list[str]:
         ("--geometry-mode", args.geometry_mode, "geometry_mode"),
         ("--geometry-table", args.geometry_table, "geometry_table"),
         ("--geometry-profile", args.geometry_profile, "geometry_profile"),
+        ("--rebuild-method", args.rebuild_method, "rebuild_method"),
         ("--max-chi", args.max_chi, "max_chi"),
         ("--bond-angle-encoding", args.bond_angle_encoding, "bond_angle_encoding"),
         ("--tau-center-deg", args.tau_center_deg, "tau_center_deg"),

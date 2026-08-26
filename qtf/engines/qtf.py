@@ -997,6 +997,7 @@ def _write_circuit_parameter_artifacts(
         "run_label": getattr(args, "run_label", None),
         "sequence": args.predict,
         "recipe": getattr(args, "phase_preset", None),
+        "rebuild_method": folder.rebuild_method,
         "n_params": int(folder.n_params),
         "params": vector.tolist(),
         "energy": float(energy),
@@ -1013,6 +1014,7 @@ def _write_circuit_parameter_artifacts(
         "format": "qtf.circuit_parameters.v1",
         "sequence": args.predict,
         "recipe": getattr(args, "phase_preset", None),
+        "rebuild_method": folder.rebuild_method,
         "n_params": int(folder.n_params),
         "replicas": [],
     }
@@ -10011,6 +10013,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--geometry-mode", default=None, help="Optional PHEAT geometry lookup mode.")
     parser.add_argument("--geometry-table", default=None, help="Optional PHEAT geometry table path or packaged table name.")
     parser.add_argument("--geometry-profile", default=None, help="Optional PHEAT geometry profile name.")
+    parser.add_argument("--rebuild-method", choices=["pheat", "nerf"], default="pheat",
+                        help="Cartesian reconstruction contract (default: pheat; nerf reproduces pre-PHEAT QTF).")
     parser.add_argument(
         "--bond-angle-encoding",
         choices=["centered", "raw"],
@@ -10399,6 +10403,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             geometry_mode=args.geometry_mode,
             geometry_table=args.geometry_table,
             geometry_profile=args.geometry_profile,
+            rebuild_method=args.rebuild_method or "pheat",
             score_model=phase_schedule.result.score_model,
             bond_angle_encoding=args.bond_angle_encoding,
             tau_center_deg=args.tau_center_deg,
@@ -10447,6 +10452,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "geometry_mode": args.geometry_mode,
         "geometry_table": args.geometry_table,
         "geometry_profile": args.geometry_profile,
+        "rebuild_method": folder.rebuild_method,
         "chi_selection": _chi_selection_summary(initial_geometry["max_chi"], initial_geometry["selective_chi_map"]),
         "selective_chi_map": {
             str(key): list(value)

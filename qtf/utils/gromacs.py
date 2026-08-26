@@ -285,8 +285,23 @@ def parse_last_xvg_value(path: Path) -> float:
 
 def parse_gromacs_log_stats(log_path: Path) -> Dict[str, object]:
     txt = log_path.read_text(errors="ignore") if log_path.exists() else ""
-    vals = [float(x) for x in re.findall(r"Maximum force\s*=\s*([0-9.eE+-]+)", txt)]
-    final_max_force = vals[-1] if vals else float("nan")
+    vals = [
+        float(x)
+        for x in re.findall(
+            r"Maximum\s+force\s*=\s*([0-9.eE+-]+)",
+            txt,
+            flags=re.IGNORECASE,
+        )
+    ]
+    if vals:
+        final_max_force = vals[-1]
+    else:
+        convergence = re.search(
+            r"converged\s+to\s+Fmax\s*<\s*([0-9.eE+-]+)",
+            txt,
+            flags=re.IGNORECASE,
+        )
+        final_max_force = float(convergence.group(1)) if convergence else float("nan")
     return {
         "gromacs_converged_fmax_lt_100": bool("converged to Fmax < 100" in txt or "converged to Fmax < 100.0" in txt),
         "gromacs_final_max_force": float(final_max_force),

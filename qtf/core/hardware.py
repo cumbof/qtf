@@ -617,6 +617,7 @@ def _build_folder_from_manifest(payload: dict, args) -> QuantumBiophysicsFolder:
         geometry_mode=geometry.get("geometry_mode"),
         geometry_table=geometry.get("geometry_table"),
         geometry_profile=geometry.get("geometry_profile"),
+        rebuild_method=str(payload.get("rebuild_method") or args.rebuild_method or "pheat"),
         score_model=str(result.get("score_model") or "pheat-custom-energy-v1"),
         circuit_template=recipe.get("circuit_template"),
         circuit=recipe.get("circuit"),
@@ -702,6 +703,7 @@ def main(argv=None):
                     help="Protein sequence; required when --params-json is omitted.")
     ap.add_argument("--recipe", default="qtf-main-snapshot-equivalent",
                     help="Recipe defining the circuit and geometry when random parameters are used.")
+    ap.add_argument("--rebuild-method", choices=["pheat", "nerf"], default=None)
     ap.add_argument("--seed", type=int, default=None,
                     help="Optional seed for random circuit-parameter initialization.")
     ap.add_argument("--chi_mode", default="all",
@@ -831,6 +833,7 @@ def main(argv=None):
             "random_seed": args.seed if parameter_source == "random" else None,
             "circuit_parameters": params.tolist(),
             "sequence": folder.sequence,
+            "rebuild_method": folder.rebuild_method,
             "replica_id": payload.get("replica_id"),
             "replica_number": payload.get("replica_number", payload.get("replica")),
             "ensemble_id": payload.get("ensemble_id"),

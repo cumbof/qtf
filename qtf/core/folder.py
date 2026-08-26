@@ -24,7 +24,7 @@ import math
 from typing import Any, Optional
 
 import numpy as np
-from pheat import Atom, HeavyAtomStructure, ResidueGeometry, ResidueGeometryStructure, write_pdb
+from pheat import Atom, Bond, HeavyAtomStructure, ResidueGeometry, ResidueGeometryStructure, write_pdb
 from pheat.models import RESIDUE_GEOMETRY_BACKBONE_LENGTHS
 from pheat.residue_geometry import (
     ANGLE_CA_C_N,
@@ -48,6 +48,7 @@ from qiskit.quantum_info import Statevector
 from scipy.optimize import minimize
 
 from qtf.core.circuits import build_circuit
+from pheat.nerf import NerfFolder
 from qtf.core.tracker import LandscapeTracker
 from qtf.scoring import canonical_score_model, is_qtf_score_model, score_classic_folder, score_pheat_structure
 
@@ -205,6 +206,7 @@ class QuantumBiophysicsFolder:
         geometry_mode: Optional[str] = None,
         geometry_table: Optional[Any] = None,
         geometry_profile: Optional[str] = None,
+        rebuild_method: str = "pheat",
         score_model: str = "pheat-generic",
         bond_angle_encoding: str = "centered",
         tau_center_deg: float = ANGLE_N_CA_C,
@@ -249,6 +251,16 @@ class QuantumBiophysicsFolder:
         self.geometry_mode = None if geometry_mode in (None, "") else str(geometry_mode)
         self.geometry_table = None if geometry_table in (None, "") else geometry_table
         self.geometry_profile = None if geometry_profile in (None, "") else str(geometry_profile)
+        self.rebuild_method = str(rebuild_method or "pheat").strip().lower().replace("_", "-")
+        if self.rebuild_method not in {"pheat", "nerf"}:
+            raise ValueError("rebuild_method must be 'pheat' or 'nerf'")
+        self._legacy_nerf_folder = None
+        if self.rebuild_method == "nerf":
+            self._legacy_nerf_folder = NerfFolder(
+                self.sequence,
+                chi_mode="all",
+                selective_chi_map=self.selective_chi_map,
+            )
         self.reference_residue_geometry = reference_residue_geometry
         self.score_model = canonical_score_model(score_model)
         self.active_score_model = self.score_model
@@ -381,6 +393,19 @@ class QuantumBiophysicsFolder:
 
 
     def _rebuild_dof_map(self) -> None:
+        if self.rebuild_method == "nerf" and self._legacy_nerf_folder is not None:
+            self.dof_map = [dict(item) for item in self._legacy_nerf_folder.dof_map]
+            self.dof_specs = [
+                {"kind": "angle", "res": int(item["res"]), "type": str(item["type"])}
+                for item in self.dof_map
+            ]
+            self.pheat_angle_specs = []
+            self.pheat_chi_dofs_by_residue = {}
+            self.length_dof_specs = []
+            self.total_angle_dofs = len(self.dof_map)
+            self.total_length_dofs = 0
+            self.total_dofs = len(self.dof_map)
+            return
         self.pheat_angle_specs = residue_angle_specs(
             self.sequence,
             selective_chi_map=self.selective_chi_map or None,
@@ -1011,6 +1036,33 @@ class QuantumBiophysicsFolder:
     def structure_from_angle_vector(self, angle_vector: np.ndarray):
         """Build a PHEAT heavy-atom structure from a QTF angle vector."""
 
+        if self.rebuild_method == "nerf":
+            legacy = self._legacy_nerf_folder
+            if legacy is None:
+                raise RuntimeError("NERF backend was not initialized")
+            current = {f"{x['res']}_{x['type']}": value for x, value in zip(self.dof_map, angle_vector)}
+            legacy_angles = np.array(
+                [current.get(f"{x['res']}_{x['type']}", 0.0) for x in legacy.dof_map],
+                dtype=float,
+            )
+            coords, labels, bonds = legacy.build_full_structure(legacy_angles)
+            atoms = []
+            from pheat.residues import one_to_three
+            for serial, (coord, label) in enumerate(zip(coords, labels), start=1):
+                rid, atom_name, element = label
+                atoms.append(Atom(
+                    name=str(atom_name), element=str(element),
+                    x=float(coord[0]), y=float(coord[1]), z=float(coord[2]),
+                    resname=one_to_three(self.sequence[int(rid)]),
+                    chain_id="A", resseq=int(rid) + 1, serial=serial,
+                ))
+            return HeavyAtomStructure(
+                atoms=atoms, name=f"qtf-nerf:{self.sequence}",
+                metadata={"source": "qtf", "rebuild_method": "nerf"},
+                bonds=[Bond(atom_index_1=int(a), atom_index_2=int(b)) for a, b in bonds],
+                atom_scope="all",
+            )
+
         structure = structure_from_residue_geometry(
             self.angle_vector_to_residue_geometry(angle_vector),
             include_terminal_oxt=self.include_terminal_oxt,
@@ -1121,12 +1173,24 @@ class QuantumBiophysicsFolder:
                     bfactor=0.0,
                 )
             )
+        structure_bonds = []
+        if self.rebuild_method == "nerf" and self._legacy_nerf_folder is not None:
+            # The legacy NERF topology is part of its coordinate contract.  Keep
+            # it attached to the saved PHEAT structure so domain filtering and
+            # the custom VDW term use the same 1-2/1-3/1-4 exclusions as the
+            # archived QTF implementation.
+            for atom_a, atom_b in getattr(self._legacy_nerf_folder, "static_bonds", ()):
+                if 0 <= int(atom_a) < len(atoms) and 0 <= int(atom_b) < len(atoms):
+                    structure_bonds.append(
+                        Bond(atom_index_1=int(atom_a), atom_index_2=int(atom_b))
+                    )
         return HeavyAtomStructure(
             atoms=atoms,
             name=f"qtf:{self.sequence}",
-            metadata={"source": "qtf"},
+            metadata={"source": "qtf", "rebuild_method": self.rebuild_method},
             disulfide_bonds=self._template_disulfide_bonds(),
-            atom_scope="heavy",
+            bonds=structure_bonds,
+            atom_scope="all" if any(atom.element == "H" for atom in atoms) else "heavy",
         )
 
     @staticmethod
@@ -1154,6 +1218,16 @@ class QuantumBiophysicsFolder:
         labels : list of (res_id, atom_name, element)
         bonds  : list of (atom_idx_a, atom_idx_b)
         """
+        if self.rebuild_method == "nerf":
+            legacy = self._legacy_nerf_folder
+            if legacy is None:
+                raise RuntimeError("NERF backend was not initialized")
+            current = {f"{x['res']}_{x['type']}": value for x, value in zip(self.dof_map, angle_vector)}
+            legacy_angles = np.array(
+                [current.get(f"{x['res']}_{x['type']}", 0.0) for x in legacy.dof_map],
+                dtype=float,
+            )
+            return legacy.build_full_structure(legacy_angles)
         return self._structure_to_arrays(self.structure_from_angle_vector(angle_vector))
 
     def _initialize_topology_cache(self) -> None:
@@ -1288,6 +1362,19 @@ class QuantumBiophysicsFolder:
             "pheat-coarse-protein-folding-v1",
         }:
             score_options.setdefault("decoded_torsions", self._angle_dict(angle_vector))
+            if self.rebuild_method == "nerf":
+                score_options.setdefault("legacy_qtf_compatibility", True)
+                score_options.setdefault("domain", "full")
+            # Preserve the archived QTF custom scorer's staged scaling when the
+            # objective is evaluated through PHEAT.  The PHEAT implementation
+            # receives explicit values because it cannot infer QTF's optimizer
+            # phase from a standalone structure.
+            if int(getattr(self, "current_stage", 1)) == 3:
+                score_options.setdefault("hydrophobic_gamma", 2.5)
+                score_options.setdefault("end_to_end_weight", 1.5)
+            else:
+                score_options.setdefault("hydrophobic_gamma", 15.0)
+                score_options.setdefault("end_to_end_weight", 8.0)
         return score_options
 
     def score_model_for_params(
