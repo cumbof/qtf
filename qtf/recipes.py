@@ -57,6 +57,7 @@ def resolve_recipe(name: str, recipe_file: Optional[str | Path] = None) -> dict[
     """Return a deep copy of the selected recipe."""
 
     recipes = load_recipes(recipe_file)
+    name = str(name)
     if name not in recipes:
         available = ", ".join(sorted(recipes)) or "none"
         raise KeyError(f"Unknown recipe {name!r}. Available recipes: {available}")

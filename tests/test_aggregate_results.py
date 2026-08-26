@@ -13,7 +13,7 @@ def _write_replica(root, replica_id, energy, rmsd):
         "replica_id": replica_id,
         "seed": replica_id + 10,
         "sequence": "AA",
-        "recipe": "qtf-main-snapshot-equivalent",
+        "recipe": "qtf-default-config-snapshots",
         "objective_total": energy,
         "optimizer_objective": energy,
         "score_total": energy,

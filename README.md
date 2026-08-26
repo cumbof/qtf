@@ -139,8 +139,9 @@ qtf/
 |---------|----------------|---------|
 | `numpy` | 1.24 | Array mathematics, distance matrices, linear algebra |
 | `scipy` | 1.10 | COBYLA and SLSQP optimisers (`scipy.optimize.minimize`) |
-| `qiskit` | 1.0 | Ansatz construction; exact statevector simulation |
-| `qiskit-aer` | 0.14 | GPU/CPU statevector simulation backend |
+| `qiskit` | 2.0 | Ansatz construction; exact statevector simulation |
+| `qiskit-aer` | 0.17 | GPU/CPU statevector simulation backend |
+| `qiskit-ibm-runtime` | 0.40 | IBM Quantum Runtime SamplerV2 hardware execution |
 | `plotly` | 5.18 | Interactive 3-D and 2-D Plotly figures |
 | `pandas` | 2.0 | Per-replica statistics `DataFrame`; CSV export |
 | `pheat` | 0.2 | Heavy-atom reconstruction, scoring, external-engine preparation, and report assets |
@@ -160,6 +161,10 @@ Optional extras:
 > [!NOTE]
 >
 > QTF's default `custom` energy backend works out of the box — no additional dependencies required.
+>
+> The required Qiskit stack is intentionally shared by simulator and hardware
+> workflows. QTF is tested with Qiskit 2.3, Qiskit Aer 0.17, and IBM Runtime
+> 0.48; the declared floors track the compatible 2.x/0.17+/0.40+ API line.
 >
 > - External physics engines are configured in fold recipes through PHEAT scorer/evaluator options.
 > - **OpenMM/PDBFixer** are intentionally not included in QTF's pip extras. Install them via conda-forge when using OpenMM-backed PHEAT evaluators:
@@ -211,7 +216,7 @@ QTF installs one canonical command, `qtf`.
 ### `qtf fold-simulation` — recipe-driven folding
 
 ```bash
-qtf fold-simulation qtf-main-equivalent \
+qtf fold-simulation qtf-default-config \
   --sequence YYDPETGTWY \
   --reference-structure pdb/5AWL.pdb \
   --outdir outputs/example_fold
@@ -225,10 +230,10 @@ Useful discovery commands:
 
 ```bash
 qtf fold-simulation --list-recipes
-qtf fold-simulation --show-recipe qtf-main-equivalent
+qtf fold-simulation --show-recipe qtf-default-config
 ```
 
-`qtf fold-simulation` runs named YAML recipes. The built-in main-equivalent recipe uses
+`qtf fold-simulation` runs named YAML recipes. The built-in `qtf-default-config` recipe uses
 PHEAT geometry/scoring through the native `pheat-custom-energy-v1` scorer and reports
 RMSD only when a reference structure is provided.
 
@@ -238,7 +243,7 @@ Completed fold runs also save final circuit parameters under
 or hardware runs:
 
 ```bash
-qtf fold-simulation qtf-main-equivalent \
+qtf fold-simulation qtf-default-config \
   --sequence YYDPETGTWY \
   --reference-structure pdb/5AWL.pdb \
   --initial-params outputs/example_fold \
@@ -267,7 +272,7 @@ Hardware cold start on the least-busy suitable IBM backend:
 ```bash
 qtf fold-hardware \
   --sequence YYDPETGTWY \
-  --recipe qtf-main-snapshot-equivalent \
+  --recipe qtf-default-config-snapshots \
   --channel ibm_quantum_platform \
   --shots 8192 \
   --optimization-level 3 \
@@ -280,7 +285,7 @@ Hardware cold start on a named backend:
 ```bash
 qtf fold-hardware \
   --sequence YYDPETGTWY \
-  --recipe qtf-main-snapshot-equivalent \
+  --recipe qtf-default-config-snapshots \
   --backend-name ibm_torino \
   --channel ibm_quantum_platform \
   --shots 8192 \

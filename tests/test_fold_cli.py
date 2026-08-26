@@ -17,14 +17,14 @@ def test_builtin_recipes_load():
     from qtf.recipes import load_builtin_recipes
 
     recipes = load_builtin_recipes()
-    assert "engine" not in recipes["qtf-main-equivalent"]
-    assert recipes["qtf-main-equivalent"]["phases"][0]["score_model"] == "pheat-custom-energy-v1"
+    assert "engine" not in recipes["qtf-default-config"]
+    assert recipes["qtf-default-config"]["phases"][0]["score_model"] == "pheat-custom-energy-v1"
     assert recipes["qtf-heavy-atom-phased"]["phases"][0]["score_model"].startswith("pheat-")
-    assert recipes["qtf-main-equivalent"]["circuit_template"]["name"] == "EfficientSU2"
+    assert recipes["qtf-default-config"]["circuit_template"]["name"] == "EfficientSU2"
     assert recipes["qtf-heavy-atom-phased"]["circuit_template"]["source"] == "qtf"
-    assert recipes["qtf-main-equivalent"]["geometry"]["stored_angles"] == []
-    assert recipes["qtf-main-equivalent"]["geometry"]["stored_lengths"] == []
-    assert "chi_mode" not in recipes["qtf-main-equivalent"]["geometry"]
+    assert recipes["qtf-default-config"]["geometry"]["stored_angles"] == []
+    assert recipes["qtf-default-config"]["geometry"]["stored_lengths"] == []
+    assert "chi_mode" not in recipes["qtf-default-config"]["geometry"]
     assert "chi_mode" not in recipes["qtf-heavy-atom-phased"]["geometry"]
     assert recipes["qtf-heavy-atom-phased"]["metrics"]["atom_sets"] == ["ca", "backbone", "all-heavy"]
     assert recipes["qtf-heavy-atom-phased"]["report"]["structure_domain"] == "protein-heavy"
@@ -1060,7 +1060,7 @@ def test_transpile_defaults_resolve_to_unset_and_gate_estimates_include_baseline
         "--replica-id",
         "0",
         "--recipe",
-        "qtf-main-equivalent",
+        "qtf-default-config",
         "--backend",
         "statevector-shots",
         "--shots",
@@ -1090,7 +1090,7 @@ def test_transpile_overrides_resolve_for_scouting_phases_readouts_and_gate_estim
         "--replica-id",
         "0",
         "--recipe",
-        "qtf-main-equivalent",
+        "qtf-default-config",
         "--backend",
         "statevector-shots",
         "--shots",
@@ -1150,7 +1150,7 @@ def test_transpile_optimization_level_rejects_invalid_values():
         "--replica-id",
         "0",
         "--recipe",
-        "qtf-main-equivalent",
+        "qtf-default-config",
         "--transpile-optimization-level",
         "4",
     ])
@@ -1275,7 +1275,7 @@ def test_main_snapshot_equivalent_schedule_resolves():
         "--replica-id",
         "0",
         "--recipe",
-        "qtf-main-snapshot-equivalent",
+        "qtf-default-config-snapshots",
         "--backend",
         "statevector",
         "--shots",
@@ -1284,7 +1284,7 @@ def test_main_snapshot_equivalent_schedule_resolves():
         "1",
     ])
     schedule = qtf_engine._resolve_phase_schedule(args, parser, global_shots=16, global_maxiter=1)
-    assert schedule.preset == "qtf-main-snapshot-equivalent"
+    assert schedule.preset == "qtf-default-config-snapshots"
     assert [phase.name for phase in schedule.phases] == ["collapse", "refine", "relax"]
     assert {phase.optimizer for phase in schedule.phases} == {"COBYLA"}
     assert {phase.score_model for phase in schedule.phases} == {"pheat-custom-energy-v1"}
@@ -1876,7 +1876,7 @@ def test_fold_cli_passes_snapshot_options_to_engine():
 
     args = _build_parser().parse_args([
         "fold-simulation",
-        "qtf-main-snapshot-equivalent",
+        "qtf-default-config-snapshots",
         "--sequence",
         "GA",
         "--top-k-snapshots",
@@ -1886,7 +1886,7 @@ def test_fold_cli_passes_snapshot_options_to_engine():
         "--snapshot-sort-by",
         "rmsd",
     ])
-    argv = _qtf_argv(args, resolve_recipe("qtf-main-snapshot-equivalent"))
+    argv = _qtf_argv(args, resolve_recipe("qtf-default-config-snapshots"))
     assert argv[argv.index("--top-k-snapshots") + 1] == "12"
     assert argv[argv.index("--snapshot-energy-gap") + 1] == "0.1"
     assert argv[argv.index("--snapshot-sort-by") + 1] == "rmsd"
@@ -1898,7 +1898,7 @@ def test_fold_cli_passes_initial_params_options_to_engine(tmp_path):
 
     args = _build_parser().parse_args([
         "fold-simulation",
-        "qtf-main-snapshot-equivalent",
+        "qtf-default-config-snapshots",
         "--sequence",
         "GA",
         "--initial-params",
@@ -1906,7 +1906,7 @@ def test_fold_cli_passes_initial_params_options_to_engine(tmp_path):
         "--initial-params-select",
         "best_energy",
     ])
-    argv = _qtf_argv(args, resolve_recipe("qtf-main-snapshot-equivalent"))
+    argv = _qtf_argv(args, resolve_recipe("qtf-default-config-snapshots"))
     assert argv[argv.index("--initial-params") + 1] == str(tmp_path)
     assert argv[argv.index("--initial-params-select") + 1] == "best_energy"
 
@@ -1917,13 +1917,13 @@ def test_fold_cli_passes_seed_offset_to_engine():
 
     args = _build_parser().parse_args([
         "fold-simulation",
-        "qtf-main-snapshot-equivalent",
+        "qtf-default-config-snapshots",
         "--sequence",
         "GA",
         "--seed-offset",
         "17",
     ])
-    argv = _qtf_argv(args, resolve_recipe("qtf-main-snapshot-equivalent"))
+    argv = _qtf_argv(args, resolve_recipe("qtf-default-config-snapshots"))
     assert argv[argv.index("--seed-offset") + 1] == "17"
 
 
@@ -1933,13 +1933,13 @@ def test_fold_cli_passes_replica_count_to_engine():
 
     args = _build_parser().parse_args([
         "fold-simulation",
-        "qtf-main-snapshot-equivalent",
+        "qtf-default-config-snapshots",
         "--sequence",
         "GA",
         "--n-runs",
         "5",
     ])
-    argv = _qtf_argv(args, resolve_recipe("qtf-main-snapshot-equivalent"))
+    argv = _qtf_argv(args, resolve_recipe("qtf-default-config-snapshots"))
     assert argv[argv.index("--replica-count") + 1] == "5"
 
 

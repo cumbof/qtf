@@ -701,7 +701,7 @@ def main(argv=None):
     # replica reconstructs the same folder identity.
     ap.add_argument("--sequence", default=None,
                     help="Protein sequence; required when --params-json is omitted.")
-    ap.add_argument("--recipe", default="qtf-main-snapshot-equivalent",
+    ap.add_argument("--recipe", default="qtf-default-config-snapshots",
                     help="Recipe defining the circuit and geometry when random parameters are used.")
     ap.add_argument("--rebuild-method", choices=["pheat", "nerf"], default=None)
     ap.add_argument("--seed", type=int, default=None,
