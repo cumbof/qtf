@@ -18,7 +18,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install package and docs dependencies
-        run: pip install -e ".[docs]"
+        run: |
+          pip install "pheat @ git+https://github.com/BlankenbergLab/pheat.git@main"
+          pip install -e ".[docs]"
 
       - name: Deploy to GitHub Pages
         run: mkdocs gh-deploy --force
