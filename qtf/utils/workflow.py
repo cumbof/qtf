@@ -534,6 +534,62 @@ def rmsd_between_structures(
     return float(rmsd), meta
 
 
+def align_structure_to_reference(
+    model_coords: np.ndarray,
+    model_labels: List[Tuple[int, str, str]],
+    reference_coords: np.ndarray,
+    reference_labels: List[Tuple[int, str, str]],
+    rmsd_mode: str,
+    rmsd_residue_scope: str,
+) -> Tuple[np.ndarray, float, Dict[str, object], Dict[str, np.ndarray]]:
+    """Rigidly align a complete model using its matched RMSD atom subset."""
+    model_sel, model_keys, model_residues = select_rmsd_coords(
+        model_coords, model_labels, rmsd_mode, rmsd_residue_scope
+    )
+    ref_sel, ref_keys, ref_residues = select_rmsd_coords(
+        reference_coords, reference_labels, rmsd_mode, rmsd_residue_scope
+    )
+    ref_map = {key: coord for key, coord in zip(ref_keys, ref_sel)}
+    matched_model = []
+    matched_reference = []
+    missing = []
+    for key, coord in zip(model_keys, model_sel):
+        reference_coord = ref_map.get(key)
+        if reference_coord is None:
+            missing.append(key)
+            continue
+        matched_model.append(coord)
+        matched_reference.append(reference_coord)
+    if not matched_model:
+        raise ValueError(f"No common atoms found for rmsd_mode={rmsd_mode}")
+
+    moving = np.asarray(matched_model, dtype=float)
+    target = np.asarray(matched_reference, dtype=float)
+    moving_centroid = moving.mean(axis=0)
+    target_centroid = target.mean(axis=0)
+    covariance = (moving - moving_centroid).T @ (target - target_centroid)
+    left, _singular_values, right_transpose = np.linalg.svd(covariance)
+    if np.linalg.det(left) * np.linalg.det(right_transpose) < 0.0:
+        left[:, -1] *= -1.0
+    rotation = left @ right_transpose
+    translation = target_centroid - moving_centroid @ rotation
+    aligned = np.asarray(model_coords, dtype=float) @ rotation + translation
+    aligned_matched = moving @ rotation + translation
+    rmsd = float(np.sqrt(np.mean(np.sum((aligned_matched - target) ** 2, axis=1))))
+
+    n_residues = len(model_residues) if model_residues else len(ref_residues)
+    metadata = rmsd_selection_metadata(
+        rmsd_mode,
+        rmsd_residue_scope,
+        n_atoms=len(model_sel),
+        n_residues=n_residues,
+        n_matched=len(moving),
+        n_missing=len(missing),
+    )
+    transform = {"rotation": rotation, "translation": translation}
+    return aligned, rmsd, metadata, transform
+
+
 def calculate_metrics(ca_coords: np.ndarray) -> Dict[str, float]:
     end_to_end = float(np.linalg.norm(ca_coords[0] - ca_coords[-1]))
     centroid = np.mean(ca_coords, axis=0)

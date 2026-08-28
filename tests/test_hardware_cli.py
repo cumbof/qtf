@@ -1,6 +1,9 @@
 from argparse import Namespace
 
+import numpy as np
+
 import qtf.core.hardware as hardware
+from qtf.utils import workflow
 
 
 class _FakeService:
@@ -63,3 +66,20 @@ def test_hardware_backend_honors_explicit_name(monkeypatch):
     service = _FakeService.instances[-1]
     assert service.backend_calls == ["ibm_example"]
     assert service.least_busy_calls == []
+
+
+def test_hardware_alignment_restores_complete_structure_coordinates():
+    labels = [(0, "CA", "C"), (1, "CA", "C"), (2, "CA", "C"), (1, "CB", "C")]
+    model = np.asarray([[0, 0, 0], [1, 0, 0], [1, 1, 0], [1, 0, 1]], dtype=float)
+    rotation = np.asarray([[0, -1, 0], [1, 0, 0], [0, 0, 1]], dtype=float)
+    translation = np.asarray([4, 3, 2], dtype=float)
+    reference = model @ rotation + translation
+
+    aligned, rmsd, metadata, transform = workflow.align_structure_to_reference(
+        model, labels, reference, labels, "ca", "all"
+    )
+
+    np.testing.assert_allclose(aligned, reference, atol=1e-12)
+    assert rmsd < 1e-12
+    assert metadata["rmsd_n_matched"] == 3
+    assert transform["rotation"].shape == (3, 3)
